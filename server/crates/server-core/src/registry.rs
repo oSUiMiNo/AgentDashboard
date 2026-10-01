@@ -342,6 +342,8 @@ pub struct SessionRegistry {
     /// 一覧から外したカードの印（実装レビュー第5回 Astra 1）。**`records` のロックを握ったまま
     /// 見る・立てる**（[`Self::drop_record`]・[`Self::record_for`]）。
     removed: Mutex<RemovedCards>,
+    /// 次の照合の読み取りを1回失敗させる（**テスト専用**。[`Self::照合の読みを1回失敗させる`]）
+    reconcile_fail_once: AtomicBool,
     /// 番号付きの頼みの控え（実装レビュー第7回 Astra 3・4。[`OpLedger`]）。**他のロックと跨がない**
     ops: Mutex<OpLedger>,
     events: broadcast::Sender<AccountEvent>,
@@ -426,24 +428,35 @@ pub struct SessionRegistry {
 /// ので、時間で失効させる理由は無い。量の上限（[`REMOVED_CARDS_KEPT`]）は**メモリを守るためだけ**
 /// で、溢れたら古い順に忘れる——忘れたカードへの報告も、手元に記録が無ければ [`SessionRegistry::upsert`]
 /// が DB で外したことを確かめて捨てる。
+///
+/// # 印はアカウントごと（実装レビュー第9回 Astra 1）
+///
+/// 以前はカード ID だけで持っていた。他のアカウントのカード ID を名指しした「外した」の報告が、
+/// 手元に記録の無いカードに印を立てると、**正当な持ち主の報告まで記録を作り直せなくなった**
+/// （他のアカウントから一覧を消せる）。印は「どのアカウントが外したか」と組で持ち、見るときも
+/// 記録の持ち主と組で見る。
 #[derive(Default)]
 struct RemovedCards {
-    cards: HashSet<CardId>,
+    cards: HashSet<(Uuid, CardId)>,
     /// 外した順（溢れたときに古いものから忘れるため）
-    order: VecDeque<CardId>,
+    order: VecDeque<(Uuid, CardId)>,
 }
 
 impl RemovedCards {
-    fn mark(&mut self, card_id: CardId) {
-        if !self.cards.insert(card_id) {
+    fn mark(&mut self, account_id: Uuid, card_id: CardId) {
+        if !self.cards.insert((account_id, card_id)) {
             return;
         }
-        self.order.push_back(card_id);
+        self.order.push_back((account_id, card_id));
         while self.order.len() > REMOVED_CARDS_KEPT {
             if let Some(oldest) = self.order.pop_front() {
                 self.cards.remove(&oldest);
             }
         }
+    }
+
+    fn contains(&self, account_id: Uuid, card_id: CardId) -> bool {
+        self.cards.contains(&(account_id, card_id))
     }
 }
 
@@ -714,6 +727,7 @@ impl SessionRegistry {
             db,
             records: Mutex::new(records),
             removed: Mutex::new(RemovedCards::default()),
+            reconcile_fail_once: AtomicBool::new(false),
             ops: Mutex::new(OpLedger::default()),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
@@ -1964,10 +1978,21 @@ impl SessionRegistry {
                 // 名乗り直しと行き違ったぶんを素直に取り込むと、記録が作り直されて
                 // 一覧へ戻ってくる。しかも `list` はメモリの記録を見るので、
                 // **DB では外れているのに画面には出続ける**という食い違いになる
-                if self.get(card_id).is_none()
-                    && matches!(self.stored(card_id).await, Ok(Some((_, true, _, _))))
-                {
-                    return;
+                //
+                // **手元に記録があっても DB を見る**（実装レビュー第9回 Astra 2）。手元の記録は、
+                // 外した知らせを購読していなかった間の古いものでありうる。外れていたら古い記録を
+                // 外し、このサーバのブラウザにも外した知らせを配る
+                match self.stored(card_id).await {
+                    Ok(Some((owner, true, _, _))) if owner == account_id => {
+                        self.drop_stale(account_id, card_id, Reach::ThisInstance);
+                        return;
+                    }
+                    Ok(Some((_, true, _, _))) => return,
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(%card_id, "跨ぎで届いたカードが外されていないかを確かめられません: {err}");
+                        return;
+                    }
                 }
                 let record = match self.record_for(account_id, card_id).await {
                     Ok(Some(record)) => record,
@@ -1992,7 +2017,7 @@ impl SessionRegistry {
                 if self.owned(account_id, card_id).is_none() {
                     return;
                 }
-                self.drop_record(card_id);
+                self.drop_record(account_id, card_id);
                 self.publish_local(account_id, ServerMessage::SessionRemoved { card_id });
             }
 
@@ -2516,7 +2541,9 @@ impl SessionRegistry {
         // 残っている**（切替の結果配信・見張りの1周・処理中のフック）。それを素直に
         // 取り込むと記録が作り直され、消したはずのカードが一覧へ戻ってくる。
         //
-        // 記録が手元に無いときだけ DB を見るので、通常の更新に問い合わせは増えない。
+        // 記録が手元に無いときは、ここで DB を見る。手元にあるときは見ないが、書く段で
+        // 「外していない行」に限って書くので、他のサーバで外されていれば書けずに止まる
+        // （実装レビュー第9回 Astra 2）。問い合わせは増えない。
         // CardId は UUIDv4 なので、外したIDが後から別のセッションに割り当たることもない
         // 既に知っているカードなら、生まれた時刻と名前は**記録の側が正**（下記）
         let mut 記録の生まれた時刻 = None;
@@ -2658,7 +2685,13 @@ impl SessionRegistry {
             );
         }
 
-        self.write_session(origin, &meta).await?;
+        // **DB が外したと言ったら、書かずにやめる**（実装レビュー第9回 Astra 2）。上の確かめは記録が
+        // 手元にあれば DB を見ないが、手元の記録は外した知らせを購読していなかった間の古いもので
+        // ありうる。書くのを「外していない行」に限り、書けなかったら古い記録を外す
+        if !self.write_session(origin, &meta).await? {
+            self.drop_stale(origin.account_id, meta.card_id, Reach::AllInstances);
+            return Ok(());
+        }
 
         self.止め口(更新の止め所::記録を取る前).await;
         // **外したカードの記録は作り直さない**（実装レビュー第5回 Astra 1）。上の確かめは記録が
@@ -2695,8 +2728,7 @@ impl SessionRegistry {
             .removed
             .lock()
             .expect("ロックが壊れていない")
-            .cards
-            .contains(&record.card_id);
+            .contains(record.account_id, record.card_id);
         if removed {
             send(ServerMessage::SessionRemoved {
                 card_id: record.card_id,
@@ -2706,13 +2738,38 @@ impl SessionRegistry {
 
     /// 手元の記録を外し、外した印を立てる（実装レビュー第5回 Astra 1）。**同じロックの中で行う**
     /// ——分けると、その間に [`Self::record_for`] が記録を作り直せる。知らせは呼んだ側が配る。
-    fn drop_record(&self, card_id: CardId) {
+    ///
+    /// **そのカードが `account_id` のものだと確かめてから呼ぶ**（実装レビュー第9回 Astra 1）。
+    /// 印はそのアカウントにだけ立つ。
+    fn drop_record(&self, account_id: Uuid, card_id: CardId) {
         let mut records = self.records.lock().expect("ロックが壊れていない");
         records.remove(&card_id);
         self.removed
             .lock()
             .expect("ロックが壊れていない")
-            .mark(card_id);
+            .mark(account_id, card_id);
+    }
+
+    /// 他のサーバで外されたカードの、手元に残った古い記録を外す（実装レビュー第9回 Astra 2）。
+    ///
+    /// 外した知らせはアカウントの知らせに乗って回るが、このサーバにそのアカウントのブラウザが
+    /// 居なければ購読しておらず、記録が残る。残ったまま PC の報告を取り込むと、外したカードを
+    /// 一覧へ配り直し、照合も「手元にある＝外していない」と読んでいた。**DB が外したと言ったら、
+    /// 手元の記録を外して、外した知らせを配り直す**（最後の知らせを「外した」に揃える）。
+    fn drop_stale(&self, account_id: Uuid, card_id: CardId, reach: Reach) {
+        let had = self.owned(account_id, card_id).is_some();
+        self.drop_record(account_id, card_id);
+        if had {
+            tracing::info!(
+                %card_id,
+                "他のサーバで一覧から外されたカードの古い記録が残っていたので、外しました"
+            );
+            let message = ServerMessage::SessionRemoved { card_id };
+            match reach {
+                Reach::AllInstances => self.publish(account_id, message),
+                Reach::ThisInstance => self.publish_local(account_id, message),
+            }
+        }
     }
 
     /// 更新を決めた所で1回止める（**テスト専用**）。止めるのは、次にそこへ来た更新1本だけ。
@@ -2886,7 +2943,7 @@ impl SessionRegistry {
         // 行は消さない。**履歴を残すため**——カードを一覧から外しても、
         // 何をしたセッションだったかは辿れる。**持ち主も条件に入れる**ので、
         // 他人のカードのIDを名指しして消すことはできない
-        entity::sessions::Entity::update_many()
+        let updated = entity::sessions::Entity::update_many()
             .col_expr(
                 entity::sessions::Column::Archived,
                 sea_orm::sea_query::Expr::value(true),
@@ -2895,7 +2952,18 @@ impl SessionRegistry {
             .filter(entity::sessions::Column::AccountId.eq(origin.account_id))
             .exec(&self.db)
             .await?;
-        self.drop_record(card_id);
+        // **書けなかったなら、誰のカードかを DB で確かめる**（実装レビュー第9回 Astra 1）。手元に
+        // 記録の無い他のアカウントのカードを名指しされると、上の条件で1行も書けないのに、以前は
+        // 印を立てて外した知らせまで配っていた——正当な持ち主の報告が、以後記録を作り直せなく
+        // なった。他のアカウントの行なら、記録にも印にも触らない。行がどこにも無ければ
+        // （記録に書かれる前のカード）、以前どおりこのアカウントのものとして外す
+        if updated.rows_affected == 0
+            && let Some((owner, _, _, _)) = self.stored(card_id).await?
+            && self.refuse_crossing(&origin.account_id, owner, card_id)
+        {
+            return Ok(());
+        }
+        self.drop_record(origin.account_id, card_id);
         self.publish(origin.account_id, ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
@@ -3171,7 +3239,12 @@ impl SessionRegistry {
     }
 
     /// 記録を DB へ書く（無ければ作る）。
-    async fn write_session(&self, origin: &ReportOrigin, meta: &SessionMeta) -> Result<(), DbErr> {
+    /// カードの行を書く。**外した行には書かず `false`**（実装レビュー第9回 Astra 2）。
+    async fn write_session(
+        &self,
+        origin: &ReportOrigin,
+        meta: &SessionMeta,
+    ) -> Result<bool, DbErr> {
         let row = entity::sessions::ActiveModel {
             card_id: Set(meta.card_id.0),
             agent_id: Set(meta.agent_id.map(|id| id.0)),
@@ -3203,7 +3276,7 @@ impl SessionRegistry {
             // 値そのものは `upsert` が決めている（記録の側が正・新しい1枚だけ末尾）
             position: Set(meta.position),
         };
-        entity::sessions::Entity::insert(row)
+        let written = entity::sessions::Entity::insert(row)
             .on_conflict(
                 OnConflict::column(entity::sessions::Column::CardId)
                     .update_columns([
@@ -3235,33 +3308,57 @@ impl SessionRegistry {
                         // `AccountId` も**更新しない**。帰属は最初の報告で決まり、
                         // 後から別のアカウントの PC が同じIDを名乗っても動かない（§8-6）
                     ])
+                    // **外した行には書かない**（実装レビュー第9回 Astra 2）。表の名前付きで書く
+                    // ——ぶつかった既存の行を指す
+                    .action_and_where(sea_orm::sea_query::ExprTrait::eq(
+                        sea_orm::sea_query::Expr::col((
+                            entity::sessions::Entity,
+                            entity::sessions::Column::Archived,
+                        )),
+                        false,
+                    ))
                     .to_owned(),
             )
-            .exec(&self.db)
+            .exec_without_returning(&self.db)
             .await?;
-        Ok(())
+        Ok(written > 0)
     }
 
     /// そのアカウントのカードとして、一覧から外し終えているか（寝ているカードばかりなのに、
     /// メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1）。
     ///
     /// PC が外したカードの実体をまだ持っていないかを照合する口（`gateway.rs` の
-    /// `SessionUpsert`）。**記録が手元にあれば外していない**ので DB は引かない。手元に無いとき
-    /// だけ DB の外した印と持ち主を見る——記録を外すのは DB に書けたときだけなので、DB が正。
-    /// **他のアカウントのカードには偽を返す**（他人のカードの ID で PC を片付けさせない）。
-    /// 確かめられなければ偽（片付けさせない側へ倒す。次に名乗ったときにまた確かめる）。
-    pub async fn removed_card(&self, account_id: Uuid, card_id: CardId) -> bool {
-        if self.get(card_id).is_some() {
-            return false;
+    /// `SessionUpsert`）。**他のアカウントのカードには偽を返す**（他人のカードの ID で PC を
+    /// 片付けさせない）。
+    ///
+    /// **手元の記録の有無で省かず、いつも DB を見る**（実装レビュー第9回 Astra 2）。手元の記録は、
+    /// 外した知らせを購読していなかった間の古いものでありうる。記録を外すのは DB に書けたとき
+    /// だけなので、DB が正。名乗りのたびに1回引くことになる。
+    ///
+    /// **確かめられなければ `Err`**（実装レビュー第9回 Astra 3）。以前は「外していない」と同じ
+    /// 偽にしていたので、入力待ちで以後名乗らないカードは、DB が戻っても二度と照合されなかった。
+    /// 呼ぶ側が持ち続けて確かめ直す。
+    pub async fn removed_card(&self, account_id: Uuid, card_id: CardId) -> Result<bool, DbErr> {
+        if self.reconcile_fail_once.swap(false, Ordering::SeqCst) {
+            return Err(DbErr::Custom("試験で差し込んだ読み取りの失敗".to_string()));
         }
-        match self.stored(card_id).await {
-            Ok(Some((owner, archived, _, _))) => archived && owner == account_id,
-            Ok(None) => false,
-            Err(err) => {
-                tracing::warn!(%card_id, "一覧から外したカードかを確かめられません: {err}");
-                false
-            }
-        }
+        Ok(matches!(
+            self.stored(card_id).await?,
+            Some((owner, true, _, _)) if owner == account_id
+        ))
+    }
+
+    /// 次の照合（[`Self::removed_card`]）の DB の読み取りを1回だけ失敗させる（**テスト専用**）。
+    /// 照合だけに効く——更新が DB を読むところには効かない。
+    #[doc(hidden)]
+    pub fn 照合の読みを1回失敗させる(&self) {
+        self.reconcile_fail_once.store(true, Ordering::SeqCst);
+    }
+
+    /// 差し込んだ失敗が、もう使われたか（**テスト専用**。形を作れたかを確かめる）。
+    #[doc(hidden)]
+    pub fn 照合の読みの失敗が使われた(&self) -> bool {
+        !self.reconcile_fail_once.load(Ordering::SeqCst)
     }
 
     /// DB に残っているそのカードの `(持ち主, 外したか)`。行が無ければ `None`。
@@ -3309,8 +3406,7 @@ impl SessionRegistry {
             .removed
             .lock()
             .expect("ロックが壊れていない")
-            .cards
-            .contains(&card_id)
+            .contains(account_id, card_id)
         {
             return Ok(None);
         }

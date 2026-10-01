@@ -601,6 +601,137 @@ async fn 番号付きの頼みは持ち主の門を通したものだけを控�
     }
 }
 
+/// その PC から新しいカードを1枚名乗らせ、一覧に載るまで待つ。**同じ接続の前の報告が
+/// 処理し終わったことの印**になる（報告は1本の接続の上で順に処理される）。
+async fn 後の報告で追いつく(
+    arena: &Arena,
+    tenant: &Tenant,
+    agent: &mut common::SessionHostSocket,
+    count: usize,
+) {
+    agent
+        .send(&AgentMessage::SessionUpsert {
+            session: Box::new(common::meta(CardId::new())),
+        })
+        .await;
+    arena.wait_for_listed(tenant.account_id, count).await;
+}
+
+/// そのアカウントの一覧にカードが載るまで待つ。載れば `true`。
+async fn 載るまで待つ(arena: &Arena, account_id: Uuid, card_id: CardId) -> bool {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if arena
+            .registry
+            .list(account_id)
+            .iter()
+            .any(|meta| meta.card_id == card_id)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn 他人のカードを外したと報告しても記録にも外した印にも触らない() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第9回 Astra 1。
+    // PC の「外した」の報告（`SessionRemoved`）は持ち主を条件に DB を書くが、**手元に記録の無い**
+    // 他人のカードを名指しされると、1行も書けないのに外した印を立て、外した知らせまで配っていた。
+    // 印はカード ID だけで持っていたので、**正当な持ち主の報告まで記録を作り直せなくなった**
+    // （他のアカウントから一覧を消せる）。
+    //
+    // 2つの形を分けて見る。どちらか片方の直しだけを戻しても、それぞれの★で落ちる
+    for backend in common::backends("tenancy-removed-mark").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, mut their_agent) = arena.tenant("よそのひと").await;
+        let mut events = arena.registry.subscribe_events();
+
+        // --- (a) 他人のカードが DB にだけある（このサーバの手元には無い） -----------------
+        // 別のサーバが記録した形。この記録層は立ち上げた後に書かれた行を手元に持たない
+        let 他人のカード = CardId::new();
+        let よそのサーバ =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        よそのサーバ
+            .apply(
+                &server_core::registry::ReportOrigin {
+                    account_id: theirs.account_id,
+                    agent_id: None,
+                    account: None,
+                },
+                更新の知らせ(他人のカード),
+            )
+            .await;
+        assert!(
+            arena.registry.get(他人のカード).is_none(),
+            "[{}] 他人のカードがこのサーバの手元にある（形を作れていない）",
+            backend.name
+        );
+        mine_agent
+            .send(&AgentMessage::SessionRemoved {
+                card_id: 他人のカード,
+            })
+            .await;
+        後の報告で追いつく(&arena, &mine, &mut mine_agent, 2).await;
+        let mut 配った = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if matches!(event.message, ServerMessage::SessionRemoved { card_id } if card_id == 他人のカード)
+            {
+                配った.push(event.account_id);
+            }
+        }
+        assert!(
+            配った.is_empty(),
+            "[{}] ★他人のカードを外したと報告したら、外した知らせを配っている（{配った:?}）",
+            backend.name
+        );
+        their_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(他人のカード)),
+            })
+            .await;
+        assert!(
+            載るまで待つ(&arena, theirs.account_id, 他人のカード).await,
+            "[{}] 他人が外したと報告したカードを、持ち主が名乗っても一覧に戻らない",
+            backend.name
+        );
+
+        // --- (b) どこにも行の無いカード ID ------------------------------------------------
+        // 外したと先に報告された ID を、後から持ち主の PC が名乗る。印をアカウントごとに持たないと、
+        // 先に報告した側の印が持ち主を締め出す
+        let 先に名指しされたカード = CardId::new();
+        mine_agent
+            .send(&AgentMessage::SessionRemoved {
+                card_id: 先に名指しされたカード,
+            })
+            .await;
+        後の報告で追いつく(&arena, &mine, &mut mine_agent, 3).await;
+        their_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(先に名指しされたカード)),
+            })
+            .await;
+        assert!(
+            載るまで待つ(&arena, theirs.account_id, 先に名指しされたカード).await,
+            "[{}] ★他のアカウントが外したと報告した ID を、持ち主が名乗っても一覧に出せない（外した印がアカウントをまたいでいる）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// 記録層へ直に流す、カードの姿の知らせ。
+fn 更新の知らせ(card_id: CardId) -> ServerMessage {
+    ServerMessage::SessionUpsert {
+        session: Box::new(common::meta(card_id)),
+    }
+}
+
 #[tokio::test]
 async fn 他人の戻せるカードも同じ言葉で断られる() {
     // **門の順序を固定する。** 持ち主の確認より先に「戻せるか」を見ると、他人のカードへ

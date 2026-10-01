@@ -931,9 +931,14 @@ async fn 跨いで届いた取り下げを約束の列に積めなければ_PC_�
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(conn.send(&protocol::a2s::ServerToAgent::Forget {
-            card_id: CardId::new()
-        }));
+        // 生存確認が先に居ることがある（これも害の無い約束）。積めなくなるまで積む
+        for _ in 0..8 {
+            if !conn.send(&protocol::a2s::ServerToAgent::Forget {
+                card_id: CardId::new(),
+            }) {
+                break;
+            }
+        }
         assert_eq!(
             conn.queued_promise(),
             1,
@@ -980,6 +985,103 @@ async fn 跨いで届いた取り下げを約束の列に積めなければ_PC_�
                 Some(Ok(_)) => {}
             }
         }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 切れている間に別のサーバで外したカードは繋ぎ直して名乗ったところで片付けさせる() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第9回 Astra 2。
+    // PC がサーバ B から切れている間に、サーバ A でカードを外す。外した知らせはアカウントの知らせに
+    // 乗って回るが、**B にそのアカウントのブラウザが居なければ購読しておらず、古い記録が残る**。
+    // PC が B へ繋ぎ直して名乗ると、以前は「手元に記録がある」ので DB を見ず、外したカードを一覧へ
+    // 配り直し、`Forget` も送らなかった——外したカードのプロセスが残る。
+    //
+    // 名乗るのは変わらない姿のまま（PC は繋ぎ直すたびに手持ちを全部名乗り直す）
+    for backend in common::backends("cluster-stale-record").await {
+        let broker = MemoryBroker::new();
+        let (token, account_id) = issue(&backend.db).await;
+        let a = instance(&backend.db, &broker).await;
+        let b = instance(&backend.db, &broker).await;
+        // ブラウザは A にだけ居る。B はこのアカウントの知らせを購読していない
+        a.attach_browser(account_id).await;
+        let card_id = CardId::new();
+        let mut agent = connect_agent(b.addr, &token, "PC-B").await;
+        agent
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(card_id)),
+            })
+            .await;
+        wait_card(&a.registry, card_id).await;
+        wait_card(&b.registry, card_id).await;
+        let agent_id = b
+            .registry
+            .get(card_id)
+            .and_then(|record| record.meta().agent_id)
+            .expect("PC を名乗っていること");
+
+        // PC を B から切り、A で記録の側だけで外す
+        drop(agent);
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while b.hub.conn(agent_id).is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 切れない",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        a.registry
+            .archive_owned(account_id, card_id)
+            .await
+            .expect("外せること");
+        assert!(
+            b.registry.get(card_id).is_some(),
+            "[{}] B が外した知らせを受けている（古い記録が残る形を作れていない）",
+            backend.name
+        );
+
+        // 繋ぎ直して、変わらない姿で名乗り直す
+        let mut b_events = b.subscribe_events();
+        let mut agent = connect_agent(b.addr, &token, "PC-B").await;
+        agent
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(card_id)),
+            })
+            .await;
+        agent
+            .wait_for(
+                "★（別のサーバで外したカードを名乗ったのに、外した知らせを送り直さない）Forget",
+                |message| {
+                    matches!(message, protocol::a2s::ServerToAgent::Forget { card_id: got } if *got == card_id)
+                },
+            )
+            .await;
+
+        let mut 最後の知らせ = None;
+        while let Ok(event) = b_events.try_recv() {
+            match event.message {
+                ServerMessage::SessionUpsert { session } if session.card_id == card_id => {
+                    最後の知らせ = Some("SessionUpsert");
+                }
+                ServerMessage::SessionRemoved { card_id: got } if got == card_id => {
+                    最後の知らせ = Some("SessionRemoved");
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            b.registry.get(card_id).is_none(),
+            "[{}] ★別のサーバで外したカードの古い記録を、B が持ち続けている",
+            backend.name
+        );
+        assert_eq!(
+            最後の知らせ,
+            Some("SessionRemoved"),
+            "[{}] ★B が外したカードを配り直したまま、外した知らせで締めていない",
+            backend.name
+        );
 
         backend.finish().await;
     }

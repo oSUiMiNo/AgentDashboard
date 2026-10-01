@@ -1014,13 +1014,15 @@ async fn 照合のときだけ約束の列が満杯でも外したカードの�
         // --- 2. 約束の列（深さ1）を、害の無い取り下げ（PC に無いカード）で埋める ----
         // **Close で埋めない。** 列が空いたときに Close が出て接続が畳まれ、直す前のコードでも
         // 名乗り直しが起きる
-        assert!(
-            conn.send(&ServerToAgent::Forget {
-                card_id: CardId::new()
-            }),
-            "[{}] 約束の列に積めること",
-            backend.name
-        );
+        // **生存確認が先に居ることがある**（これも害の無い約束）。積めなくなるまで積む——書き手は
+        // 止まっているので、深さぶんで止まる
+        for _ in 0..8 {
+            if !conn.send(&ServerToAgent::Forget {
+                card_id: CardId::new(),
+            }) {
+                break;
+            }
+        }
         assert_eq!(
             conn.queued_promise(),
             1,
@@ -1095,6 +1097,113 @@ async fn 照合のときだけ約束の列が満杯でも外したカードの�
                 |message| matches!(message, ServerToAgent::Forget { card_id } if *card_id == 外す),
             )
             .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 外したかを確かめられなかったカードはその後名乗らなくても確かめ直して片付ける() {
+    確かめられなかったカードを片付ける(true).await;
+}
+
+#[tokio::test]
+async fn 外したかを確かめられなかったカードは生存確認のたびに確かめ直す() {
+    // 本番で確かめ直しを起こすのは生存確認の周期。急かす口と同じ確かめ直しを通るが、周期の側を
+    // 外すと本番では二度と確かめ直さない。**時間で「来ない」とは言わない**——届くのを待つ
+    確かめられなかったカードを片付ける(false).await;
+}
+
+async fn 確かめられなかったカードを片付ける(急かす: bool) {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第9回 Astra 3。
+    // 照合（PC が外したカードを名乗ったときに `Forget` を送り直す所）で DB を読めないと、以前は
+    // 「外していない」と同じに扱って何もしなかった。入力待ちのカードは以後名乗り直すとは限らない
+    // ので、**DB が戻っても照合されず、外したカードのプロセスが残る**。
+    //
+    // DB の失敗は照合の読み取りにだけ1回差し込む。その後このカードは二度と名乗らない。確かめ直しは
+    // 生存確認（10 秒ごと）の度に行うが、時間には頼らず急かす口で1回進める
+    for backend in common::backends("gw-reconcile-db-error").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+        let 外す = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        let conn = wait_for_conn(&gateway, 外す).await;
+        gateway
+            .registry
+            .archive_owned(account_id, 外す)
+            .await
+            .expect("外せること");
+
+        gateway.registry.照合の読みを1回失敗させる();
+        // 外したカードを名乗り、続けて別のカードを名乗る。後のカードが載れば、前の照合は済んでいる
+        let 後 = CardId::new();
+        for card_id in [外す, 後] {
+            socket
+                .send(&AgentMessage::SessionUpsert {
+                    session: Box::new(meta(card_id)),
+                })
+                .await;
+        }
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while gateway.registry.get(後).is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 後のカードが載らない",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            gateway.registry.照合の読みの失敗が使われた(),
+            "[{}] 差し込んだ失敗が照合で使われていない（形を作れていない）",
+            backend.name
+        );
+
+        // このカードはもう名乗らない。確かめ直しで片付く
+        if 急かす {
+            conn.確かめ直しを急かす();
+        }
+        let 期限 = if 急かす {
+            TIMEOUT
+        } else {
+            // 生存確認は 10 秒ごと。1周ぶんと余裕を待つ
+            Duration::from_secs(25)
+        };
+        // **待ち手の上限（10 秒）を使わない。** 生存確認の周期と同じ長さなので、負荷で揺れる
+        let 期限 = tokio::time::Instant::now() + 期限;
+        let mut 届いた = false;
+        while let Ok(Some(Ok(frame))) =
+            tokio::time::timeout_at(期限, futures_util::StreamExt::next(&mut socket.socket)).await
+        {
+            if let tungstenite::Message::Text(text) = frame
+                && let Ok(ServerToAgent::Forget { card_id }) =
+                    serde_json::from_str::<ServerToAgent>(&text)
+                && card_id == 外す
+            {
+                届いた = true;
+                break;
+            }
+        }
+        assert!(
+            届いた,
+            "[{}] ★照合で一度 DB を読めなかったカードを、その後確かめ直していない（{}）",
+            backend.name,
+            if 急かす {
+                "急かした"
+            } else {
+                "生存確認の周期"
+            }
+        );
 
         backend.finish().await;
     }

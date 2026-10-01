@@ -137,6 +137,11 @@ pub struct SessionHostConn {
     /// 畳むよう頼まれたことを、待っている接続のループへ知らせる。**待っていなくても知らせを
     /// 1つ残す**（`notify_one`）ので、ループが別の報告を処理している間に頼まれても落とさない
     close_wake: tokio::sync::Notify,
+    /// 照合で、外したカードかを確かめられなかったカード（実装レビュー第9回 Astra 3。
+    /// [`reconcile`]）。生存確認のたびに確かめ直し、確かめられたら外す
+    unverified: Mutex<HashSet<CardId>>,
+    /// 確かめ直しを今すぐ行わせる（**テスト専用**の口が鳴らす。[`SessionHostConn::確かめ直しを急かす`]）
+    recheck_wake: tokio::sync::Notify,
 }
 
 /// サーバ→PC の送り口。**約束と指示を別の列で持つ**（設計§5-2）。
@@ -264,6 +269,12 @@ impl SessionHostConn {
         }
         self.close_wake.notify_one();
         true
+    }
+
+    /// 照合で確かめられなかったカードを、次の生存確認を待たずに確かめ直させる（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 確かめ直しを急かす(&self) {
+        self.recheck_wake.notify_one();
     }
 
     /// 畳むよう頼まれているか（接続のループが毎周の初めに見る）。
@@ -2450,6 +2461,8 @@ async fn agent_loop(
         lanes: lanes.clone(),
         closing: AtomicBool::new(false),
         close_wake: tokio::sync::Notify::new(),
+        unverified: Mutex::new(HashSet::new()),
+        recheck_wake: tokio::sync::Notify::new(),
     });
     // 同じ PC が繋ぎ直してきた場合、古い接続は**静かに置き換える**。半分死んだ TCP を
     // 掴んだまま新しい接続を断ると、その PC は二度と繋がらなくなる
@@ -2501,6 +2514,7 @@ async fn agent_loop(
         }
         tokio::select! {
             () = conn.close_wake.notified() => {}
+            () = conn.recheck_wake.notified() => recheck_unverified(&hub, &conn, &origin).await,
             incoming = stream.next() => match incoming {
                 Some(Ok(message)) => {
                     last_seen = tokio::time::Instant::now();
@@ -2540,6 +2554,9 @@ async fn agent_loop(
                     );
                     break;
                 }
+                // 照合で確かめられなかったカードを確かめ直す（実装レビュー第9回 Astra 3）。
+                // そのカードを PC がもう名乗らなくても、ここで片付く
+                recheck_unverified(&hub, &conn, &origin).await;
             }
         }
     }
@@ -2555,6 +2572,73 @@ async fn agent_loop(
     }
     drop(lanes);
     writer.abort();
+}
+
+/// PC が名乗ったカードを照合する（実装レビュー第7回 Astra 1・第9回 Astra 3）。一覧から外した
+/// カードなら、外した知らせを送り直す。
+///
+/// **確かめられなかったら、その接続に持ち続けて確かめ直す**（第9回 Astra 3）。以前は DB を読めない
+/// ことを「外していない」と同じに扱っていたので、入力待ちで以後名乗らないカードは、DB が戻っても
+/// 二度と照合されなかった。確かめ直すのは生存確認のたび（[`recheck_unverified`]）。接続は畳まない
+/// ——DB が止まっている間に名乗るたび畳むと、DB の断が PC の断に化ける（設計§12 の DB 断の行は
+/// 「ack を返さない」で持ちこたえる作りである）。
+async fn reconcile(
+    hub: &Arc<SessionHostHub>,
+    conn: &Arc<SessionHostConn>,
+    origin: &ReportOrigin,
+    card_id: CardId,
+) {
+    match hub.registry.removed_card(origin.account_id, card_id).await {
+        Ok(removed) => {
+            conn.unverified
+                .lock()
+                .expect("ロックが壊れていない")
+                .remove(&card_id);
+            if removed
+                && conn
+                    .send_or_refuse(&ServerToAgent::Forget { card_id })
+                    .is_ok()
+            {
+                tracing::info!(
+                    %card_id,
+                    agent_id = %conn.agent_id,
+                    "一覧から外したカードを PC がまだ持っていたので、片付けるよう知らせました"
+                );
+            }
+        }
+        Err(err) => {
+            let first = conn
+                .unverified
+                .lock()
+                .expect("ロックが壊れていない")
+                .insert(card_id);
+            if first {
+                tracing::warn!(
+                    %card_id,
+                    agent_id = %conn.agent_id,
+                    "一覧から外したカードかを確かめられません。生存確認のたびに確かめ直します: {err}"
+                );
+            }
+        }
+    }
+}
+
+/// 照合で確かめられなかったカードを、もう一度確かめる（実装レビュー第9回 Astra 3）。
+async fn recheck_unverified(
+    hub: &Arc<SessionHostHub>,
+    conn: &Arc<SessionHostConn>,
+    origin: &ReportOrigin,
+) {
+    let cards: Vec<CardId> = conn
+        .unverified
+        .lock()
+        .expect("ロックが壊れていない")
+        .iter()
+        .copied()
+        .collect();
+    for card_id in cards {
+        reconcile(hub, conn, origin, card_id).await;
+    }
 }
 
 /// 最初の [`AgentMessage::Hello`] だけを待つ。それ以外は読み飛ばす。
@@ -2642,17 +2726,7 @@ async fn handle_report(
             // 1行残すのは、外す知らせがどこかで落ちていた証拠だから。`Forget` を知らない古い PC
             // では名乗るたびに出るが、名乗るのはカードの姿が変わったときだけで、1件ごとに回る
             // 経路ではない
-            if hub.registry.removed_card(origin.account_id, card_id).await
-                && conn
-                    .send_or_refuse(&ServerToAgent::Forget { card_id })
-                    .is_ok()
-            {
-                tracing::info!(
-                    %card_id,
-                    agent_id = %conn.agent_id,
-                    "一覧から外したカードを PC がまだ持っていたので、片付けるよう知らせました"
-                );
-            }
+            reconcile(hub, conn, origin, card_id).await;
         }
         AgentMessage::SessionRemoved { card_id } => {
             hub.registry

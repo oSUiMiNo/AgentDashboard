@@ -3515,6 +3515,101 @@ async fn 終了の答えは記録と合わせて合否にし番号を添えて�
 }
 
 #[tokio::test]
+async fn 別のサーバで外したカードは手元に古い記録があっても書かず配り直さず外した知らせで締める() {
+    // 実装レビュー第9回 Astra 2。外した知らせを購読していなかったサーバには古い記録が残る。以前は
+    // 「手元に記録がある」ので DB を見ず、PC の報告（`apply`）も他のサーバから回ってきた姿
+    // （`adopt`）も、そのまま外した行へ書き、一覧へ配り直した。DB が外したと言ったら、書かずに
+    // 古い記録を外し、外した知らせで締める
+    use sea_orm::EntityTrait as _;
+    for backend in common::backends("stale-record").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let account = server_core::db::LOCAL_ACCOUNT_ID;
+        let (この_pc, 跨ぎ) = (CardId::new(), CardId::new());
+        for card_id in [この_pc, 跨ぎ] {
+            registry.apply(&local(), upsert(card_id)).await;
+        }
+        // 別のサーバで外す（このサーバは外した知らせを受けない）
+        let よそのサーバ =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        for card_id in [この_pc, 跨ぎ] {
+            よそのサーバ
+                .archive_owned(account, card_id)
+                .await
+                .expect("外せること");
+            assert!(
+                registry.get(card_id).is_some(),
+                "[{}] 古い記録が残っていない（形を作れていない）",
+                backend.name
+            );
+        }
+        let mut events = registry.subscribe_events();
+        let mut 終わった姿 = meta(この_pc);
+        終わった姿.status = SessionStatus::Ended { ok: true };
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(終わった姿),
+                },
+            )
+            .await;
+        registry.adopt(account, upsert(跨ぎ)).await;
+
+        let seen = 配られたもの(&mut events);
+        for (what, card_id) in [("この PC の報告", この_pc), ("跨いで届いた姿", 跨ぎ)]
+        {
+            let 最後 = seen.iter().rev().find_map(|message| match message {
+                ServerMessage::SessionUpsert { session } if session.card_id == card_id => {
+                    Some("SessionUpsert")
+                }
+                ServerMessage::SessionRemoved { card_id: got } if *got == card_id => {
+                    Some("SessionRemoved")
+                }
+                _ => None,
+            });
+            assert_eq!(
+                最後,
+                Some("SessionRemoved"),
+                "[{}] ★{what}：別のサーバで外したカードを、外した知らせで締めていない: {seen:?}",
+                backend.name
+            );
+            assert!(
+                !seen.iter().any(|message| matches!(
+                    message,
+                    ServerMessage::SessionUpsert { session } if session.card_id == card_id
+                )),
+                "[{}] ★{what}：別のサーバで外したカードを一覧へ配り直している",
+                backend.name
+            );
+            assert!(
+                registry.get(card_id).is_none(),
+                "[{}] {what}：古い記録が残っている",
+                backend.name
+            );
+        }
+        let row = server_core::db::entity::sessions::Entity::find_by_id(この_pc.0)
+            .one(&backend.db)
+            .await
+            .expect("引けること")
+            .expect("行は消さない");
+        assert!(row.archived, "[{}] 外した印が戻っている", backend.name);
+        assert_eq!(
+            row.status,
+            serde_json::to_value(SessionStatus::Working).expect("書けること"),
+            "[{}] ★外した行へ、後から届いた報告を書いている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 受け付けた頼みの答えは配る前に控え配信が溢れても外した後でも番号で引き直せる() {
     // 実装レビュー第7回 Astra 4。番号付きの答えは1回しか出ないのに、ふだんの知らせと同じ配信
     // （溢れたら古いものを捨てる）へ流すだけだった。捨てられると後の知らせには番号が無く、
