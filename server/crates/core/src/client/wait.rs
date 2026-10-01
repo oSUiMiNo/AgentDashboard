@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use protocol::ws::ServerMessage;
+use protocol::ws::{ErrorKind, ServerMessage};
 use protocol::{CardId, PermissionMode, SessionStatus};
 
 use super::ClientError;
@@ -158,6 +158,23 @@ pub enum Goal {
 impl Goal {
     /// 知らせを1つ観測する。
     pub fn observe(&mut self, message: &ServerMessage) -> Step {
+        // **外す待ちは、外す断りでだけ落ちる**（実装レビュー Astra 1）。外すと、そのカードで
+        // 進んでいた起こし直しが取り下げられ、その断り（種別 `revive`）が外れた知らせより
+        // 先に届くことがある。下の規則のまま読むと、外れたのに「外せませんでした」と言う
+        if let (
+            Self::Removed { card },
+            ServerMessage::Error {
+                card_id: Some(errored),
+                message,
+                kind,
+                ..
+            },
+        ) = (&*self, message)
+            && errored == card
+            && *kind != ErrorKind::Archive
+        {
+            return Step::Note(format!("（外す前に進んでいた操作の知らせ）{message}"));
+        }
         // Error はどの Goal でも同じ扱い（CLI設計§8-2・§7-3）：
         // 対象カード宛てか宛先なし（Spawn の失敗・解釈不能）は即座に落ち、
         // 別のカード宛ては標準エラーへ出して待ち続ける
@@ -394,7 +411,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ProjectId, SessionMeta, ws::ErrorKind};
+    use protocol::{ProjectId, SessionMeta};
 
     /// 復旧待ちの上限は、起動の上限と判定の確認段階の上限から組む（寝ているカードばかり
     /// なのに、メモリ不足でセッションを起こせない 設計§6-5）。
@@ -584,6 +601,39 @@ mod tests {
                 card_id: None,
                 message: "起こせませんでした".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
+            }),
+            Step::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn 外す待ちは取り下げた起こし直しの断りでは落ちず外れた知らせで終わる() {
+        // 実装レビュー Astra 1。外したことで起こし直しが取り下げられ、その断りが
+        // 外れた知らせより先に届く。**外れたのに「外せませんでした」と言わない**
+        let card = CardId::new();
+        let mut goal = Goal::Removed { card };
+        let step = goal.observe(&ServerMessage::Error {
+            card_id: Some(card),
+            message: "一覧から外されたので、起こし直しをやめました".to_string(),
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+        });
+        assert!(
+            matches!(step, Step::Note(_)),
+            "★起こし直しの断りを、外す断りと読んで落ちている"
+        );
+        assert!(matches!(
+            goal.observe(&ServerMessage::SessionRemoved { card_id: card }),
+            Step::Done(_)
+        ));
+        // 外す断りでは今までどおり落ちる
+        let mut goal = Goal::Removed { card };
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(card),
+                message: "セッションが見つかりません".to_string(),
+                kind: ErrorKind::Archive,
                 busy: None,
             }),
             Step::Fail(_)

@@ -197,6 +197,14 @@ impl SessionHost for LocalSessionHost {
         self.manager.archive(card_id).map_err(|err| err.to_string())
     }
 
+    /// **宛先は見ない**（[`LocalSessionHost::spawn`] と同じ理由）。持ち主はこの機械しか無い。
+    async fn forget(&self, _account_id: uuid::Uuid, card_id: CardId) -> Result<(), String> {
+        if self.manager.forget(card_id) {
+            tracing::info!(%card_id, "記録の側で外したカードを、セッションの側でも片付けました");
+        }
+        Ok(())
+    }
+
     /// **見ている人数は数えない。** ローカルは生バイトをそのまま配るので、
     /// 何人が見ていようと PTY の読み取りは同じように動く（設計§7-2）。
     fn subscribe_pty(

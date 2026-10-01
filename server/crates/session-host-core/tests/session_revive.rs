@@ -1721,3 +1721,203 @@ async fn 予約が0件になった直後表示が境界より前の観測でfres
     );
     wait_until("表示が取り直す", || 外.回数() == 2).await;
 }
+
+#[tokio::test]
+async fn 予約を引いても枚数が変わらなければwindows側の空きで断り両方の数を出す() {
+    // 実装レビュー Fable 1。実機の数（1枚 780・余白 2,048）で、1枚目を 3,480 で通すと
+    // 見込みは 2,700 になる。2枚目のときの Windows 側は 2,800——予約が無くても
+    // (2,800 − 2,048) ÷ 780 = 0 枚なので、**決めたのは Windows 側**である
+    let manager = common::manager_with(実機の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = 順に名乗る外側::作る(&[3_480], 3_480);
+    let host_free = 外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+
+    頼む(&manager, CardId::new())
+        .await
+        .expect("1枚目は通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+    host_free.覚えさせる(2_800, std::time::Instant::now());
+
+    let refusal = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("2枚目は断られること");
+    assert!(
+        refusal.contains("使える空き 2700 MB＝Windows 側の空き 2800 MB"),
+        "★予約を引いた値と Windows 側の空きの両方を出していない: {refusal}"
+    );
+    assert!(
+        !refusal.contains("1分ほど待って"),
+        "★予約が枚数を変えていないのに、待てば通ると言っている: {refusal}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 確かめを待っている間に外したカードは起こさない（実装レビュー Astra 1）
+// ---------------------------------------------------------------------------
+//
+// 確かめ（最大 65 秒）の間にカードを一覧から外しても取り消されず、確かめが済んだ後に
+// **誰にも見えないプロセスを起こしていた**（外したカードの報告はサーバが捨てる）。
+
+/// 切り離して頼む（確かめの途中で外すため、待たずに戻る）。
+fn 切り離して頼む(
+    manager: &Arc<SessionManager>,
+    card_id: CardId,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let manager = Arc::clone(manager);
+    tokio::spawn(async move {
+        manager
+            .revive(
+                in_flight,
+                &common::work_dir(),
+                None,
+                ClaudeSessionId(uuid::Uuid::new_v4()),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    })
+}
+
+#[tokio::test]
+async fn 確かめを待っている間に外したカードは確かめが済んでも起こさない() {
+    // 「確かめ待ち → 外す → 取得成功」の順。**実体はまだ無い**（サーバから見て接続断の
+    // カードを、PC が起こし直している途中）
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = Arc::new(common::止める外側::default());
+    let _門 = common::門を開けて去る(Arc::clone(&外));
+    let host_free = 外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    let mut 起こし直し = 切り離して頼む(&manager, card_id);
+    外.聞かれるまで待つ(0).await;
+
+    manager
+        .archive(card_id)
+        .expect("★起こし直しを取り下げただけ（実体はまだ無い）なのに、外せないと断っている");
+
+    // **確かめが済むのを待たずにやめる。** 席を握ったまま 65 秒待つと、ほかのカードの
+    // 起こし直しまで止まる
+    let 結果 = timeout(Duration::from_secs(10), &mut 起こし直し)
+        .await
+        .expect("★外されたのに、確かめが済むまで席を握って待っている")
+        .expect("落ちないこと");
+    let 断り = 結果.expect_err("起こさずに断ること");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+
+    外.開ける();
+    wait_until("取得が済む", || host_free.聞き終えた回数() >= 1).await;
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        manager.get(card_id).is_none(),
+        "★外したカードの実体を起こしている（画面に出ないままメモリを食う）"
+    );
+    assert_eq!(manager.reserved_revives(), 0, "予約を残していない");
+    assert!(
+        manager.begin_revive(card_id).is_some(),
+        "印が下りていること"
+    );
+}
+
+#[tokio::test]
+async fn 確かめた直後に外したカードは起こさない() {
+    // 確かめが済んでから起こすまでの窓。**見てから起こすまでの間に外されると、外す側の
+    // 畳みが空振りした直後に実体が起きる**——起こす側は、見て起こし終えるまで札を握る
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        manager.確認の後に差し込む(Arc::new(move || {
+            if let Some(manager) = manager_weak.upgrade() {
+                manager.forget(card_id);
+            }
+        }));
+    }
+
+    let 結果 = 頼む(&manager, card_id).await;
+    assert!(
+        manager.get(card_id).is_none(),
+        "★確かめた直後に外したカードの実体を起こしている"
+    );
+    let 断り = 結果.expect_err("起こさずに断ること");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+    assert_eq!(manager.reserved_revives(), 0, "通した予約を返していること");
+}
+
+#[tokio::test]
+async fn 抜け殻を確かめの途中で外すと抜け殻も畳み起こし直しも取り下げる() {
+    // 実体（抜け殻）がある側。サーバから見て在るカードは `archive` が届く
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = common::止める外側::開いたまま();
+    let _門 = common::門を開けて去る(Arc::clone(&外));
+    let host_free = 外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("1回目は起こせること");
+    manager.kill(card_id).expect("寝かせられること");
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+    assert!(manager.get(card_id).is_some(), "抜け殻が残っていること");
+
+    // 2回目は取り直させて、確かめの途中で止める
+    外.閉める();
+    host_free.覚えさせる(
+        6_000,
+        std::time::Instant::now() - Duration::from_secs(3_600),
+    );
+    let 聞く前 = 外.聞かれた();
+    let mut events = manager.subscribe_events();
+    let 起こし直し = 切り離して頼む(&manager, card_id);
+    外.聞かれるまで待つ(聞く前).await;
+
+    manager.archive(card_id).expect("外せること");
+    let 結果 = timeout(Duration::from_secs(10), 起こし直し)
+        .await
+        .expect("確かめが済むのを待たずにやめること")
+        .expect("落ちないこと");
+    assert!(結果.is_err(), "起こさずに断ること");
+    外.開ける();
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        manager.get(card_id).is_none(),
+        "★外したのに、抜け殻か新しい実体が残っている"
+    );
+    let mut 消えたと配った = false;
+    while let Ok(message) = events.try_recv() {
+        消えたと配った |=
+            matches!(message, ServerMessage::SessionRemoved { card_id: id } if id == card_id);
+    }
+    assert!(消えたと配った, "外したことを配っていない");
+}
+
+#[tokio::test]
+async fn 何も持っていないカードを忘れても断らず外すときだけ見つからないと言う() {
+    // サーバは「この PC が持っているか」を知らないまま記録の側だけで外したことを知らせて
+    // くる。**無いのは普通のこと**なので黙る。`archive` は従来どおり断る
+    let manager = common::manager_with(実機の設定());
+    let card_id = CardId::new();
+    assert!(
+        !manager.forget(card_id),
+        "何もしていないのに片付けたと答えている"
+    );
+    assert!(
+        matches!(
+            manager.archive(card_id),
+            Err(session_host_core::session::SessionError::NotFound(_))
+        ),
+        "無いカードを外せたことにしている"
+    );
+}

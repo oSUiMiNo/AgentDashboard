@@ -422,6 +422,16 @@ pub enum HostFreeState {
     Checking,
     /// 聞けなかった（次の取得まで少し空けている）
     Failed,
+    /// 知らない綴り（新しい PC が足した状態）。**確かめられていない側として読む。**
+    ///
+    /// これが無いと、PC 側に状態を1つ足した途端に**古いサーバが `HostResources` ごと
+    /// 解けなくなり**、資源の答えを丸ごと「聞けなかった」にする（実装レビュー Fable 2）。
+    /// 画面はそれを歯止め無し＝全部送る側に倒すので、新しい状態のせいで歯止めが外れる。
+    /// `busy` を `ErrorKind` の腕でなく欄にしたのと同じ理由である。
+    ///
+    /// **PC 側は作らない**（`snapshot` が返すのは上の4つだけ）。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 添付の掃除の下見・結果（メモ設計§10-2）。
@@ -1276,6 +1286,35 @@ mod tests {
                 json!(text)
             );
         }
+    }
+
+    /// **知らない綴りは `Unknown` で解ける**（実装レビュー Fable 2）。新しい PC が状態を
+    /// 足しても、古いサーバは資源の答えを丸ごと捨てない。
+    ///
+    /// 列挙だけでなく `HostResources` 丸ごとで見る——壊れていたのは「状態の欄1つが
+    /// 読めないせいで、答え全体が解けない」ことだった。
+    #[test]
+    fn 外側の様子の知らない綴りはUnknownで解け資源の答えは捨てない() {
+        let newer = json!({
+            "total_mb": 16000, "available_mb": 12000, "swap_free_mb": 0,
+            "estimate_mb": 780, "headroom_mb": 2048, "fits_now": 3,
+            "host_free_mb": 6000, "counted_mb": 6000,
+            "host_free_age_sec": 4, "host_free_state": "throttled",
+            "host_free_error": null, "effective_mb": 6000
+        });
+        let resources: HostResources =
+            serde_json::from_value(newer).expect("★知らない状態の綴りで、資源の答えごと解けない");
+        assert_eq!(resources.host_free_state, Some(HostFreeState::Unknown));
+        assert_eq!(resources.fits_now, Some(3), "ほかの欄は読めたまま");
+        assert_eq!(
+            serde_json::from_value::<HostFreeState>(json!("throttled")).expect("読めること"),
+            HostFreeState::Unknown
+        );
+        // 知っている綴りは今までどおり
+        assert_eq!(
+            serde_json::from_value::<HostFreeState>(json!("fresh")).expect("読めること"),
+            HostFreeState::Fresh
+        );
     }
 
     fn roundtrip<T>(value: &T) -> T

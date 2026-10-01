@@ -445,7 +445,8 @@ pub fn render_resources(resources: &protocol::HostResources) -> String {
         Some(
             protocol::HostFreeState::Stale
             | protocol::HostFreeState::Checking
-            | protocol::HostFreeState::Failed,
+            | protocol::HostFreeState::Failed
+            | protocol::HostFreeState::Unknown,
         ) if resources.fits_now.is_some() => "（起こすときは確かめ直してから決めます）",
         _ => "",
     };
@@ -520,7 +521,9 @@ fn render_outside(resources: &protocol::HostResources) -> String {
             "\nWindows 側の空きを確かめています → いまは WSL の中のキャッシュを除いた空きで\
              数えています（{使える}）"
         ),
-        (Some(protocol::HostFreeState::Failed), _) => {
+        // **知らない状態は「確かめられていない」側で言う**（実装レビュー Fable 2）。新しい PC が
+        // 足した状態の意味はこちらには分からないので、確かめられたとは言えない
+        (Some(protocol::HostFreeState::Failed | protocol::HostFreeState::Unknown), _) => {
             let reason = resources
                 .host_free_error
                 .as_deref()
@@ -935,6 +938,28 @@ mod tests {
         );
         assert!(out.contains("理由：起動できません"), "{out}");
         assert!(out.contains("最後に聞けたのは 5408 MB（10 分前）"), "{out}");
+    }
+
+    #[test]
+    fn 知らない状態は確かめられていない側で言う() {
+        // 実装レビュー Fable 2。新しい PC が足した状態の意味はこちらには分からない。
+        // **確かめた値として「Windows 側の空き N MB」と言い切らない**
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Unknown,
+            Some(5_408),
+            Some(3),
+            400,
+            400,
+            0,
+        ));
+        assert!(
+            out.contains("Windows 側の空きを確かめられませんでした"),
+            "★知らない状態を確かめられたと言っている: {out}"
+        );
+        assert!(
+            out.contains("起こすときは確かめ直してから決めます"),
+            "{out}"
+        );
     }
 
     #[test]

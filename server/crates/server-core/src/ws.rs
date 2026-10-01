@@ -858,7 +858,19 @@ async fn handle_request(
                 if let Err(message) = state.agent.archive(card_id) {
                     send_error(outbound, Some(card_id), message, ErrorKind::Archive).await;
                 }
-            } else if let Err(err) = state
+                return;
+            }
+            // **記録だけを外すときも、持ち主の PC には知らせる**（実装レビュー Astra 1）。
+            // 実体が無く見えても、PC がそのカードを起こし直している途中でありうる——知らせないと、
+            // 確かめが済んだ後に起きたプロセスが画面に出ないまま残る。**記録を外す前に**送る
+            // （外すと宛先を引けない）。届かなくても記録は外す
+            if let Err(reason) = state.agent.forget(identity.account_id, card_id).await {
+                tracing::info!(
+                    %card_id,
+                    "外したことを PC へ知らせられませんでした（起こし直しの途中なら止まりません）: {reason}"
+                );
+            }
+            if let Err(err) = state
                 .registry
                 .archive_owned(identity.account_id, card_id)
                 .await

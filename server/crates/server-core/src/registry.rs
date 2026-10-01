@@ -42,7 +42,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::sync::broadcast;
@@ -72,6 +72,24 @@ pub struct TranscriptPage {
     pub nodes: Vec<TreeNode>,
     /// さらに前があるかもしれない
     pub has_more: bool,
+}
+
+/// 起こし直しの**終わった断り**なら、宛先のカードと文面（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 設計§7-3）。
+///
+/// 競合（`busy: Some(true)`）と判別できない知らせ（`None`）は含めない——待てば起きるか、
+/// 起きるかどうか分からないので、待っている側を止めてはいけない。**見分けの正本はここ**
+/// （記録へ残す側と、配信で拾う枝分かれの側が同じ規則を使う）。
+pub fn revive_refusal_of(message: &ServerMessage) -> Option<(CardId, &str)> {
+    match message {
+        ServerMessage::Error {
+            card_id: Some(card_id),
+            message,
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+        } => Some((*card_id, message.as_str())),
+        _ => None,
+    }
 }
 
 /// 記録の行を、線に乗る形へ写す。
@@ -181,6 +199,14 @@ pub struct SessionRecord {
     /// ローカルモードでは「前回の起動が残した記録」が `false` になる。PTY は
     /// 再起動で道連れなので、戻ってきたカードは履歴だけが読める抜け殻になる。
     live: AtomicBool,
+    /// 最後に配った**起こし直しの終わった断り**と、そのときの通し番号（実装レビュー
+    /// Astra 4）。
+    ///
+    /// 配信は取りこぼしうる（`Lagged`）。起きるのを待っている枝分かれが断りを
+    /// 取りこぼすと、上限（180 秒）まで待ってから事実と違う理由で終わる——配った後も
+    /// 引けるように、ここへ残す。**DB には持たない**（揮発の知らせで、待っている側も
+    /// このインスタンスの中にしか居ない）。
+    revive_refusal: Mutex<Option<(u64, String)>>,
 }
 
 impl SessionRecord {
@@ -199,6 +225,7 @@ impl SessionRecord {
             transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             next_seq: tokio::sync::Mutex::new(next_seq),
             live: AtomicBool::new(live),
+            revive_refusal: Mutex::new(None),
         }
     }
 
@@ -326,6 +353,11 @@ pub struct SessionRegistry {
     /// （`context_usage` を保存しないのと同じ形だが、あちらは「空のセッションに
     /// 前回の使用率」、こちらは「居ない PC の使用率」で、**誰の実態と食い違うかが違う**）。
     rate_limits: Mutex<HashMap<(Uuid, Option<AgentId>), StoredRateLimits>>,
+    /// 起こし直しの終わった断りに振る通し番号（[`SessionRecord::revive_refusal`]）。
+    ///
+    /// 待つ側は始める前の値を控え（[`Self::revive_refusal_mark`]）、それより後に残った
+    /// 断りだけを拾う。時刻にしないのは、同じ時刻に並ぶと前後を決められないため。
+    refusal_seq: AtomicU64,
 }
 
 /// 保管している使用上限と、**それが誰のものか**。
@@ -450,6 +482,7 @@ impl SessionRegistry {
             nicknames: Mutex::new(nicknames),
             branches: Mutex::new(branches),
             rate_limits: Mutex::new(HashMap::new()),
+            refusal_seq: AtomicU64::new(0),
         }))
     }
 
@@ -1417,10 +1450,52 @@ impl SessionRegistry {
     /// **他インスタンスから回ってきたものはこちらを使う。** `publish` を使うと、
     /// 受け取ったものをそのまま配り直し、それがまた返ってきて止まらなくなる。
     fn publish_local(&self, account_id: Uuid, message: ServerMessage) {
+        // **配る前に残す**（実装レビュー Astra 4）。手元からの報告（`publish`）も、
+        // 他インスタンスから回ってきたもの（`adopt`）もここを通るので、残すのは1箇所で足りる。
+        // 待つ側が取りこぼした後に引いても、配ったものは必ず残っている
+        if let Some((card_id, 理由)) = revive_refusal_of(&message) {
+            self.note_revive_refusal(account_id, card_id, 理由);
+        }
         let _ = self.events.send(AccountEvent {
             account_id,
             message,
         });
+    }
+
+    /// 起こし直しの終わった断りを、そのカードの記録へ残す（実装レビュー Astra 4）。
+    ///
+    /// **記録が無ければ残さない。** 外したカードの断りを引く者は居ない（待っている側は
+    /// 記録が消えたこと自体で終わる）。持ち主の違うカードにも残さない（§8-6）。
+    fn note_revive_refusal(&self, account_id: Uuid, card_id: CardId, 理由: &str) {
+        let Some(record) = self.owned(account_id, card_id) else {
+            return;
+        };
+        let seq = self.refusal_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        *record.revive_refusal.lock().expect("ロックが壊れていない") =
+            Some((seq, 理由.to_string()));
+    }
+
+    /// いまの通し番号。**待ち始める前に**控え、[`Self::revive_refusal_since`] へ渡す。
+    pub fn revive_refusal_mark(&self) -> u64 {
+        self.refusal_seq.load(Ordering::SeqCst)
+    }
+
+    /// `mark` を控えた後に配られた、そのカードの起こし直しの終わった断り。
+    ///
+    /// 配信を取りこぼした待ち手が、**配られたはずの断りを引き直す**ための口。控える前に
+    /// 配られたもの（前に押した人の断り）は返さない。
+    pub fn revive_refusal_since(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+        mark: u64,
+    ) -> Option<String> {
+        let record = self.owned(account_id, card_id)?;
+        let refusal = record.revive_refusal.lock().expect("ロックが壊れていない");
+        refusal
+            .as_ref()
+            .filter(|(seq, _)| *seq > mark)
+            .map(|(_, 理由)| 理由.clone())
     }
 
     /// いま繋がっている全ブラウザへ知らせる（連絡係の縮退など、カードに紐づかない話）。

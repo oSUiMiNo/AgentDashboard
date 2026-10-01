@@ -553,6 +553,21 @@ pub enum ServerToAgent {
     Archive {
         card_id: CardId,
     },
+    /// **記録の側だけで外した**カードを、この PC からも片付けよ（実装レビュー Astra 1）。
+    ///
+    /// サーバから見て実体が無いカード（接続断）を外すとき、`Archive` は送れない——
+    /// 宛先の PC を「そのカードを持っている」とは言えないからである。ところが PC の側では、
+    /// そのカードを**起こし直している途中**でありうる（確かめを最大 65 秒待つ）。知らせないと、
+    /// 確かめが済んだ後に誰にも見えないプロセスが起きる。
+    ///
+    /// 受けた PC は、起こし直しが進んでいれば取り下げ、実体があれば畳む。**何も無ければ
+    /// 黙る**（`Archive` と違って断りを返さない。無いのは普通のことである）。
+    ///
+    /// **古い PC は知らない種別を無視する**（接続は保つ）ので、名乗りの版を上げずに足せる。
+    /// 古い PC では起こし直しは止まらない。
+    Forget {
+        card_id: CardId,
+    },
     /// Composer からの指示。PTY へ届くまでの作法（初期実装§18）はセッションホスト側の責任（§5-5）
     SendInput {
         card_id: CardId,
@@ -1008,6 +1023,7 @@ mod tests {
             },
             ServerToAgent::Kill { card_id },
             ServerToAgent::Archive { card_id },
+            ServerToAgent::Forget { card_id },
             ServerToAgent::SendInput {
                 card_id,
                 text: "/rewind".to_string(),
@@ -1190,6 +1206,50 @@ mod tests {
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }
+    }
+
+    /// **PC の答えに知らない状態の綴りが混ざっても、資源の答えとして解ける**（実装レビュー
+    /// Fable 2）。線の上で実際に運ばれる形（`AgentMessage::HostReply`）で見る——
+    /// 解けないと、古いサーバは答えを丸ごと「聞けなかった」にする。
+    #[test]
+    fn 新しいpcが足した外側の様子も資源の答えとして読める() {
+        // 線の形は実物から作る（手で JSON を組むと、包みの綴りを取り違えても気づけない）
+        let mut line = serde_json::to_value(AgentMessage::HostReply {
+            request_id: RequestId::new(),
+            reply: HostReply::Resources(crate::HostResources {
+                total_mb: 16_000,
+                available_mb: 12_000,
+                swap_free_mb: 0,
+                estimate_mb: 780,
+                headroom_mb: 2_048,
+                fits_now: Some(3),
+                host_free_mb: Some(6_000),
+                counted_mb: Some(6_000),
+                host_free_age_sec: Some(4),
+                host_free_state: Some(crate::HostFreeState::Fresh),
+                host_free_error: None,
+                effective_mb: Some(6_000),
+            }),
+        })
+        .expect("書けること");
+        let 状態 = line
+            .pointer_mut("/reply/host_free_state")
+            .expect("状態の欄が線に載っていること");
+        assert_eq!(*状態, serde_json::json!("fresh"));
+        *状態 = serde_json::json!("throttled");
+        let message: AgentMessage =
+            serde_json::from_value(line.clone()).expect("★知らない状態の綴りで、答えごと解けない");
+        let AgentMessage::HostReply {
+            reply: HostReply::Resources(resources),
+            ..
+        } = message
+        else {
+            panic!("資源の答えとして読めていない: {line}");
+        };
+        assert_eq!(
+            resources.host_free_state,
+            Some(crate::HostFreeState::Unknown)
+        );
     }
 
     #[test]

@@ -3099,3 +3099,100 @@ async fn バスから来た使用上限も手元の保管へ入る() {
         backend.finish().await;
     }
 }
+
+fn 起こし直しの知らせ(
+    card_id: CardId,
+    message: &str,
+    busy: Option<bool>,
+) -> ServerMessage {
+    ServerMessage::Error {
+        card_id: Some(card_id),
+        message: message.to_string(),
+        kind: ErrorKind::Revive,
+        busy,
+    }
+}
+
+#[tokio::test]
+async fn 起こし直しの終わった断りは配った後も記録から引ける() {
+    // 実装レビュー Astra 4。配信を取りこぼした待ち手（枝分かれ）が、配られたはずの断りを
+    // 引き直すための口。**手元の報告（`apply`）も、他インスタンスからの便（`adopt`）も残す**
+    for backend in common::backends("revive-refusal").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let account = server_core::db::LOCAL_ACCOUNT_ID;
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+
+        // 控える前に配られた断り（前に押した人のもの）は返さない
+        registry
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "前の断り", Some(false)),
+            )
+            .await;
+        let 目印 = registry.revive_refusal_mark();
+        assert_eq!(
+            registry.revive_refusal_since(account, card_id, 目印),
+            None,
+            "[{}] 控える前の断りを拾っている",
+            backend.name
+        );
+
+        // 競合と判別できない知らせは残さない（待てば起きるかもしれない）
+        registry
+            .apply(&local(), 起こし直しの知らせ(card_id, "競合", Some(true)))
+            .await;
+        registry
+            .apply(&local(), 起こし直しの知らせ(card_id, "古い PC", None))
+            .await;
+        assert_eq!(
+            registry.revive_refusal_since(account, card_id, 目印),
+            None,
+            "[{}] 終わった断りでないものを残している",
+            backend.name
+        );
+
+        registry
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "メモリが足りない", Some(false)),
+            )
+            .await;
+        assert_eq!(
+            registry
+                .revive_refusal_since(account, card_id, 目印)
+                .as_deref(),
+            Some("メモリが足りない"),
+            "[{}] ★配った断りが記録に残っていない",
+            backend.name
+        );
+        assert_eq!(
+            registry.revive_refusal_since(account, CardId::new(), 目印),
+            None,
+            "[{}] 他のカードの断りとして返している",
+            backend.name
+        );
+
+        // 他インスタンスから回ってきた断りも残す（ブラウザ→A・PC→B の配置）
+        let 目印 = registry.revive_refusal_mark();
+        registry
+            .adopt(
+                account,
+                起こし直しの知らせ(card_id, "跨いできた断り", Some(false)),
+            )
+            .await;
+        assert_eq!(
+            registry
+                .revive_refusal_since(account, card_id, 目印)
+                .as_deref(),
+            Some("跨いできた断り"),
+            "[{}] ★連絡係から来た断りが記録に残っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

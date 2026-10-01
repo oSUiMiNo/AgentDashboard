@@ -476,3 +476,91 @@ async fn 外したカードは起こし直しの対象にならない() {
         outcome.human
     );
 }
+
+// ---------------------------------------------------------------------------
+// 起こし直しの確かめ中に外したカードは起こさない（実装レビュー Astra 1）。
+//
+// **画面と CLI が通る「外す」口（ws の `Archive`）から当てる。** 外し方は2通りあり、
+// サーバから見て実体があれば PC へ `archive` を頼み、無ければ記録だけを外す。後者は
+// PC へ何も伝えていなかったので、確かめを待っている起こし直しが後から実体を作り、
+// 報告は記録層に捨てられて画面に出ないまま残っていた。
+// ---------------------------------------------------------------------------
+
+/// 抜け殻を起こし直させ、Windows 側の確かめで止めてから CLI で外す。外した後に門を開け、
+/// **確かめが済んだ後も実体が無いこと**を確かめる。
+async fn 確かめ中に外す(server: &common::TestServer, card_id: protocol::CardId) {
+    let (外, host_free, _門) = common::確かめで止める(&server.manager);
+
+    let target = target_of(server);
+    let 起こし直し = tokio::spawn({
+        let target = target.clone();
+        async move { agentdashboard_core::client::revive(&target, &card_id.to_string()).await }
+    });
+    外.聞かれるまで待つ(0).await;
+
+    agentdashboard_core::client::archive(&target, &card_id.to_string())
+        .await
+        .expect("外せること");
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    // 確かめが済んでから起こすまでの間を与える（起こすなら、ここで既に起きている）
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "★外したカードの実体を、確かめが済んだ後に起こしている（画面に出ないままメモリを食う）"
+    );
+    assert!(
+        server.registry.get(card_id).is_none(),
+        "記録から外れていない"
+    );
+    起こし直し.abort();
+}
+
+#[tokio::test]
+async fn 前回の起動が残した抜け殻を確かめ中に外すと確かめが済んでも起こさない() {
+    // **サーバから見て実体が無い**カード。外す口は記録だけを外す側へ進む
+    let config = config_for("revive-withdrawn-dormant");
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        let card_id = session.card_id;
+        session.kill();
+        card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let server = common::TestServer::start_with(config).await;
+    let listed = server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    assert!(listed[0].revivable(), "戻せる状態として見えていない");
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "実体が居るなら、記録だけを外す側を通らない"
+    );
+
+    確かめ中に外す(&server, card_id).await;
+}
+
+#[tokio::test]
+async fn 寝かせた抜け殻を確かめ中に外すと確かめが済んでも起こさない() {
+    // **サーバから見て実体がある**カード（寝かせただけ）。外す口は `archive` を頼む側へ進む
+    let server = common::TestServer::start_with(config_for("revive-withdrawn-asleep")).await;
+    let (session, _) = 呼び戻し先つきで起こす(&server).await;
+    let card_id = session.card_id;
+    session.kill();
+    server
+        .wait_for_listed("寝る", |listed| {
+            listed.iter().any(|meta| {
+                meta.card_id == card_id && matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    assert!(
+        server.manager.get(card_id).is_some(),
+        "抜け殻が居ないなら、archive を頼む側を通らない"
+    );
+
+    確かめ中に外す(&server, card_id).await;
+}

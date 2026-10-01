@@ -1503,6 +1503,13 @@ fn apply_command(
                 report_error(manager, card_id, err.to_string(), ErrorKind::Archive);
             }
         }
+        // 記録の側だけで外したカード（実装レビュー Astra 1）。**何も無くても断らない**
+        // ——サーバはこの PC が持っているかを知らないまま送ってくる
+        ServerToAgent::Forget { card_id } => {
+            if manager.forget(card_id) {
+                tracing::info!(%card_id, "記録の側で外されたカードを、この PC からも片付けました");
+            }
+        }
         ServerToAgent::Resize {
             card_id,
             cols,

@@ -3231,3 +3231,75 @@ async fn PC_側の起こし直しの断りは終わった断りとしてサー�
 
     session.kill();
 }
+
+// ---------------------------------------------------------------------------
+// 起こし直しの確かめ中に外したカードは、PC も起こさない（実装レビュー Astra 1）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_は確かめが済んでも起こさない() {
+    // **サーバから見て実体が無い**（接続断）カードは、外すと記録だけが外れる。PC の側では
+    // 起こし直しが確かめを待っている——サーバは PC へ知らせないと、確かめが済んだ後に
+    // 起きたプロセスの報告を捨て、画面に出ないままメモリを食わせる
+    let a2s = A2s::start("revive-withdrawn").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    // **PC が実体を失ったカードにする**（PC が起き直したときの形）。`抜け殻にする` は実体を
+    // 生かしたまま鮮度だけを落とすので、実体の報告が届くと「繋がっている」に戻り、外す口が
+    // 記録だけを外す側を通らなくなる（負荷が高いときに実際に揺れた）
+    a2s.manager.forget(card_id);
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a2s.registry.set_agent_live(agent_id, false);
+    let (外, host_free, _門) = common::確かめで止める(&a2s.manager);
+
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    外.聞かれるまで待つ(0).await;
+    assert!(
+        !a2s.browser.exists(card_id),
+        "サーバから見て実体があるなら、記録だけを外す側を通らない"
+    );
+
+    // 画面と CLI が通る「外す」口（ws の `Archive`）から外す
+    let mut events = a2s.registry.subscribe_events();
+    let target = agentdashboard_core::client::Target::from_url(&format!("http://{}", a2s.addr))
+        .expect("接続先を読めること");
+    agentdashboard_core::client::archive(&target, &card_id.to_string())
+        .await
+        .expect("外せること");
+
+    // PC が知らせを受けて起こし直しを取り下げるのを待つ（取り下げた断りが届く）。
+    // **ここでは落とさない**——届かない壊れ方は、門を開けた後の★で落とす
+    let 期限 = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Ok(event)) = tokio::time::timeout_at(期限, events.recv()).await {
+        if let protocol::ws::ServerMessage::Error {
+            card_id: Some(id),
+            kind: protocol::ws::ErrorKind::Revive,
+            ..
+        } = event.message
+            && id == card_id
+        {
+            break;
+        }
+    }
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    // 確かめが済んでから起こすまでの間を与える（起こすなら、ここで既に起きている）
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        a2s.manager.get(card_id).is_none(),
+        "★外したカードの実体が PC に起きている（外したことが PC に届かず、確かめの後に起こしている）"
+    );
+    assert!(a2s.registry.get(card_id).is_none(), "記録から外れていない");
+}

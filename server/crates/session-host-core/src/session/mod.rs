@@ -512,10 +512,13 @@ pub enum SessionError {
     /// 起こせない 設計§6-1）。以前は判定に使っていない `MemAvailable` を「空き」と出して
     /// いたので、「20GB 空いているのにメモリ不足」という矛盾した断りになっていた。
     /// 何が制約だったか（`limit`）で、利用者がすることが変わるので文面を分ける。
-    #[error("{}", out_of_memory_text(*effective_mb, *limit, *host_free_age_sec, *reserved, *estimate_mb, *headroom_mb))]
+    #[error("{}", out_of_memory_text(*effective_mb, *base_mb, *limit, *host_free_age_sec, *reserved, *estimate_mb, *headroom_mb))]
     OutOfMemory {
         /// 判定に使った空き（予約後の見込みも引いた値）
         effective_mb: u64,
+        /// 予約を引く前の空き（観測から数えた値）。`effective_mb` より大きければ、
+        /// 起こしている途中のぶんを差し引いている
+        base_mb: u64,
         /// 何が制約だったか
         limit: crate::resources::Limit,
         /// Windows 側の値が何秒前のものか（Windows が制約のとき）
@@ -545,6 +548,26 @@ pub enum SessionError {
         estimate_mb: u64,
         headroom_mb: u64,
     },
+    /// 起こし直しの途中で一覧から外されたので、起こさずにやめた（実装レビュー Astra 1）。
+    ///
+    /// **終わった断りとして配る**（`busy: Some(false)`）。起きるのを待っている枝分かれが
+    /// これを見て、上限まで待たずに終われる。
+    #[error("一覧から外されたので、起こし直しをやめました")]
+    Withdrawn(CardId),
+}
+
+/// 起こし直しを取り下げたことを1行残し、断りを作る（実装レビュー Astra 1）。
+///
+/// どの段で気づいたかを残す。席待ち・確かめの途中で気づけば、席や待ち時間を
+/// 無駄に握らずに済んだことが後から分かる。
+fn withdrawn(card_id: CardId, stage: &'static str) -> SessionError {
+    tracing::info!(
+        %card_id,
+        kind = "revive_withdrawn",
+        stage,
+        "一覧から外されたので、起こし直しをやめました"
+    );
+    SessionError::Withdrawn(card_id)
 }
 
 /// メモリ不足の断りの文面（設計§6-1）。**制約ごとに、利用者がすることを言い分ける。**
@@ -552,6 +575,7 @@ pub enum SessionError {
 /// **WSL でない機械の文面は、以前の形と数を保つ**（「空き N MB／1枚あたり…」）。
 fn out_of_memory_text(
     effective_mb: u64,
+    base_mb: u64,
     limit: crate::resources::Limit,
     host_free_age_sec: Option<u64>,
     reserved: u32,
@@ -561,6 +585,19 @@ fn out_of_memory_text(
     use crate::resources::Limit;
     let per = format!("1枚あたり {estimate_mb} MB ＋ 残す余白 {headroom_mb} MB");
     match limit {
+        // **予約を引いていても、枚数を決めたのが Windows 側ならこちらに来る**（実装レビュー
+        // Fable 1）。そのときは「＝Windows 側の空き」と言うと嘘になるので、両方の数を出す
+        Limit::Windows if effective_mb < base_mb => {
+            let age = host_free_age_sec
+                .map(|age| format!("（{age} 秒前に確認）"))
+                .unwrap_or_else(|| " ".to_string());
+            format!(
+                "メモリが足りないので起こし直せません（使える空き {effective_mb} MB＝\
+                 Windows 側の空き {base_mb} MB{age}から、起こしている途中の {reserved} 枚ぶんを\
+                 差し引いた値／{per}）。Windows 側でメモリを使っているアプリを閉じるか、\
+                 動いているセッションを終了させてから、もう一度押してください"
+            )
+        }
         Limit::Windows => {
             let age = host_free_age_sec
                 .map(|age| format!("・{age} 秒前に確認"))
@@ -2332,7 +2369,10 @@ pub struct SessionManager {
     ///
     /// 実体の有無を見るだけでは防げない。抜け殻には実体が無いので、2つ目の頼みも
     /// 「居ないから作ってよい」を通ってしまう。
-    reviving: Mutex<HashSet<CardId>>,
+    ///
+    /// 値は、その起こし直しを**まだ続けてよいか**の札（[`ReviveTicket`]）。外す側が
+    /// ここから札を引いて下ろす。
+    reviving: Mutex<HashMap<CardId, Arc<ReviveTicket>>>,
     /// 同時に起こし直す本数の上限（設計§8-1）。
     ///
     /// **ここだけは「その場で断る」ではなく「待たせる」**。このリポジトリの作法は
@@ -2457,6 +2497,41 @@ impl Drop for MemoryReservation {
 pub struct ReviveInFlight {
     manager: Arc<SessionManager>,
     card_id: CardId,
+    ticket: Arc<ReviveTicket>,
+}
+
+/// 起こし直しを、まだ続けてよいかの札（実装レビュー Astra 1）。
+///
+/// 確かめを待っている間（最大 65 秒）にカードを一覧から外しても、以前は取り消されず、
+/// 確かめが済んだ後に**誰にも見えないプロセスを起こしていた**（外したカードの報告は
+/// サーバが捨てるので、画面に出ないままメモリだけを食う）。外す側
+/// （[`SessionManager::forget`]・[`SessionManager::archive`]）が札を下ろし、起こす側は
+/// 起こす直前にそれを見る。
+#[derive(Default)]
+struct ReviveTicket {
+    /// 下ろされたか。**起こす側はこれを握ったまま畳んで起こす**——見てから起こすまでの
+    /// 間に外されると、外す側の畳みが空振りした直後にプロセスが起き、残る。
+    withdrawn: Mutex<bool>,
+    /// 下ろされたことを、席や確かめを待っている起こす側へ知らせる。外したカードのために
+    /// 席を握ったまま待ち続けると、ほかのカードの起こし直しまで止まる
+    woken: tokio::sync::Notify,
+}
+
+impl ReviveTicket {
+    fn withdraw(&self) {
+        *self.withdrawn.lock().expect("ロックが壊れていない") = true;
+        // **待っている者が居なくても知らせを1つ残す**（`notify_one`）。見てから待ち始める
+        // までの間に下ろされても、取りこぼさない
+        self.woken.notify_one();
+    }
+
+    /// 下ろされるまで待つ。
+    async fn withdrawn(&self) {
+        if *self.withdrawn.lock().expect("ロックが壊れていない") {
+            return;
+        }
+        self.woken.notified().await;
+    }
 }
 
 impl Drop for ReviveInFlight {
@@ -2840,6 +2915,7 @@ impl SessionManager {
         if assessment.fits == Some(0) {
             let refusal = SessionError::OutOfMemory {
                 effective_mb: assessment.effective_mb,
+                base_mb: assessment.counted_mb.unwrap_or(memory.available_mb),
                 limit: assessment.limit,
                 host_free_age_sec,
                 reserved: budget.outstanding,
@@ -2902,7 +2978,7 @@ impl SessionManager {
             claude_settings,
             aliases,
             screen_settings: Mutex::new(screen::ScreenSettings::default()),
-            reviving: Mutex::new(HashSet::new()),
+            reviving: Mutex::new(HashMap::new()),
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
             host_free: Mutex::new(host_free),
@@ -3450,7 +3526,16 @@ impl SessionManager {
           畳む先が無ければ黙って何もしないので、前に置いて損をしない。
         */
         crate::attachments::forget(&self.config().resolved_state_dir(), card_id);
-        self.fold(card_id).ok_or(SessionError::NotFound(card_id))?;
+        // **進んでいる起こし直しも取り下げる**（実装レビュー Astra 1）。畳むだけだと、
+        // 確かめを待っている起こし直しが後から実体を作り、誰にも見えないまま残る。
+        // 畳むより先に下ろす——後にすると、畳んだ直後に起きた実体を取り逃がす
+        let withdrew = self.withdraw_revive(card_id);
+        let folded = self.fold(card_id).is_some();
+        // 起こし直しを止めただけ（実体はまだ無い）でも外せたことにする。断ると、正しく
+        // 取り下げたのに画面へ「見つかりません」が出る
+        if !withdrew && !folded {
+            return Err(SessionError::NotFound(card_id));
+        }
         // **配るのはこちらだけ。** 復旧は同じ本体を通るが、ここを配ると
         // 起こし直すつもりのカードが画面から消えてしまう（設計§7-1）
         self.events.emit(ServerMessage::SessionRemoved { card_id });
@@ -3470,14 +3555,56 @@ impl SessionManager {
     /// 既に起こし直している最中なら `None`。**待ち行列に並ばせない**——同じカードが
     /// 2つ並ぶと、席が空いたときに両方とも通る（設計§8-1）。
     pub fn begin_revive(self: &Arc<Self>, card_id: CardId) -> Option<ReviveInFlight> {
-        self.reviving
+        let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
+        let std::collections::hash_map::Entry::Vacant(slot) = reviving.entry(card_id) else {
+            return None;
+        };
+        let ticket = Arc::clone(slot.insert(Arc::new(ReviveTicket::default())));
+        Some(ReviveInFlight {
+            manager: Arc::clone(self),
+            card_id,
+            ticket,
+        })
+    }
+
+    /// そのカードの起こし直しが進んでいれば、札を下ろす（実装レビュー Astra 1）。
+    ///
+    /// **起こす側が起こしている最中なら、起こし終わるまで待つ**（札のロックを起こす側が
+    /// 握っている）。その後に畳めば、起きたばかりの実体も畳める。
+    fn withdraw_revive(&self, card_id: CardId) -> bool {
+        let ticket = self
+            .reviving
             .lock()
             .expect("ロックが壊れていない")
-            .insert(card_id)
-            .then(|| ReviveInFlight {
-                manager: Arc::clone(self),
-                card_id,
-            })
+            .get(&card_id)
+            .cloned();
+        // 表のロックは先に離す。札のロックを待つ間に表を握っていると、ほかのカードの
+        // 起こし直しの受付（`begin_revive`）まで止まる
+        let Some(ticket) = ticket else {
+            return false;
+        };
+        ticket.withdraw();
+        tracing::info!(%card_id, "一覧から外されたので、進んでいた起こし直しを取り下げます");
+        true
+    }
+
+    /// 一覧から外されたカードを、この PC からも片付ける（実装レビュー Astra 1）。
+    ///
+    /// サーバが**記録の側だけで**外したとき（サーバから見て実体が無いカード）に届く。
+    /// 起こし直しが進んでいれば取り下げ、実体があれば畳む。**何も無ければ何もしない**
+    /// ——[`SessionManager::archive`] と違って断らない。サーバは「この PC が持っているか」を
+    /// 知らないまま送ってくるので、無いのは普通のことである。
+    ///
+    /// 実体まで畳むのは、**サーバから見えない実体がありうる**ため。起こし直しが起こした
+    /// 直後、最初の報告がサーバへ届くまでの間は、サーバからは「無い」に見える。そこで
+    /// 外されると、記録は外れているのに実体は動き続け、報告は捨てられて画面に出ない。
+    ///
+    /// `SessionRemoved` は配らない。記録はサーバが既に外している。
+    pub fn forget(&self, card_id: CardId) -> bool {
+        let withdrew = self.withdraw_revive(card_id);
+        crate::attachments::forget(&self.config().resolved_state_dir(), card_id);
+        let folded = self.fold(card_id).is_some();
+        withdrew || folded
     }
 
     /// 抜け殻のカードを、元の CLI セッションで起こし直す（設計§7・§8）。
@@ -3503,6 +3630,7 @@ impl SessionManager {
         claude_session_id: ClaudeSessionId,
     ) -> Result<Arc<Session>, SessionError> {
         let card_id = in_flight.card_id;
+        let ticket = Arc::clone(&in_flight.ticket);
         // **受付の時点で外側を取りに行かせる**（寝ているカードばかりなのに、メモリ不足で
         // セッションを起こせない 設計§2-6）。取得と席待ちが重なるので、席が空くころには
         // 答えが出ていることが多い。待たない
@@ -3517,11 +3645,13 @@ impl SessionManager {
             物差し.host_free().prefetch(required_after);
         }
         // 席が空くまで待つ。**ここは切り離されたタスクの中**なので、待っても他の指示は
-        // 止まらない（設計§8-3）
-        let seat = Arc::clone(&self.revive_slots)
-            .acquire_owned()
-            .await
-            .expect("席の口を閉じていない");
+        // 止まらない（設計§8-3）。**待っている間に外されたら、席を取らずにやめる**
+        let seat = tokio::select! {
+            seat = Arc::clone(&self.revive_slots).acquire_owned() => {
+                seat.expect("席の口を閉じていない")
+            }
+            () = ticket.withdrawn() => return Err(withdrawn(card_id, "席を待っている間")),
+        };
 
         // **床は席を取った直後に見る**（設計§18-3）。順序はコンパイラが見張っている
         // ——`reserve_memory` は席を引数に取るので、前へ動かすと通らない。
@@ -3530,24 +3660,43 @@ impl SessionManager {
         //
         // 通ったら1枚ぶん予約が返る。**この先で失敗したら、そこで落ちて枠が返る**
         // （RAII。60秒ぶん多く見積もったまま残さない）
-        let reservation = self.judge_memory(card_id, &seat, &物差し).await?;
+        //
+        // **確かめを待っている間に外されたら、待ち終わるのを待たずにやめる**（実装レビュー
+        // Astra 1）。席を握ったまま最大 65 秒待つと、ほかのカードの起こし直しまで止まる。
+        // 確かめの途中で手放しても、予約はまだ取っていない（取るのは確かめた後の同期の段）
+        let reservation = tokio::select! {
+            judged = self.judge_memory(card_id, &seat, &物差し) => judged?,
+            () = ticket.withdrawn() => {
+                return Err(withdrawn(card_id, "Windows 側の空きを確かめている間"));
+            }
+        };
 
-        // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
-        if self.fold(card_id).is_some() {
-            tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
-        }
+        // **まだ起こしてよいかを、起こし終えるまで握ったまま見る**（実装レビュー Astra 1）。
+        // 見てから起こすまでの間に外されると、外す側の畳みが空振りした直後に実体が起き、
+        // 誰にも見えないまま残る。外す側は札を下ろすところで、起こし終わるのを待つ
+        let session = {
+            let 取り下げられた = ticket.withdrawn.lock().expect("ロックが壊れていない");
+            if *取り下げられた {
+                return Err(withdrawn(card_id, "確かめた後"));
+            }
 
-        let args = lifecycle::permission_mode_args(mode.as_ref());
-        let session = self.spawn_as(
-            card_id,
-            cwd,
-            lifecycle::SessionStart::Resume(claude_session_id),
-            &args,
-            mode,
-            // **こちらがどのセッションを指定したかを知っている**ので、先に入れておく
-            // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
-            Some(claude_session_id),
-        )?;
+            // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
+            if self.fold(card_id).is_some() {
+                tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
+            }
+
+            let args = lifecycle::permission_mode_args(mode.as_ref());
+            self.spawn_as(
+                card_id,
+                cwd,
+                lifecycle::SessionStart::Resume(claude_session_id),
+                &args,
+                mode,
+                // **こちらがどのセッションを指定したかを知っている**ので、先に入れておく
+                // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
+                Some(claude_session_id),
+            )?
+        };
 
         // 立ち上がりきるまで席と印を持つ見張りを、**切り離してから**返す。
         //
@@ -4392,6 +4541,7 @@ mod tests {
                 文たち.push(
                     SessionError::OutOfMemory {
                         effective_mb: 2500,
+                        base_mb: 2500,
                         limit,
                         host_free_age_sec: age,
                         reserved: 2,
@@ -4410,6 +4560,21 @@ mod tests {
             }
             .to_string(),
         );
+        // 予約を引いていても Windows 側が枚数を決めたとき（実装レビュー Fable 1）
+        for age in [None, Some(3)] {
+            文たち.push(
+                SessionError::OutOfMemory {
+                    effective_mb: 2500,
+                    base_mb: 2800,
+                    limit: Limit::Windows,
+                    host_free_age_sec: age,
+                    reserved: 2,
+                    estimate_mb: 1000,
+                    headroom_mb: 2000,
+                }
+                .to_string(),
+            );
+        }
 
         for 文 in &文たち {
             assert!(
@@ -4439,6 +4604,7 @@ mod tests {
         let 文 = |limit, age| {
             SessionError::OutOfMemory {
                 effective_mb: 1792,
+                base_mb: 1792,
                 limit,
                 host_free_age_sec: age,
                 reserved: 2,
@@ -4459,6 +4625,28 @@ mod tests {
             "{reserved}"
         );
         assert!(reserved.contains("1分ほど待って"), "{reserved}");
+        // **予約を引いていても Windows 側が枚数を決めたなら、両方の数を出して Windows 側の
+        // 文面で言う**（実装レビュー Fable 1）。「＝Windows 側の空き」は嘘になり、
+        // 「1分待って」は待っても通らない
+        let 引いた後 = SessionError::OutOfMemory {
+            effective_mb: 2700,
+            base_mb: 2800,
+            limit: Limit::Windows,
+            host_free_age_sec: Some(3),
+            reserved: 1,
+            estimate_mb: 780,
+            headroom_mb: 2048,
+        }
+        .to_string();
+        assert!(
+            引いた後.contains(
+                "使える空き 2700 MB＝Windows 側の空き 2800 MB（3 秒前に確認）から、\
+                 起こしている途中の 1 枚ぶんを差し引いた値"
+            ),
+            "★両方の数を出していない: {引いた後}"
+        );
+        assert!(引いた後.contains("アプリを閉じる"), "{引いた後}");
+        assert!(!引いた後.contains("1分ほど待って"), "{引いた後}");
         // **WSL でない機械の文面は以前の形を保つ**
         assert_eq!(
             文(Limit::Wsl, None),

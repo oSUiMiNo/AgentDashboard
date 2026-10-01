@@ -291,3 +291,115 @@ pub async fn fire_hook(session: &Session, watcher: &mut Watcher, event: &str, ex
         ))
         .await;
 }
+
+// ---------------------------------------------------------------------------
+// 起こし直しを Windows 側の確かめで止める（実装レビュー Astra 1）
+// ---------------------------------------------------------------------------
+
+/// 暖まった WSL の姿。`MemAvailable` は十分で、`MemFree` は小さい。
+#[derive(Debug)]
+pub struct 十分なメモリ;
+
+impl session_host_core::resources::Probe for 十分なメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        Some(session_host_core::resources::Memory {
+            total_mb: 32_000,
+            available_mb: 20_000,
+            swap_free_mb: 0,
+            free_mb: 400,
+        })
+    }
+}
+
+/// 開けるまで答えない Windows 側（6,000MB と答える）。**聞かれた回数を数える**——
+/// 止まったことを確かめてから外すため。
+#[derive(Debug, Default)]
+pub struct 止める外側 {
+    開いた: std::sync::Mutex<bool>,
+    合図: std::sync::Condvar,
+    聞かれた: std::sync::atomic::AtomicUsize,
+}
+
+impl 止める外側 {
+    pub fn 開いたまま() -> Arc<Self> {
+        let 外 = Arc::new(Self::default());
+        外.開ける();
+        外
+    }
+
+    pub fn 開ける(&self) {
+        *self.開いた.lock().expect("ロックが壊れていない") = true;
+        self.合図.notify_all();
+    }
+
+    pub fn 閉める(&self) {
+        *self.開いた.lock().expect("ロックが壊れていない") = false;
+    }
+
+    pub fn 聞かれた(&self) -> usize {
+        self.聞かれた.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 聞かれるまで待つ（＝起こし直しが確かめで止まった）。
+    pub async fn 聞かれるまで待つ(&self, 前の回数: usize) {
+        let 期限 = tokio::time::Instant::now() + TIMEOUT;
+        while self.聞かれた() <= 前の回数 {
+            assert!(
+                tokio::time::Instant::now() < 期限,
+                "{TIMEOUT:?} 以内に起こし直しが Windows 側の確かめまで来ない"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+impl session_host_core::resources::HostFreeProbe for 止める外側 {
+    fn read(&self) -> Result<u64, String> {
+        self.聞かれた
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut 開いた = self.開いた.lock().expect("ロックが壊れていない");
+        while !*開いた {
+            開いた = self.合図.wait(開いた).expect("ロックが壊れていない");
+        }
+        Ok(6_000)
+    }
+}
+
+/// 試験が途中で落ちても門を開ける。**閉じたままだと取得の糸が待ち続け、落ちた試験の
+/// プロセスが終われずに固まる**（赤を確かめたときに実際に踏んだ）。
+pub struct 門を開けて去る(pub Arc<止める外側>);
+
+impl Drop for 門を開けて去る {
+    fn drop(&mut self) {
+        self.0.開ける();
+    }
+}
+
+/// 閉じた門を WSL の外側として差し込む。返すのは門・取得の口・落ちたとき門を開ける札。
+pub fn 確かめで止める(
+    manager: &Arc<SessionManager>,
+) -> (
+    Arc<止める外側>,
+    Arc<session_host_core::resources::HostFree>,
+    門を開けて去る,
+) {
+    manager.set_memory_probe(Arc::new(十分なメモリ));
+    let 外 = Arc::new(止める外側::default());
+    let host_free = session_host_core::resources::HostFree::new(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+    );
+    manager.set_host_free(Arc::clone(&host_free));
+    let 札 = 門を開けて去る(Arc::clone(&外));
+    (外, host_free, 札)
+}
+
+/// 取得が1本終わるまで待つ（門を開けた後、確かめが済んだことを見るため）。
+pub async fn 取得が終わるまで待つ(host_free: &session_host_core::resources::HostFree) {
+    let 期限 = tokio::time::Instant::now() + TIMEOUT;
+    while host_free.聞き終えた回数() == 0 {
+        assert!(tokio::time::Instant::now() < 期限, "取得が終わらない");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

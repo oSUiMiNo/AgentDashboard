@@ -210,6 +210,9 @@ impl Branch {
 
         // ── ② 撃つ前に購読を張る ─────────────────────────────────────
         let mut events = self.registry.subscribe_events();
+        // **断りの通し番号もここで控える**（実装レビュー Astra 4）。配信を取りこぼしても、
+        // これより後に残った断りは記録から引き直せる
+        let 断りの目印 = self.registry.revive_refusal_mark();
 
         // ── ①′ 寝ていたら起こし、起動中なら整うのを待つ（§3-4-2）───────
         // **`/branch` は生きた claude にしか撃てない。** だからといって押せなくするのでは
@@ -237,9 +240,12 @@ impl Branch {
             // **起こし直しの終わった断りを拾うのは、この段だけ**（寝ているカードばかり
             // なのに、メモリ不足でセッションを起こせない 設計§7-3）。拾わないと、
             // 断られた後も上限（180 秒）まで待ち、事実と違う理由で終わる
-            self.wait_for(&mut events, WAKE_TIMEOUT, Some(card_id), move |meta| {
-                meta.card_id == card_id && 整った(meta.status)
-            })
+            self.wait_for(
+                &mut events,
+                WAKE_TIMEOUT,
+                Some((card_id, 断りの目印)),
+                move |meta| meta.card_id == card_id && 整った(meta.status),
+            )
             .await
             .map_err(|reason| format!("元のセッションを起こせませんでした：{reason}"))?
             .ok_or_else(|| {
@@ -428,15 +434,19 @@ impl Branch {
     /// **購読と記録の両方を見る。** 配信は `Lagged` で取りこぼしうるので、報せを待つ
     /// 傍らで一定の間隔で記録層を直に確かめる。
     ///
-    /// `断りを拾う` にカードを渡すと、そのカード宛ての**起こし直しの終わった断り**が
-    /// 届いた時点で、その文面を `Err` で返す（[`起こし直しの断り`]）。渡すのは起きるのを
-    /// 待つ段だけ——他の段で拾うと、無関係な断りで段取りを止めてしまう。
+    /// `断りを拾う` にカードと断りの目印（[`crate::registry::SessionRegistry::revive_refusal_mark`]）
+    /// を渡すと、そのカード宛ての**起こし直しの終わった断り**が届いた時点で、その文面を
+    /// `Err` で返す（[`起こし直しの断り`]）。渡すのは起きるのを待つ段だけ——他の段で拾うと、
+    /// 無関係な断りで段取りを止めてしまう。
     /// `Ok(None)` は上限まで待っても現れなかったこと。
+    ///
+    /// **断りも記録から引き直す**（実装レビュー Astra 4）。配信で取りこぼす（`Lagged`）と
+    /// 報せだけでは断りを失い、上限まで待ってから事実と違う理由で終わる。
     async fn wait_for(
         &self,
         events: &mut tokio::sync::broadcast::Receiver<crate::registry::AccountEvent>,
         限度: Duration,
-        断りを拾う: Option<CardId>,
+        断りを拾う: Option<(CardId, u64)>,
         条件: impl Fn(&SessionMeta) -> bool,
     ) -> Result<Option<SessionMeta>, String> {
         let 期限 = tokio::time::Instant::now() + 限度;
@@ -449,6 +459,19 @@ impl Branch {
                 .find(|meta| 条件(meta))
             {
                 return Ok(Some(meta));
+            }
+            if let Some((拾うカード, 目印)) = 断りを拾う {
+                // **待っている相手が一覧から外されたら、もう起きてこない。** 外したカードは
+                // 記録ごと消えるので、断りも残らない——待ち続けると上限まで黙る
+                if self.registry.owned(self.account_id, 拾うカード).is_none() {
+                    return Err("一覧から外されました".to_string());
+                }
+                if let Some(理由) =
+                    self.registry
+                        .revive_refusal_since(self.account_id, 拾うカード, 目印)
+                {
+                    return Err(理由);
+                }
             }
             if tokio::time::Instant::now() >= 期限 {
                 return Ok(None);
@@ -464,7 +487,7 @@ impl Branch {
                     if event.account_id != self.account_id {
                         continue;
                     }
-                    if let Some(拾うカード) = 断りを拾う
+                    if let Some((拾うカード, _)) = 断りを拾う
                         && let Some(理由) = 起こし直しの断り(&event.message, 拾うカード)
                     {
                         return Err(理由.to_string());
@@ -647,16 +670,13 @@ fn pushable(status: SessionStatus) -> Result<(), String> {
 /// - `Some(true)`（競合）：先に起こしている側が居るので、待てば起きる。拾わない
 /// - `None`（古い PC・判別できない）：**欠けを断りと読まない**。拾わない（いまどおり待つ）
 /// - 他のカード・起こし直し以外の種別：拾わない
+///
+/// 見分けの規則そのものは記録層（[`crate::registry::revive_refusal_of`]）が持つ。
+/// 取りこぼしに備えて断りを残す側と、ここで拾う側の規則がずれないようにするため。
 fn 起こし直しの断り(message: &ServerMessage, card_id: CardId) -> Option<&str> {
-    match message {
-        ServerMessage::Error {
-            card_id: Some(宛先),
-            message,
-            kind: ErrorKind::Revive,
-            busy: Some(false),
-        } if *宛先 == card_id => Some(message),
-        _ => None,
-    }
+    crate::registry::revive_refusal_of(message)
+        .filter(|(宛先, _)| *宛先 == card_id)
+        .map(|(_, 理由)| 理由)
 }
 
 #[cfg(test)]

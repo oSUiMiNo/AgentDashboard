@@ -249,7 +249,12 @@ pub fn assess(
     let counted = counted_available(memory, basis);
     let base = counted.unwrap_or(memory.available_mb);
     let effective = projected(base, projected_mb);
-    let limit = if effective < base {
+    let fits_now = fits(effective, headroom_mb, estimate_mb);
+    // **予約のせいと言うのは、予約を引いたことで枚数が減ったときだけ**（実装レビュー
+    // Fable 1）。見込みが空きを下回っていても、引く前から同じ枚数なら決めたのは土台の
+    // 側である。ここを取り違えると「1分待てば通る」と言い、待って押し直した人が
+    // 今度は Windows 側の空きで断られる
+    let limit = if fits_now != fits(base, headroom_mb, estimate_mb) {
         Limit::Reserved
     } else {
         match basis {
@@ -261,7 +266,7 @@ pub fn assess(
     Assessment {
         counted_mb: counted,
         effective_mb: effective,
-        fits: fits(effective, headroom_mb, estimate_mb),
+        fits: fits_now,
         next_mb: effective.saturating_sub(estimate_mb),
         limit,
     }
@@ -2145,9 +2150,48 @@ mod tests {
             (Some(5_000), 3_500, Some(1), 2_500, Limit::Reserved)
         );
 
-        // 見積もり 0 は数えない
+        // **予約を引いても枚数が変わらないなら、決めたのは土台の側**（実装レビュー Fable 1）。
+        // 実機の数：Windows 側 2,800・余白 2,048・1枚 780・見込み 2,700。予約が無くても
+        // (2,800 − 2,048) ÷ 780 = 0 枚なので、「1分待てば通る」は嘘になる
+        let a = assess(
+            &姿(20_000, 400),
+            Basis::Outside(2_800),
+            Some(2_700),
+            780,
+            2_048,
+        );
+        assert_eq!(
+            (a.counted_mb, a.effective_mb, a.fits, a.limit),
+            (Some(2_800), 2_700, Some(0), Limit::Windows),
+            "★予約が枚数を変えていないのに、予約のせいにしている"
+        );
+        // 通すときも同じ（引く前も引いた後も 2 枚）
+        let a = assess(
+            &姿(20_000, 400),
+            Basis::Outside(4_500),
+            Some(4_200),
+            1_000,
+            2_000,
+        );
+        assert_eq!((a.fits, a.limit), (Some(2), Limit::Windows));
+        // 中が制約の機械でも同じ（引く前 3,500 ÷ 1,000 も、引いた後 3,100 ÷ 1,000 も 3 枚）
+        let a = assess(&姿(5_500, 500), Basis::NoOutside, Some(5_100), 1_000, 2_000);
+        assert_eq!(
+            (a.effective_mb, a.fits, a.limit),
+            (5_100, Some(3), Limit::Wsl)
+        );
+
+        // 見積もり 0 は数えない。**枚数を比べられないので、予約のせいにもしない**
         let a = assess(&姿(20_000, 400), Basis::Outside(5_000), None, 0, 2_000);
         assert_eq!(a.fits, None);
+        let a = assess(
+            &姿(20_000, 400),
+            Basis::Outside(5_000),
+            Some(3_000),
+            0,
+            2_000,
+        );
+        assert_eq!((a.fits, a.limit), (None, Limit::Windows));
     }
 
     // -----------------------------------------------------------------------

@@ -1468,6 +1468,41 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         self.relay(card_id, ServerToAgent::Archive { card_id })
     }
 
+    /// 記録の側だけで外すカードを、持ち主の PC へ知らせる（実装レビュー Astra 1）。
+    ///
+    /// **`relay` を使えない**のは [`RemoteSessionHost::revive`] と同じ理由——対象は定義上
+    /// `agent_connected == false` で、`relay` は必ず「繋がっていません」で断る。宛先は記録が
+    /// 名乗る PC で、[`RemoteSessionHost::route`] で引く。
+    ///
+    /// **起こし直しを名乗る PC にだけ送る**（`Need::Revive`）。名乗らない PC は起こし直しを
+    /// していないし、知らない種別は黙って捨てるだけである。
+    async fn forget(&self, account_id: Uuid, card_id: CardId) -> Result<(), String> {
+        let meta = self
+            .hub
+            .registry
+            .owned(account_id, card_id)
+            .map(|record| record.meta())
+            .ok_or_else(|| NOT_FOUND.to_string())?;
+        // 名乗らないのはローカルの記録だけ。知らせる PC が無い
+        let Some(target) = meta.agent_id else {
+            return Ok(());
+        };
+        let route = self
+            .route(account_id, target, Need::Revive)
+            .await
+            .map_err(|err| err.message())?;
+        let message = ServerToAgent::Forget { card_id };
+        match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
+        }
+    }
+
     /// 画面の配信を始める（設計§7-4）。
     ///
     /// 返すスナップショットは**空**である。リモートに「いまの生バイト」は存在せず、
