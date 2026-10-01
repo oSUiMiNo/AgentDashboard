@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 193
+min_entries = 199
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1670,6 +1670,17 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "CLI 側で外すのが先に済んでも、受け付けた頼みへの答えが跨いで届けば配り、持ち主の違う答えは配らない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/cluster.rs", name = "手元で外すのが先に済んでも受け付けた頼みの答えは跨いだ先で届く" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "外した後に跨いで届いた答えは受け付けた頼みなら配り持ち主の違う答えは配らない" },
+]
+breaks_when = "registry.rs の adopt で、番号付きの答え（Status の op が Some）の持ち主を、受け付けた頼みの控えを見ずにカードの記録（owned）だけで確かめる形へ戻すと、2本とも★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも同じ壊し方を当て、cluster の1本が「★A で外すのが先に済むと、受け付けた頼みへの完了の答えを捨てている」、registry の1本が「★外した後に跨いで届いた、受け付けた頼みの答えを捨てている」で落ちる（sqlite）ことを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "PC が「外した」と報告したのに記録を書けなかったとき、報告を捨てずに取り込み直し、記録を書けるようになれば一覧から外れる"
 gate        = "unit"
 tests       = [
@@ -2008,6 +2019,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "取り下げの知らせを約束の列にも積めないとき、届けたと答えない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/a2s.rs", name = "取り下げの知らせを約束の列にも積めなければ届けたと言わない" },
+]
+breaks_when = "gateway.rs の tell_owner で、PC が同じサーバに居る（Here）ときに積めたかを見ずに黙って Ok を返す形へ戻すと★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも Here の腕を conn.send の後に Ok(()) を返す形へ戻し、a2s の「取り下げの知らせを約束の列にも積めなければ届けたと言わない」が「★約束の列に積めなかった外し始めた知らせを、届けたと答えている」で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "外した知らせが起こし直しの頼みより先に届いても、外す前の札が残っている間に届いても、外したカードは起こさず終わった断りで返す（外せなかったカードには印を残さない）"
 gate        = "unit"
 tests       = [
@@ -2019,6 +2040,16 @@ tests       = [
   { file = "server/crates/core/tests/a2s.rs", name = "外した知らせが起こし直しの頼みより先に_PC_へ届いても起こさない" },
 ]
 breaks_when = "session/mod.rs の begin_revive で外した印を見ない（session_revive の2本が★、restart・a2s の各1本は起こしてしまい断りが届かず時間切れ）。archive を Retire::Always にする（外せなかったの1本が★）。印を札より後に見る（札が残っている間の1本が「★競合（復旧中）として断っている」で落ちる）。いずれも直した担当が実測した。自分でも begin_revive で外した印を見ない形にし、session_revive の「外した知らせが起こし直しの頼みより先に届いても起こさない」が★（実体を起こしている）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "外す知らせが届かないうちに PC が実体を起こしても、PC がそのカードを名乗ったときにサーバが照合して片付けさせる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/a2s.rs", name = "外した知らせが届かないうちに_PC_が起こしても名乗ったところで片付けさせる" },
+]
+breaks_when = "gateway.rs の handle_report で、SessionUpsert を受けたときに外したカードかを照合して Forget を送り直す処理を外すと★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも照合の条件の頭に false && を足して照合を効かなくし、a2s の「外した知らせが届かないうちに_PC_が起こしても名乗ったところで片付けさせる」が「20s 以内に ★（外したカードを PC が名乗っても、サーバが片付けさせない）PC から実体が消える になりませんでした」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2116,6 +2147,29 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "番号付きの答えが配信の溢れで捨てられても、控えから引き直して1回だけ送り、控えは持ち主の門を通した頼みだけに作り、外した後も引ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/src/ws.rs", name = "配信を取りこぼしても番号付きの答えは控えから引き直して届ける" },
+  { file = "server/crates/server-core/src/ws.rs", name = "届けた答えは取りこぼした後に送り直さず他人の答えも引かない" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "受け付けた頼みの答えは配る前に控え配信が溢れても外した後でも番号で引き直せる" },
+  { file = "server/crates/server-core/tests/tenancy.rs", name = "番号付きの頼みは持ち主の門を通したものだけを控え答えを引き直せる" },
+]
+breaks_when = "ws.rs の pump_events で配信を取りこぼした（Lagged）ときに控えから引き直さない、ws.rs の PendingOps の settle を外す、registry.rs の publish_local で控えを書かない、ws.rs の handle_request で accept_op を外す、のそれぞれで★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも Lagged の腕を何もしない形にし、ws.rs の「配信を取りこぼしても番号付きの答えは控えから引き直して届ける」が「★配信を取りこぼした番号付きの答えを、控えから引き直して送っていない」で落ちることを当て直した（同じ壊し方では「届けた答えは取りこぼした後に送り直さず他人の答えも引かない」は通った。引き直さなければ送り直しも起きないので、この壊し方の番人ではない）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "番号付きの終了の直後に外されて実体への強い参照が全部消えても、止めたと答える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "番号付きの終了の直後に外されて実体が解放されても止まったと答える" },
+]
+breaks_when = "session/mod.rs の終わりの見届けで、実体を引き直せない（upgrade が None の）腕で預かった番号に答えない形へ戻すと★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも None の腕を何もしない形にし、session_revive の「番号付きの終了の直後に外されて実体が解放されても止まったと答える」が「★外されて実体が解放された後、止まった実体への終了の頼みに誰も答えない: Elapsed(())」で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "確かめ待ちの間や起こしている最中に終了を頼んだとき、起こし直しを取り下げて新しいプロセスを起こさず、起こし終えた実体は止めるだけで畳まず外した印も残さないので後から起こし直せる（CLI の終了は、終了の頼みの番号が付いた答えで満ちる）"
 gate        = "unit"
 tests       = [
@@ -2142,6 +2196,16 @@ tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "外し始めの取り下げは印を残さず記録を外せなければ後から起こし直せる" },
 ]
 breaks_when = "ws.rs で、記録を外す前に forget を送る以前の形へ戻す（restart・a2s とも★「一覧から外されたので…」で断っている）。stop_for_removal を効かなくする（★取り下げた起こし直しを起こしている）。stop_for_removal で外した印も立てる（★外し始めただけのカードを、外したカードとして断っている）。記録を外せた後の forget を外す（確かめ中に外す試験2本＝ローカル・セルフホストが★外した印が立っていない）。いずれも直した担当が実測した。自分でも stop_for_removal で外した印（mark_removed）も立てる形にし、session_revive の「外し始めの取り下げは印を残さず記録を外せなければ後から起こし直せる」が★（外し始めただけのカードを、外したカードとして断っている）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "記録の側だけで外すとき、指示の列が満杯でも取り下げの知らせは PC へ届き、確かめ中の起こし直しは取り下げられ、積めなかった頼み（終了・外す・起こし直し・起動・呼び戻し）は届けたと言わない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/a2s.rs", name = "指示の列が詰まっていても外した知らせは_PC_へ届き起こし直しを取り下げる" },
+]
+breaks_when = "gateway.rs の lane_of で StopForRemoval・Forget を指示のレーンへ戻す、または各口（終了・外す・起こし直し・起動・呼び戻し）の send_or_refuse を send＋Ok に戻すと、それぞれ★で落ちることを直した担当が実測した（実装レビュー第7回）。自分でも lane_of を BatchAck だけが約束のレーンという形へ戻し、a2s の「指示の列が詰まっていても外した知らせは_PC_へ届き起こし直しを取り下げる」が「★指示の列が詰まっている間に外すと、外した知らせが PC へ届かず、起こし直しが取り下げられない」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
