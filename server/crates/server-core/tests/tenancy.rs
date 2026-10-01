@@ -518,6 +518,90 @@ async fn 他人のカードへの購読と操作は全部断られる() {
 }
 
 #[tokio::test]
+async fn 番号付きの頼みは持ち主の門を通したものだけを控え答えを引き直せる() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 3・4。
+    // 番号付きの頼みは、受け付けた時点で記録層へ控え、その答えを配信の取りこぼし・カードの
+    // 有無と切り離して引き直せるようにした。**控えるのは持ち主の門を通した頼みだけ**——他人の
+    // カードへの頼みの答えを、頼んだ他人が引けてはいけない
+    use protocol::{
+        a2s::{KillOutcome, ServerToAgent},
+        ws::OpId,
+    };
+    for backend in common::backends("tenancy-op-ledger").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let mut my_browser = arena.browser(&mine).await;
+        let mut their_browser = arena.browser(&theirs).await;
+        let (自分の頼み, 他人の頼み) = (OpId::new(), OpId::new());
+
+        their_browser
+            .expect_refused(
+                ClientMessage::Kill {
+                    card_id: mine.card_id,
+                    op: Some(他人の頼み),
+                },
+                "他人のカードへの番号付きの終了",
+            )
+            .await;
+        my_browser
+            .send(&ClientMessage::Kill {
+                card_id: mine.card_id,
+                op: Some(自分の頼み),
+            })
+            .await;
+        mine_agent
+            .wait_for("自分の終了の頼み", |message| {
+                matches!(message, ServerToAgent::Kill { op: Some(op), .. } if *op == 自分の頼み)
+            })
+            .await;
+        // PC が両方の番号へ答えた形を作る（他人の番号は PC へ届いていないが、届いたとしても）
+        for op in [自分の頼み, 他人の頼み] {
+            mine_agent
+                .send(&AgentMessage::KillAnswer {
+                    card_id: mine.card_id,
+                    op,
+                    outcome: KillOutcome::Stopped,
+                })
+                .await;
+        }
+        // 答えは記録層がカードの持ち主へ配る。2つ目まで届いたら、控えの書き込みも済んでいる
+        my_browser
+            .wait_for("他人の番号への答え", |message| {
+                matches!(message, ServerMessage::Status { op: Some(op), .. } if *op == 他人の頼み)
+            })
+            .await;
+
+        assert!(
+            arena
+                .registry
+                .op_answer(mine.account_id, 自分の頼み)
+                .is_some(),
+            "[{}] ★持ち主の門を通した頼みを控えていない（取りこぼした答えを引き直せない）",
+            backend.name
+        );
+        assert!(
+            arena
+                .registry
+                .op_answer(theirs.account_id, 他人の頼み)
+                .is_none(),
+            "[{}] ★持ち主の門で断った頼みの答えを、頼んだ他人に引かせている",
+            backend.name
+        );
+        assert!(
+            arena
+                .registry
+                .op_answer(mine.account_id, 他人の頼み)
+                .is_none(),
+            "[{}] 受け付けていない番号の答えまで控えている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 他人の戻せるカードも同じ言葉で断られる() {
     // **門の順序を固定する。** 持ち主の確認より先に「戻せるか」を見ると、他人のカードへ
     // 「このセッションは動いています」「呼び戻す先が記録されていません」を返すことになり、

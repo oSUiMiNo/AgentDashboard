@@ -901,11 +901,26 @@ impl EndReportCell {
 
 /// 一覧画面の小窓1枚に対応する、生きているセッション。
 /// 終了を待っている頼み（[`Session::await_end`]）。
+///
+/// **実体（[`Session`]）と寿命を分けて持つ**（実装レビュー第7回 Astra 2）。終わりを見届ける
+/// 見張り（[`SessionManager::spawn_with_args`] が立てる）も同じものを強く握る。実体の中にだけ
+/// 置いていた頃は、終了を頼んだ直後に外されて実体への強い参照が全部消えると、見張りが実体を
+/// 引き直せず、預かった番号ごと消えて誰も答えなかった。
 #[derive(Default)]
 struct EndWaiters {
     /// プロセスが終わったか。**`on_exit` だけが立てる**
     ended: bool,
     ops: Vec<OpId>,
+}
+
+impl EndWaiters {
+    /// 終わったことを記し、預かっていた番号を返す（[`SessionManager::answer_end_waiters`] だけが
+    /// 呼ぶ）。
+    fn close(waiters: &Mutex<EndWaiters>) -> Vec<OpId> {
+        let mut waiters = waiters.lock().expect("ロックが壊れていない");
+        waiters.ended = true;
+        std::mem::take(&mut waiters.ops)
+    }
 }
 
 pub struct Session {
@@ -943,7 +958,9 @@ pub struct Session {
     ///
     /// **終わったかの印も同じロックで持つ。** 状態（`meta`）で「もう終わったか」を見てから
     /// 預けると、その間に終わった実体の番号を誰も答えない。
-    end_waiters: Mutex<EndWaiters>,
+    ///
+    /// **終わりを見届ける見張りと分け合う**（[`EndWaiters`]）。実体が先に解放されても番号は残る。
+    end_waiters: Arc<Mutex<EndWaiters>>,
     /// CLI からの終了の申告。**立っている間も状態は動かさない。**
     ///
     /// 取り消されるのは、次のフックが1件届いたとき（死んだプロセスはフックを出さない）か、
@@ -2030,13 +2047,6 @@ impl Session {
         true
     }
 
-    /// 終わったことを記し、預かっていた番号を返す（[`SessionManager::on_exit`] だけが呼ぶ）。
-    fn take_end_waiters(&self) -> Vec<OpId> {
-        let mut waiters = self.end_waiters.lock().expect("ロックが壊れていない");
-        waiters.ended = true;
-        std::mem::take(&mut waiters.ops)
-    }
-
     pub fn kill(&self) {
         // 「利用者が終わらせた」ことを先に記録してから落とす。逆順だと、終了検知が
         // 先に走って異常終了として表示されてしまう
@@ -2501,6 +2511,12 @@ pub struct SessionManager {
     ///
     /// 「起こしている最中に外される」を決定的に作るための口。
     before_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// 終わりを見届けた見張りが、実体を引き直す前に待つ門（**テスト専用**）。
+    ///
+    /// 「実体への強い参照が全部消えてから終わりが届く」を決定的に作るための口（実装レビュー
+    /// 第7回 Astra 2）。時間でずらすと、合流タスクが実体を手放すのと終わりの知らせの
+    /// どちらが先かが実行環境の速さで決まる。
+    exit_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 /// 判定の結果（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§6-6）。
@@ -2976,6 +2992,15 @@ impl SessionManager {
         *self.before_spawn.lock().expect("ロックが壊れていない") = Some(hook);
     }
 
+    /// 終わりを見届けた見張りを、実体を引き直す前で止める（**テスト専用**）。返した門に
+    /// `add_permits` で許しを足すと、待っている見張りが1つずつ進む。
+    #[doc(hidden)]
+    pub fn 終わりの見届けを止める(&self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        *self.exit_gate.lock().expect("ロックが壊れていない") = Some(Arc::clone(&gate));
+        gate
+    }
+
     /// 進んでいる起こし直しの終わった断りが運ぶ頼みの番号（**テスト専用**）。札が無ければ空。
     ///
     /// 枝分かれは自分で振った番号の断りだけを拾う（実装レビュー第6回 Astra 3）ので、段取りの外から
@@ -3300,6 +3325,7 @@ impl SessionManager {
             budget: Mutex::new(ReviveBudget::default()),
             after_confirm: Mutex::new(None),
             before_spawn: Mutex::new(None),
+            exit_gate: Mutex::new(None),
         })
     }
 
@@ -3698,7 +3724,7 @@ impl SessionManager {
             settings,
             transcript_path: Mutex::new(None),
             expected_exit: AtomicBool::new(false),
-            end_waiters: Mutex::new(EndWaiters::default()),
+            end_waiters: Arc::default(),
             end_report: EndReportCell::default(),
             saw_output: AtomicBool::new(false),
             hook_silence_noted: AtomicBool::new(false),
@@ -3743,12 +3769,31 @@ impl SessionManager {
         // **自分の実体を弱く握って渡す。** カードIDから引き直すと、起こし直しで
         // 載せ替わった別の実体へ終了を届けてしまう（[`SessionManager::on_exit`]）。
         // 強く握らないのは、終了を待つこのタスクが解放を1つも妨げないようにするため
+        //
+        // **終了の頼みの番号は強く握る**（実装レビュー第7回 Astra 2）。終了を頼んだ直後に外されると、
+        // 表も合流タスクも実体を手放し、ここで引き直せなくなる。番号まで実体と一緒に消えると、
+        // プロセスは止まったのに頼みへ誰も答えない
         let 自分 = Arc::downgrade(&session);
+        let 待ち手 = Arc::clone(&session.end_waiters);
         tokio::spawn(async move {
-            if let Ok(exit) = exit_rx.await
-                && let Some(session) = 自分.upgrade()
+            let Ok(exit) = exit_rx.await else {
+                // 待ちスレッドが終わりを知らせずに消えた。止まったかを確かめられないので、
+                // 預かった番号には答えない（待つ側は時間切れで終わり、止まったとは言わない）
+                return;
+            };
+            let gate = manager
+                .exit_gate
+                .lock()
+                .expect("ロックが壊れていない")
+                .clone();
+            if let Some(gate) = gate
+                && gate.acquire().await.is_err()
             {
-                manager.on_exit(&session, exit);
+                tracing::warn!(%card_id, "終わりの見届けを止める門が閉じられました（試験の作り）");
+            }
+            match 自分.upgrade() {
+                Some(session) => manager.on_exit(&session, exit),
+                None => manager.answer_end_waiters(card_id, &待ち手),
             }
         });
 
@@ -5044,36 +5089,50 @@ impl SessionManager {
         // 跨がない約束）。下の早期 return を通ると取り出したぶんは捨てられるが、そこは
         // 終了が二重に届いたときしか通らない
         let reported = session.take_end_report();
-        {
+        let 二重 = {
             let mut meta = session.meta.lock().expect("ロックが壊れていない");
             // 終了は oneshot で1回だけ届くので二重には来ない。防御として残す
             if matches!(meta.status, SessionStatus::Ended { .. }) {
-                return;
+                true
+            } else {
+                // **終わったと言えるのはプロセスだけ。** フックの申告は材料の1つとしてしか
+                // 使わない。「異常終了」と出してよいのは、誰も終わりを意図していなかったとき
+                // だけである——ダッシュボードから終了させた場合は強制終了なので終了コードが
+                // 非ゼロになり、CLI が自分で終わりを名乗った場合も落ちたわけではない
+                let ok =
+                    exit.ok || session.expected_exit.load(Ordering::SeqCst) || reported.is_some();
+                meta.status = SessionStatus::Ended { ok };
+                meta.last_activity_at = now_ms();
+                false
             }
-            // **終わったと言えるのはプロセスだけ。** フックの申告は材料の1つとしてしか
-            // 使わない。「異常終了」と出してよいのは、誰も終わりを意図していなかったとき
-            // だけである——ダッシュボードから終了させた場合は強制終了なので終了コードが
-            // 非ゼロになり、CLI が自分で終わりを名乗った場合も落ちたわけではない
-            let ok = exit.ok || session.expected_exit.load(Ordering::SeqCst) || reported.is_some();
-            meta.status = SessionStatus::Ended { ok };
-            meta.last_activity_at = now_ms();
-        }
-        let waiters = session.take_end_waiters();
+        };
         // **報告してよいのは、いま表に載っている実体だけ。** 畳まれた古い実体の終了を
         // 配ると、同じ札で「終了」が飛び、起こし直したばかりのカードが終了扱いになる。
         // 自分の meta を直すところまでは通す——あの実体は本当に終わっているので、
         // 後から覗いた人へ嘘をつかないほうがよい
-        if self
-            .get(card_id)
-            .is_some_and(|live| Arc::ptr_eq(&live, session))
+        if !二重
+            && self
+                .get(card_id)
+                .is_some_and(|live| Arc::ptr_eq(&live, session))
         {
             self.broadcast_meta(session);
         }
         // **終了の頼みには、表に居なくても答える**（実装レビュー第6回 Astra 1）。止めるよう
         // 頼まれた実体が終わったことは本当で、答えは状態を配らない。配った後に答えるのは、
         // 答えを受けたサーバが記録のいまの状態を添えて配るため（ローカルもセルフホストも、
-        // 報告と答えは同じ順の道を通る）
-        for op in waiters {
+        // 報告と答えは同じ順の道を通る）。**二重に届いた形でも答える**——預かった番号を
+        // 残したまま抜けると、その頼みには誰も答えない
+        self.answer_end_waiters(card_id, &session.end_waiters);
+    }
+
+    /// 終わった実体に預けられていた終了の頼みへ、止めたと答える（実装レビュー第6回 Astra 1・
+    /// 第7回 Astra 2）。
+    ///
+    /// **実体が既に解放されていても呼ばれる。** 終了を頼んだ直後に外されると、表も合流タスクも
+    /// 実体を手放し、終わりを見届けた見張りは実体を引き直せない。番号は実体と別に持っている
+    /// （[`EndWaiters`]）ので、ここで答えられる。プロセスが終わったことは本当である。
+    fn answer_end_waiters(&self, card_id: CardId, waiters: &Mutex<EndWaiters>) {
+        for op in EndWaiters::close(waiters) {
             self.answer_kill(card_id, op, KillOutcome::Stopped);
         }
     }

@@ -71,6 +71,14 @@ const REMOVED_CARDS_KEPT: usize = 1024;
 /// 断りの数だけあれば足りる。溢れたら古い順に忘れる。
 const REVIVE_REFUSALS_KEPT: usize = 8;
 
+/// 1つのアカウントにつき控える番号付きの頼みの数（[`OpLedger`]）。
+///
+/// 控えが要るのは、頼んだ CLI が答えを待っている間（長くて枝分かれの上限 185 秒）だけである。
+/// 1つの CLI は頼みを1つしか待たないので、同じアカウントから同時に待たれる数より十分に多ければ
+/// 足りる。溢れたら古い順に忘れる——忘れた頼みは、取りこぼしたときに引き直せず時間切れになる
+/// （止まったと嘘はつかない）。
+const OPS_KEPT: usize = 256;
+
 /// 在席の印がこれだけ古くなったら死んだものとみなす（ミリ秒。設計§9-4）。
 ///
 /// 記す側（[`crate::gateway`]）と同じ値でなければならない。ずれると、記し直す前に
@@ -334,6 +342,8 @@ pub struct SessionRegistry {
     /// 一覧から外したカードの印（実装レビュー第5回 Astra 1）。**`records` のロックを握ったまま
     /// 見る・立てる**（[`Self::drop_record`]・[`Self::record_for`]）。
     removed: Mutex<RemovedCards>,
+    /// 番号付きの頼みの控え（実装レビュー第7回 Astra 3・4。[`OpLedger`]）。**他のロックと跨がない**
+    ops: Mutex<OpLedger>,
     events: broadcast::Sender<AccountEvent>,
     /// 失効した札（cli）の知らせ。**このインスタンスの `/ws` 接続を畳むためだけ**の道
     /// （コードレビュー対応3）。PC 側の失効（gateway の `disconnect_token`）と同じく
@@ -434,6 +444,111 @@ impl RemovedCards {
                 self.cards.remove(&oldest);
             }
         }
+    }
+}
+
+/// 番号付きの頼みの控え（寝ているカードばかりなのに、メモリ不足でセッションを起こせない
+/// 実装レビュー第7回 Astra 3・4）。
+///
+/// **答えの配送を、配信の取りこぼしとカードの有無から切り離す**ために持つ。
+///
+/// - **取りこぼし（Astra 4）**：答え（番号付きの `Status`・断り）は1回しか出ないのに、ふだんの
+///   知らせと同じ配信（溢れたら古いものを捨てる）へ1回流すだけだった。混んで捨てられると、
+///   後の知らせには番号が無いので CLI は時間切れになった。答えを配る前にここへ残し、接続が
+///   取りこぼしたら番号で引き直す（[`SessionRegistry::op_answer`]。第5回で起こし直しの断りを
+///   記録に残したのと同じ「残してから配る」）
+/// - **カードの有無（Astra 3）**：他のインスタンスから回ってきた答えは、カードの記録が手元に
+///   あることを持ち主の確かめにしていた。CLI の居るインスタンスで外すのが先に済むと、答えが
+///   届いているのに捨てた。ここに控えた**受け付けた頼み**の持ち主で確かめる
+///
+/// 控えるのは**このインスタンスが受け付けた頼みだけ**（`ws.rs` が持ち主の門を通した後に
+/// [`SessionRegistry::accept_op`] で入れる）。答えは最初の1つだけを残す（CLI は自分の番号の
+/// 断りなら競合でも落ちるので、最初の答えが結果である）。
+///
+/// **再起動で消える**（メモリにだけ持つ）。消えた後に取りこぼした答えは引き直せず、CLI は
+/// 時間切れで終わる。
+#[derive(Default)]
+struct OpLedger {
+    entries: HashMap<OpId, OpEntry>,
+    /// アカウントごとの受け付けた順（溢れたときに古いものから忘れるため）
+    order: HashMap<Uuid, VecDeque<OpId>>,
+}
+
+struct OpEntry {
+    account_id: Uuid,
+    card_id: CardId,
+    answer: Option<ServerMessage>,
+}
+
+impl OpLedger {
+    fn accept(&mut self, account_id: Uuid, card_id: CardId, op: OpId) {
+        // 同じ番号を2度受け付けたら、先の控えを保つ（答えを上書きさせない）
+        if self.entries.contains_key(&op) {
+            return;
+        }
+        self.entries.insert(
+            op,
+            OpEntry {
+                account_id,
+                card_id,
+                answer: None,
+            },
+        );
+        let order = self.order.entry(account_id).or_default();
+        order.push_back(op);
+        while order.len() > OPS_KEPT {
+            if let Some(oldest) = order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// そのアカウントがそのカードへ頼んだ番号として受け付けたか。
+    fn accepted(&self, account_id: Uuid, card_id: CardId, op: OpId) -> bool {
+        self.entries
+            .get(&op)
+            .is_some_and(|entry| entry.account_id == account_id && entry.card_id == card_id)
+    }
+
+    /// 答えを控える。受け付けた頼みで、持ち主とカードが合い、まだ答えが無いときだけ。
+    fn record(&mut self, account_id: Uuid, message: &ServerMessage) {
+        let Some((card_id, ops)) = op_answer_of(message) else {
+            return;
+        };
+        for op in ops {
+            if let Some(entry) = self.entries.get_mut(op)
+                && entry.account_id == account_id
+                && card_id.is_none_or(|card_id| card_id == entry.card_id)
+                && entry.answer.is_none()
+            {
+                entry.answer = Some(message.clone());
+            }
+        }
+    }
+
+    fn answer(&self, account_id: Uuid, op: OpId) -> Option<ServerMessage> {
+        self.entries
+            .get(&op)
+            .filter(|entry| entry.account_id == account_id)
+            .and_then(|entry| entry.answer.clone())
+    }
+}
+
+/// 番号付きの頼みへの答えなら、宛先のカードと答えた番号（実装レビュー第7回 Astra 3・4）。
+///
+/// 答えの形は2つ：成功の `Status`（番号1つ）と、断り（`Error`。束ねた番号を全部運ぶ）。
+/// 番号の無いものは答えではない。
+pub(crate) fn op_answer_of(message: &ServerMessage) -> Option<(Option<CardId>, &[OpId])> {
+    match message {
+        ServerMessage::Status {
+            card_id,
+            op: Some(op),
+            ..
+        } => Some((Some(*card_id), std::slice::from_ref(op))),
+        ServerMessage::Error { card_id, ops, .. } if !ops.is_empty() => {
+            Some((*card_id, ops.as_slice()))
+        }
+        _ => None,
     }
 }
 
@@ -599,6 +714,7 @@ impl SessionRegistry {
             db,
             records: Mutex::new(records),
             removed: Mutex::new(RemovedCards::default()),
+            ops: Mutex::new(OpLedger::default()),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             window_nodes,
@@ -1585,6 +1701,12 @@ impl SessionRegistry {
         if let Some((card_id, ops, 理由)) = revive_refusal_of(&message) {
             self.note_revive_refusal(account_id, card_id, ops, 理由);
         }
+        // 番号付きの答えも配る前に控える（実装レビュー第7回 Astra 4）。配信を取りこぼした接続が
+        // 番号で引き直す（[`Self::op_answer`]）
+        self.ops
+            .lock()
+            .expect("ロックが壊れていない")
+            .record(account_id, &message);
         let _ = self.events.send(AccountEvent {
             account_id,
             message,
@@ -1624,6 +1746,30 @@ impl SessionRegistry {
             .iter()
             .find(|(ops, _)| ops.contains(&op))
             .map(|(_, 理由)| 理由.clone())
+    }
+
+    /// 番号付きの頼みを受け付けたことを控える（実装レビュー第7回 Astra 3・4。[`OpLedger`]）。
+    ///
+    /// **持ち主の門を通した後に呼ぶ**（`ws.rs` の `handle_request`）。ここで控えた持ち主が、
+    /// 他のインスタンスから回ってきた答えを手元へ配ってよいかの確かめになる（カードの記録が
+    /// 先に外れていても）。**頼みを送り出す前に呼ぶ**——答えがその場で返る道（ローカルの
+    /// 「何も無かった」など）でも控えから漏れない。
+    pub fn accept_op(&self, account_id: Uuid, card_id: CardId, op: OpId) {
+        self.ops
+            .lock()
+            .expect("ロックが壊れていない")
+            .accept(account_id, card_id, op);
+    }
+
+    /// 受け付けた頼み `op` への答え（実装レビュー第7回 Astra 4）。まだ答えが無ければ `None`。
+    ///
+    /// 配信を取りこぼした接続が、**配られたはずの答えを引き直す**ための口。他のアカウントの
+    /// 頼みの答えは返さない。カードの記録が外れていても返す（答えは記録と別に控えてある）。
+    pub fn op_answer(&self, account_id: Uuid, op: OpId) -> Option<ServerMessage> {
+        self.ops
+            .lock()
+            .expect("ロックが壊れていない")
+            .answer(account_id, op)
     }
 
     /// 起こし直しの頼み（番号付き）への PC の成功の答えを配る（実装レビュー第6回）。
@@ -1852,13 +1998,24 @@ impl SessionRegistry {
 
             // **頼みへの答え（番号付き）は記録を書き換えない**（実装レビュー第6回 Astra 1）。値は
             // 発信元の記録のいまの姿で、こちらの状態は別の便（報告）で揃う。番号を落とさずに
-            // 手元へ配るだけ——CLI がこちらのインスタンスに繋がっていても答えが届くように
+            // 手元へ配るだけ——CLI がこちらのインスタンスに繋がっていても答えが届くように。
+            //
+            // **持ち主はカードの記録か、受け付けた頼みの控えで確かめる**（実装レビュー第7回
+            // Astra 3）。PC の居るインスタンスが答えを作った後に、こちらで外すのが先に済むと、
+            // 記録はもう無い。記録だけで確かめると、届いている答えを捨てて CLI を時間切れに
+            // していた。控えはこのインスタンスが持ち主の門を通して受け付けた頼みにしか無いので、
+            // 他人の頼みへの答えは通らない
             ServerMessage::Status {
                 card_id,
-                op: Some(_),
+                op: Some(op),
                 ..
             } => {
-                if self.owned(account_id, card_id).is_none() {
+                let 受け付けた = self
+                    .ops
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .accepted(account_id, card_id, op);
+                if !受け付けた && self.owned(account_id, card_id).is_none() {
                     return;
                 }
                 self.publish_local(account_id, message);
@@ -3083,6 +3240,28 @@ impl SessionRegistry {
             .exec(&self.db)
             .await?;
         Ok(())
+    }
+
+    /// そのアカウントのカードとして、一覧から外し終えているか（寝ているカードばかりなのに、
+    /// メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1）。
+    ///
+    /// PC が外したカードの実体をまだ持っていないかを照合する口（`gateway.rs` の
+    /// `SessionUpsert`）。**記録が手元にあれば外していない**ので DB は引かない。手元に無いとき
+    /// だけ DB の外した印と持ち主を見る——記録を外すのは DB に書けたときだけなので、DB が正。
+    /// **他のアカウントのカードには偽を返す**（他人のカードの ID で PC を片付けさせない）。
+    /// 確かめられなければ偽（片付けさせない側へ倒す。次に名乗ったときにまた確かめる）。
+    pub async fn removed_card(&self, account_id: Uuid, card_id: CardId) -> bool {
+        if self.get(card_id).is_some() {
+            return false;
+        }
+        match self.stored(card_id).await {
+            Ok(Some((owner, archived, _, _))) => archived && owner == account_id,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(%card_id, "一覧から外したカードかを確かめられません: {err}");
+                false
+            }
+        }
     }
 
     /// DB に残っているそのカードの `(持ち主, 外したか)`。行が無ければ `None`。

@@ -812,6 +812,70 @@ async fn 終了の答えは跨いだ先で番号付きの状態として届く()
 }
 
 #[tokio::test]
+async fn 手元で外すのが先に済んでも受け付けた頼みの答えは跨いだ先で届く() {
+    // 実装レビュー第7回 Astra 3。CLI は A、PC は B。B が完了の答え（番号付きの状態）を作った後に、
+    // A で外すのが先に確定すると、A はカードの記録が無いことを持ち主の確かめにして答えを捨てて
+    // いた。**CLI は答えが届いているのに時間切れになる**。
+    //
+    // 順を固定する：A の記録だけを先に外す（他のインスタンスから「外した」が回ってきた形。A の
+    // 外した知らせは B へ回らないので、B は記録を持ったまま完了の答えを作る）
+    for backend in common::backends("cluster-kill-answer-after-removal").await {
+        let broker = MemoryBroker::new();
+        let (a, b, mut agent, card_id, account_id) = split(&backend.db, &broker).await;
+        let op = protocol::ws::OpId::new();
+        // A の `/ws` が持ち主の門を通して受け付けた頼み（`ws.rs` の `handle_request` と同じ控え方）
+        a.registry.accept_op(account_id, card_id, op);
+        a.registry
+            .adopt(account_id, ServerMessage::SessionRemoved { card_id })
+            .await;
+        assert!(a.registry.get(card_id).is_none(), "A の記録が外れていない");
+        assert!(
+            b.registry.get(card_id).is_some(),
+            "B の記録まで外れている（B が答えを断りにするので、確かめたい形にならない）"
+        );
+        let mut events = a.subscribe_events();
+
+        agent
+            .send(&protocol::a2s::AgentMessage::KillAnswer {
+                card_id,
+                op,
+                outcome: protocol::a2s::KillOutcome::Stopped,
+            })
+            .await;
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        let mut 届いた = false;
+        while let Ok(received) = tokio::time::timeout_at(deadline, events.recv()).await {
+            match received {
+                Ok(event) => {
+                    if matches!(
+                        event.message,
+                        ServerMessage::Status { card_id: got, op: Some(got_op), .. }
+                            if got == card_id && got_op == op
+                    ) {
+                        届いた = true;
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        assert!(
+            届いた,
+            "[{}] ★A で外すのが先に済むと、受け付けた頼みへの完了の答えを捨てている",
+            backend.name
+        );
+        assert!(
+            a.registry.op_answer(account_id, op).is_some(),
+            "[{}] 外した後に届いた答えを、取りこぼしたときに引き直せない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 起こし直しの答えは跨いだ先で番号付きの状態として届く() {
     // 実装レビュー第6回（`session revive` の待ち）。CLI は A、PC は B。PC の答え
     // （`ReviveAnswer`）は B が受けて記録の状態に番号を添え、連絡係で A へ回る。**答えか番号を

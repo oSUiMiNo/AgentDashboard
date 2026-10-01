@@ -2668,6 +2668,55 @@ async fn 番号付きの終了は何をしたかを番号付きで1回だけ答�
 }
 
 #[tokio::test]
+async fn 番号付きの終了の直後に外されて実体が解放されても止まったと答える() {
+    // 実装レビュー第7回 Astra 2。終了の頼みの番号は実体（`Session`）の中に預けていた。終了を
+    // 頼んだ直後に外されると、表も合流タスクも実体を手放す。終わりを見届ける見張りは実体を弱く
+    // 握っているので引き直せず、**預かった番号ごと消えて、プロセスは止まったのに誰も答えなかった**。
+    //
+    // **この試験は実体への強い参照を持たない。** 持つと見張りが引き直せてしまい、壊れ方が隠れる
+    // （第6回の試験はどれも実体を握っていた）。順は門で固定する：実体が解放されたのを確かめて
+    // から、見張りに終わりを見届けさせる
+    let manager = common::manager();
+    let 門 = manager.終わりの見届けを止める();
+    let mut answers = manager.subscribe_kill_answers();
+    let (card_id, 弱い) = {
+        let session = manager.spawn(&common::work_dir()).expect("起こせること");
+        (session.card_id, Arc::downgrade(&session))
+    };
+    let op = OpId::new();
+    manager.kill_answering(card_id, op);
+    manager
+        .archive(card_id)
+        .expect("生きた実体なので外せること");
+    // 表は外した時点で、合流タスクはプロセスが終わって読み口が閉じた時点で手放す
+    wait_until("実体への強い参照が全部消える", || {
+        弱い.strong_count() == 0
+    })
+    .await;
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "門を開ける前に答えている（門が見張りを止めていない＝形を作れていない）"
+    );
+
+    門.add_permits(1);
+    let 答え = timeout(common::TIMEOUT, answers.recv())
+        .await
+        .expect("★外されて実体が解放された後、止まった実体への終了の頼みに誰も答えない")
+        .expect("答えの配信が閉じていない");
+    assert_eq!(
+        答え,
+        KillAnswered {
+            card_id,
+            op,
+            outcome: KillOutcome::Stopped,
+        }
+    );
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+}
+
+#[tokio::test]
 async fn 確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える() {
     // 実装レビュー第6回 Astra 1。確かめ・席を待っている起こし直しは、札を見て作る前にやめる
     // ので、もう実体は作られない——その場で答えてよい。**起こし直しの断りは起こし直しの番号を

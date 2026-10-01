@@ -69,6 +69,12 @@ const COMMAND_QUEUE_MESSAGES: usize = 256;
 /// 乗るのは `BatchAck` ／ 生存確認 ／ Close の3つで、**溢れても捨てない**——積めなければ
 /// 理由を1行残して接続を畳む（§6）。
 ///
+/// **取り下げの知らせ（`StopForRemoval`・`Forget`）も乗る**（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1。[`lane_of`]）。こちらは下の式の
+/// 外にあり、数は利用者が外した枚数で決まる（1枚につき2つ・照合で1つ）。書き手が詰まっている
+/// 間に外し続けて溢れたら、他の約束と同じく生存確認が積めずに畳まれ、繋ぎ直しで PC が手持ちを
+/// 名乗り直したところで照合が片付ける（[`handle_report`] の `SessionUpsert`）。
+///
 /// 深さは**式で上から抑えられる**。ack は「同時に未 ack にできるバッチの数」を超えて
 /// 生まれず、それは送る側の窓（`session-host-core` の `Limits::window` = 32）で決まる。
 ///
@@ -128,7 +134,7 @@ pub struct SessionHostConn {
 /// よいが、ack を捨てると履歴が永久に前へ進まない（[`COMMAND_QUEUE_MESSAGES`]）。
 #[derive(Clone)]
 struct Lanes {
-    /// `BatchAck` ／ 生存確認 ／ Close。**捨てない。**
+    /// `BatchAck` ／ 生存確認 ／ Close ／ 取り下げの知らせ。**捨てない。**
     promise: mpsc::Sender<Message>,
     /// `SendInput`・画面の購読・切替・PTY の生入力。**溢れたら捨てる。**
     command: mpsc::Sender<Message>,
@@ -138,9 +144,18 @@ struct Lanes {
 ///
 /// **種別で決める。** 呼ぶ側に選ばせると、口を1つ足したときに付け忘れる——
 /// 付け忘れは「たまに履歴が進まない」という形でしか表に出ない。
+///
+/// **取り下げの知らせ（`StopForRemoval`・`Forget`）も約束へ乗せる**（寝ているカードばかり
+/// なのに、メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1）。指示のレーンで
+/// 捨てると、記録は外れたのに PC は起こし直しを続け、確かめが済んだ後に**一覧に出ず操作も
+/// できないプロセス**が起きる。届かなかったことは押した人にも見えない（外した記録は
+/// 画面から消えているので、動かないことに気づけない）——指示のレーンの「捨てても利用者に
+/// すぐ分かる」が成り立たない種別である。
 fn lane_of(message: &ServerToAgent) -> Lane {
     match message {
-        ServerToAgent::BatchAck { .. } => Lane::Promise,
+        ServerToAgent::BatchAck { .. }
+        | ServerToAgent::StopForRemoval { .. }
+        | ServerToAgent::Forget { .. } => Lane::Promise,
         _ => Lane::Command,
     }
 }
@@ -156,16 +171,59 @@ impl SessionHostConn {
     ///
     /// 積めたかどうかを返す。**約束（`BatchAck`）の呼び出し側は必ず見ること**——
     /// 見ずに捨てると、直す前と同じ「無言で履歴が止まる」形へ戻る（設計§5-3）。
+    /// 頼みを中継する口は、見落とさないよう [`SessionHostConn::send_or_refuse`] を使う。
     pub fn send(&self, message: &ServerToAgent) -> bool {
+        self.queue(message).is_ok()
+    }
+
+    /// 1つ積む。積めなかったら、なぜかを返す（[`SessionHostConn::send_or_refuse`] が言い分ける）。
+    fn queue(&self, message: &ServerToAgent) -> Result<(), NotQueued> {
         let sender = match lane_of(message) {
             Lane::Promise => &self.lanes.promise,
             Lane::Command => &self.lanes.command,
         };
-        match serde_json::to_string(message) {
-            Ok(text) => sender.try_send(Message::text(text)).is_ok(),
-            Err(err) => {
-                tracing::error!("指示をシリアライズできません: {err}");
-                false
+        let text = serde_json::to_string(message).map_err(|err| {
+            tracing::error!("指示をシリアライズできません: {err}");
+            NotQueued::Unserializable
+        })?;
+        sender
+            .try_send(Message::text(text))
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => NotQueued::Full,
+                mpsc::error::TrySendError::Closed(_) => NotQueued::Closed,
+            })
+    }
+
+    /// 1つ送り、積めなければ断りの文を返す（実装レビュー第7回 Astra 1）。
+    ///
+    /// 頼みを中継する口（終了・起こし直し・外す・起動など）は**これを通す。** 積めたかを
+    /// 見ずに `Ok` を返すと、押した人には届いたように見えて何も起きない。番号付きの頼みなら、
+    /// 呼んだ側がこの断りに番号を添えてその場で返せる（時間切れまで待たせない）。
+    ///
+    /// **詰まっているのか、接続を畳んでいる途中なのかを言い分ける。** 線が切れた直後は、
+    /// 接続表から外れる前に書き手が終わっていて、送り口が閉じている。それを「詰まって」と
+    /// 言うと、押した人は待てば通ると読む。
+    pub fn send_or_refuse(&self, message: &ServerToAgent) -> Result<(), String> {
+        match self.queue(message) {
+            Ok(()) => Ok(()),
+            Err(NotQueued::Full) => {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    queued_command = self.queued_command(),
+                    queued_promise = self.queued_promise(),
+                    "PC への送り口が満杯で積めませんでした"
+                );
+                Err(NOT_QUEUED.to_string())
+            }
+            Err(NotQueued::Closed) => {
+                tracing::info!(
+                    agent_id = %self.agent_id,
+                    "PC との接続を畳んでいる途中なので、送り口に積めませんでした"
+                );
+                Err(CONN_CLOSING.to_string())
+            }
+            Err(NotQueued::Unserializable) => {
+                Err("PC への指示を組み立てられませんでした".to_string())
             }
         }
     }
@@ -198,6 +256,17 @@ impl SessionHostConn {
     pub fn disconnect(&self) {
         let _ = self.lanes.promise.try_send(Message::Close(None));
     }
+}
+
+/// 送り口に積めなかった理由（[`SessionHostConn::queue`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotQueued {
+    /// 列が満杯（書き手が詰まっている）
+    Full,
+    /// 書き手が終わっている（接続を畳んでいる途中）
+    Closed,
+    /// 自分の型を JSON にできない（実装の誤り）
+    Unserializable,
 }
 
 /// 送信の待ち行列に積まれたまま、まだ書き出せていない数。
@@ -668,7 +737,17 @@ impl SessionHostHub {
                 // 別のインスタンスから頼まれた画面も**掃除の対象に入れる**。
                 // 入れ忘れると、頼んだ側が落ちたときに誰も止められなくなる
                 self.note_streaming(&message);
-                conn.send(&message);
+                // 頼んだインスタンスへ断りを返す道は無い。**取り下げの知らせ（約束のレーン）を
+                // 捨てたときだけ1行残す**（PC が手持ちを名乗ったときの照合で後から片付く）。
+                // 指示は溢れたら捨てる作りなので、1件ごとには残さない（ガイドライン「ログを
+                // 残すとき」§3）
+                if !conn.send(&message) && lane_of(&message) == Lane::Promise {
+                    tracing::warn!(
+                        %agent_id,
+                        queued_promise = conn.queued_promise(),
+                        "跨ぎで届いた取り下げの知らせを PC へ積めませんでした（PC がそのカードを名乗ったときの照合で片付けます）"
+                    );
+                }
             }
             SessionHostCommand::Input { data } => {
                 match base64::engine::general_purpose::STANDARD.decode(&data) {
@@ -1226,16 +1305,19 @@ impl RemoteSessionHost {
             .await
             .map_err(|err| err.message())?;
         match route {
-            Route::Here(conn) => {
-                conn.send(&message);
-                Ok(())
-            }
+            Route::Here(conn) => conn.send_or_refuse(&message),
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message))),
         }
     }
 
+    /// 指示を中継する（入力・大きさ・切替など）。
+    ///
+    /// **積めたかは見ない。** 指示のレーンは溢れたら捨てる作りで、届かなかったことは画面が
+    /// 動かないので利用者にすぐ分かる（[`COMMAND_QUEUE_MESSAGES`]）。積めなかったことを断ると、
+    /// 打鍵や入力のたびに画面が断りで埋まる。断る必要のある頼み（終了・起こし直し・外す・
+    /// 取り下げの知らせ）は、それぞれの口で [`SessionHostConn::send_or_refuse`] を通す
     fn relay(&self, card_id: CardId, message: ServerToAgent) -> Result<(), String> {
         if let Some(conn) = self.hub.conn_for_card(card_id) {
             conn.send(&message);
@@ -1321,6 +1403,18 @@ const NOT_FOUND: &str = "セッションが見つかりません";
 /// **来ないはずの道でも、通ったときに何が起きたか言えるようにしておく。**
 const NO_RESUME_TARGET: &str = "呼び戻す先が記録されていません";
 
+/// PC への送り口に積めなかったときの説明（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第7回 Astra 1）。
+///
+/// **積めなかったことを成功と言わない。** 以前は積めたかどうかを見ずに `Ok` を返していたので、
+/// 押した人には届いたように見え、取り下げの知らせは届かないまま記録だけが外れた。
+const NOT_QUEUED: &str =
+    "PC への指示の列が詰まっていて、いま届けられません（しばらくして試してください）";
+
+/// PC との接続を畳んでいる途中で、送り口に積めなかったときの説明（実装レビュー第7回 Astra 1）。
+const CONN_CLOSING: &str =
+    "PC との接続が切れたところで、いま届けられません（繋ぎ直してから試してください）";
+
 /// 連絡係が切れていて跨げないときの説明（設計§17）。
 ///
 /// **1か所に置く。** 指示もフォルダの問いも同じ事情で届かないので、口によって
@@ -1355,8 +1449,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
                 .conn(target)
                 .filter(|conn| conn.account_id == request.account_id)
             {
-                conn.send(&message);
-                return Ok(());
+                return conn.send_or_refuse(&message);
             }
             // 自分の接続表に無くても、別のインスタンスに繋がっていることがある
             if !self
@@ -1378,10 +1471,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         let online = self.hub.online_of(request.account_id).await;
         match online.len() {
             1 => match self.hub.conn(online[0]) {
-                Some(conn) => {
-                    conn.send(&message);
-                    Ok(())
-                }
+                Some(conn) => conn.send_or_refuse(&message),
                 None => self
                     .hub
                     .relay_across(online[0], SessionHostCommand::Message(Box::new(message))),
@@ -1434,10 +1524,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             op: request.op,
         };
         match route {
-            Route::Here(conn) => {
-                conn.send(&message);
-                Ok(())
-            }
+            Route::Here(conn) => conn.send_or_refuse(&message),
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message))),
@@ -1464,10 +1551,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             claude_session_id: request.claude_session_id,
         };
         match route {
-            Route::Here(conn) => {
-                conn.send(&message);
-                Ok(())
-            }
+            Route::Here(conn) => conn.send_or_refuse(&message),
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message))),
@@ -1522,8 +1606,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
 
         let message = ServerToAgent::Kill { card_id, op };
         if let Some(conn) = self.hub.conn_for_card(card_id) {
-            conn.send(&message);
-            return Ok(());
+            return conn.send_or_refuse(&message);
         }
         let meta = self
             .hub
@@ -1543,10 +1626,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             Err(err) => return Err(err.message()),
         };
         match route {
-            Route::Here(conn) => {
-                conn.send(&message);
-                Ok(())
-            }
+            Route::Here(conn) => conn.send_or_refuse(&message),
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message))),
@@ -1554,7 +1634,13 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     }
 
     fn archive(&self, card_id: CardId) -> Result<(), String> {
-        self.relay(card_id, ServerToAgent::Archive { card_id })
+        let message = ServerToAgent::Archive { card_id };
+        // **外す頼みは、積めなければ断る**（実装レビュー第7回 Astra 1 と同じ種類）。黙って捨てると、
+        // 押した人は外れたと思い、CLI は外れた知らせを上限まで待つ
+        if let Some(conn) = self.hub.conn_for_card(card_id) {
+            return conn.send_or_refuse(&message);
+        }
+        self.relay(card_id, message)
     }
 
     /// 記録の側だけで外したカードを、持ち主の PC へ知らせる（実装レビュー Astra 1）。
@@ -2002,6 +2088,9 @@ impl RemoteSessionHost {
         let message = make(request_id);
 
         let sent = match route {
+            // **積めたかは見ない。** 答えが来なければ時間切れ（PC が応じません）で終わる——
+            // 線が切れた直後の問いがこの道を通ることは、試験（`ログの答えが返らないときは
+            // 時間で打ち切る`）が決めている
             Route::Here(conn) => {
                 conn.send(&message);
                 Ok(())
@@ -2210,7 +2299,8 @@ async fn agent_loop(
                 // 生存確認は先に出る。
                 //
                 // `biased` は普通なら後ろの枝を飢えさせるが、ここでは起きない——
-                // 約束に載るものは有限（未 ack のバッチ ≦ 窓32 ＋ 生存確認 ＋ Close）で、
+                // 約束に載るものは有限（未 ack のバッチ ≦ 窓32 ＋ 生存確認 ＋ Close ＋
+                // 取り下げの知らせ。最後のものは利用者が外した枚数で決まり、湧き続けない）で、
                 // 出し切れば必ず指示の番が来る。**無限に生まれるものを先に置いたら
                 // 飢える**ので、約束のレーンへ新しい種別を足すときはここを読むこと。
                 biased;
@@ -2481,9 +2571,34 @@ async fn handle_report(
         AgentMessage::Hello { .. } => {}
 
         AgentMessage::SessionUpsert { session } => {
+            let card_id = session.card_id;
             hub.registry
                 .apply(origin, ServerMessage::SessionUpsert { session })
                 .await;
+            // **一覧から外したカードを PC がまだ持っていたら、片付けさせる**（寝ているカードばかり
+            // なのに、メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1）。外すときの
+            // 知らせ（`StopForRemoval`・`Forget`）は、PC が繋がっていない・列が詰まっていると
+            // 届かない。届かないまま確かめが済むと、**一覧に出ず操作もできないプロセス**が起きる。
+            //
+            // 外したことは DB に残っている（記録を外すのは DB に書けたときだけ）ので、PC が
+            // そのカードを名乗った時点で照合し、外した知らせを送り直す。PC は繋ぎ直すたびに
+            // 手持ちを全部名乗り直すので、繋がっていなかった間に起きたプロセスもここで片付く。
+            // 送り直しも届かなければ、次に名乗ったときにまた送る（知らせは何度届いても同じ結果）。
+            //
+            // 1行残すのは、外す知らせがどこかで落ちていた証拠だから。`Forget` を知らない古い PC
+            // では名乗るたびに出るが、名乗るのはカードの姿が変わったときだけで、1件ごとに回る
+            // 経路ではない
+            if hub.registry.removed_card(origin.account_id, card_id).await
+                && conn
+                    .send_or_refuse(&ServerToAgent::Forget { card_id })
+                    .is_ok()
+            {
+                tracing::info!(
+                    %card_id,
+                    agent_id = %conn.agent_id,
+                    "一覧から外したカードを PC がまだ持っていたので、片付けるよう知らせました"
+                );
+            }
         }
         AgentMessage::SessionRemoved { card_id } => {
             hub.registry

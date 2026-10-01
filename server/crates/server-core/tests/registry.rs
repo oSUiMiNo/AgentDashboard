@@ -3515,6 +3515,143 @@ async fn 終了の答えは記録と合わせて合否にし番号を添えて�
 }
 
 #[tokio::test]
+async fn 受け付けた頼みの答えは配る前に控え配信が溢れても外した後でも番号で引き直せる() {
+    // 実装レビュー第7回 Astra 4。番号付きの答えは1回しか出ないのに、ふだんの知らせと同じ配信
+    // （溢れたら古いものを捨てる）へ流すだけだった。捨てられると後の知らせには番号が無く、
+    // **止まっていても CLI は時間切れになった**。配る前に控え、取りこぼした接続が番号で引き直す。
+    // 控えはカードの記録と別なので、外した後でも引ける（Astra 3 と同じ切り離し）
+    use protocol::{a2s::KillOutcome, ws::OpId};
+    for backend in common::backends("op-answer-ledger").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let account = server_core::db::LOCAL_ACCOUNT_ID;
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+        let (受け付けた, 受け付けていない) = (OpId::new(), OpId::new());
+        registry.accept_op(account, card_id, 受け付けた);
+        let mut 遅い受け手 = registry.subscribe_events();
+
+        registry.answer_kill(&local(), card_id, 受け付けた, KillOutcome::Stopped);
+        registry.answer_kill(&local(), card_id, 受け付けていない, KillOutcome::Stopped);
+        // 配信をわざと溢れさせる（深さ 256 を超える軽い便）
+        for i in 0..600u32 {
+            registry
+                .apply(&local(), context_usage(card_id, Some((i % 100) as u8)))
+                .await;
+        }
+        assert!(
+            matches!(
+                遅い受け手.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
+            ),
+            "[{}] 配信が溢れていない（形を作れていない）",
+            backend.name
+        );
+        assert!(
+            !配られたもの(&mut 遅い受け手)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Status { op: Some(_), .. })),
+            "[{}] 答えが配信に残っている（取りこぼした形になっていない）",
+            backend.name
+        );
+
+        assert!(
+            matches!(
+                registry.op_answer(account, 受け付けた),
+                Some(ServerMessage::Status { card_id: got, op: Some(got_op), .. })
+                    if got == card_id && got_op == 受け付けた
+            ),
+            "[{}] ★配信を取りこぼした答えを、番号で引き直せない",
+            backend.name
+        );
+        assert!(
+            registry.op_answer(account, 受け付けていない).is_none(),
+            "[{}] 受け付けていない頼みの答えまで控えている",
+            backend.name
+        );
+        assert!(
+            registry
+                .op_answer(uuid::Uuid::new_v4(), 受け付けた)
+                .is_none(),
+            "[{}] 他のアカウントに、頼みの答えを引かせている",
+            backend.name
+        );
+
+        registry
+            .archive_owned(account, card_id)
+            .await
+            .expect("外せること");
+        assert!(
+            registry.op_answer(account, 受け付けた).is_some(),
+            "[{}] ★カードを外すと、受け付けた頼みの答えを引き直せなくなる",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 外した後に跨いで届いた答えは受け付けた頼みなら配り持ち主の違う答えは配らない() {
+    // 実装レビュー第7回 Astra 3。他のインスタンスから回ってきた番号付きの状態は、カードの記録が
+    // 手元にあることを持ち主の確かめにしていたので、外すのが先に済むと捨てていた。**持ち主の
+    // 確かめは保つ**——受け付けた頼みの控えと、アカウント・カードが合うものだけを配る
+    use protocol::ws::OpId;
+    for backend in common::backends("op-answer-adopt").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let account = server_core::db::LOCAL_ACCOUNT_ID;
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+        let op = OpId::new();
+        registry.accept_op(account, card_id, op);
+        registry
+            .archive_owned(account, card_id)
+            .await
+            .expect("外せること");
+        let mut events = registry.subscribe_events();
+        let 完了 = |card_id: CardId, op: OpId| ServerMessage::Status {
+            card_id,
+            status: SessionStatus::Ended { ok: true },
+            subagent_active: 0,
+            last_activity_at: 1,
+            op: Some(op),
+        };
+
+        // 持ち主の違う答え：他のアカウント・受け付けていない番号・別のカード
+        registry
+            .adopt(uuid::Uuid::new_v4(), 完了(card_id, op))
+            .await;
+        registry.adopt(account, 完了(card_id, OpId::new())).await;
+        registry.adopt(account, 完了(CardId::new(), op)).await;
+        let seen = 配られたもの(&mut events);
+        assert!(
+            seen.is_empty(),
+            "[{}] ★受け付けていない頼み・他人の頼みの答えを配っている: {seen:?}",
+            backend.name
+        );
+
+        registry.adopt(account, 完了(card_id, op)).await;
+        let seen = 配られたもの(&mut events);
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ServerMessage::Status { card_id: got, op: Some(got_op), .. }]
+                    if *got == card_id && *got_op == op
+            ),
+            "[{}] ★外した後に跨いで届いた、受け付けた頼みの答えを捨てている: {seen:?}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 起こし直しの成功の答えは記録の状態に番号を添えて配り記録が無ければ番号付きで断る() {
     // 実装レビュー第6回（`session revive` の待ち）。PC は起こせたことだけを言い、ここで記録の
     // いまの状態に番号を添えて配る（終了の答えと同じ形）。答えが届く前に外されたら、黙って捨てず

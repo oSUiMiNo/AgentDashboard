@@ -168,7 +168,6 @@ mod wire {
         }
 
         /// また流す。
-        #[allow(dead_code)] // 詰まったまま畳まれる形しか見ていないので、いまは呼ばない
         pub fn release(&self) {
             let _ = self.held.send(false);
         }
@@ -3341,6 +3340,378 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
         .expect_err(
             "★外せた後に遅れて届いた頼みで、PC が実体を起こしている（外した印が立っていない）",
         )
+        .to_string();
+    assert!(断り.contains("一覧から外された"), "{断り}");
+}
+
+/// 起こし直しの確かめ中に、記録の側だけで外すカードを作る（PC が実体を失った抜け殻を、確かめで
+/// 止めて起こし直させる）。返すのは外すカードと確かめの門。
+async fn 確かめ中の抜け殻にする(
+    a2s: &A2s,
+    session: Arc<session_host_core::session::Session>,
+    card_id: protocol::CardId,
+    agent_id: protocol::AgentId,
+) -> (
+    Arc<common::止める外側>,
+    Arc<session_host_core::resources::HostFree>,
+    common::門を開けて去る,
+) {
+    a2s.manager.実体だけを畳む(card_id);
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a2s.registry.set_agent_live(agent_id, false);
+    let (外, host_free, 門) = common::確かめで止める(&a2s.manager);
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+            op: None,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    外.聞かれるまで待つ(0).await;
+    assert!(
+        !a2s.browser.exists(card_id),
+        "サーバから見て実体があるなら、記録だけを外す側を通らない"
+    );
+    (外, host_free, 門)
+}
+
+/// そのカードの起こし直しが、外したことで取り下げられた断りを待つ。届けば `true`。
+async fn 外したことで取り下げられるのを待つ(
+    events: &mut tokio::sync::broadcast::Receiver<server_core::registry::AccountEvent>,
+    card_id: protocol::CardId,
+) -> bool {
+    let 期限 = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(期限, events.recv()).await {
+            Ok(Ok(event)) => {
+                if let protocol::ws::ServerMessage::Error {
+                    card_id: Some(id),
+                    kind: protocol::ws::ErrorKind::Revive,
+                    withdrawn:
+                        Some(protocol::ws::Withdrawal::Removing | protocol::ws::Withdrawal::Remove),
+                    ..
+                } = event.message
+                    && id == card_id
+                {
+                    return true;
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => return false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn 指示の列が詰まっていても外した知らせは_PC_へ届き起こし直しを取り下げる() {
+    // 実装レビュー第7回 Astra 1。記録の側だけで外すとき、サーバは PC へ `StopForRemoval` と
+    // `Forget` を送る。以前は指示の列（溢れたら捨てる）に積み、**積めたかを見ずに成功と
+    // していた**——列が満杯だと両方とも捨てられ、記録だけが外れる。PC は確かめを待ち続け、
+    // 済んだ後に**一覧に出ず操作もできないプロセス**を起こした。
+    //
+    // 取り下げの断りが**確かめの門を開ける前に**届くことを見る。届かないまま起こし、後から
+    // 照合（`外した知らせが届かないうちに…`）で片付けられた形をここで通さないため
+    let a2s = A2s::start_with("revive-withdrawn-clogged", true).await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+
+    // 指示の列を浅くして繋ぎ直させる（深さは接続ごとに決まる）。**鮮度を落とす前に済ませる**
+    // ——繋ぎ直すと PC が手持ちを名乗り直し、カードが「繋がっている」に戻る
+    a2s.hub.set_lane_depths(server_core::gateway::LaneDepths {
+        promise: 64,
+        command: 2,
+    });
+    sniffer.block();
+    a2s.wait_until("いったん切れる", || a2s.hub.conn(agent_id).is_none())
+        .await;
+    sniffer.unblock();
+    a2s.wait_until("繋ぎ直る", || a2s.hub.conn(agent_id).is_some())
+        .await;
+    let conn = a2s.hub.conn(agent_id).expect("繋ぎ直った接続を引けること");
+    // 列を詰まらせる相手。**実体の無いカードへの入力は届けられない**ので、生きたものを別に用意する
+    let (詰まらせる, _) = a2s.start_session();
+    a2s.wait_until("詰まらせる相手が記録に載る", || {
+        a2s.registry.get(詰まらせる.card_id).is_some()
+    })
+    .await;
+
+    let (外, host_free, _門) = 確かめ中の抜け殻にする(&a2s, session, card_id, agent_id).await;
+
+    // --- 指示の列を満杯にする ---------------------------------------------------
+    sniffer.hold();
+    a2s.browser
+        .send_input(
+            詰まらせる.card_id,
+            "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
+            false,
+        )
+        .await
+        .expect("宛先が引けること");
+    a2s.wait_until("書き手が大きな指示を掴む", || {
+        conn.queued_command() == 0
+    })
+    .await;
+    for _ in 0..2 {
+        a2s.browser
+            .send_input(詰まらせる.card_id, "y".to_string(), Vec::new(), false)
+            .await
+            .expect("深さぶんは積めること");
+    }
+    assert_eq!(
+        conn.queued_command(),
+        2,
+        "指示の列が満杯になっていない（形を作れていない）"
+    );
+    // **積めなかった頼みを、届けたと言わない**（同じ種類の口）。番号付きの終了なら、呼んだ側が
+    // この断りに番号を添えてその場で返せる（以前は時間切れまで待たせた）
+    let 断り = a2s
+        .browser
+        .kill(
+            a2s.account_id,
+            詰まらせる.card_id,
+            Some(protocol::ws::OpId::new()),
+        )
+        .await
+        .expect_err("★指示の列に積めなかった終了の頼みを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    // 外す・起こし直し・起動・呼び戻しも同じ（どれも積めなかったので、PC では何も起きない）
+    let 断り = a2s
+        .browser
+        .archive(詰まらせる.card_id)
+        .expect_err("★指示の列に積めなかった外す頼みを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    let 断り = a2s
+        .browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+            op: Some(protocol::ws::OpId::new()),
+        })
+        .await
+        .expect_err("★指示の列に積めなかった起こし直しの頼みを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    let 断り = a2s
+        .browser
+        .spawn(server_core::session_host::SpawnRequest {
+            account_id: a2s.account_id,
+            target: Some(agent_id),
+            cwd: &common::work_dir(),
+            permission_mode: None,
+        })
+        .await
+        .expect_err("★指示の列に積めなかった起動の頼みを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    // 宛先を指名しない起動（繋がっている PC が1台なら、そこへ送る道）
+    let 断り = a2s
+        .browser
+        .spawn(server_core::session_host::SpawnRequest {
+            account_id: a2s.account_id,
+            target: None,
+            cwd: &common::work_dir(),
+            permission_mode: None,
+        })
+        .await
+        .expect_err("★指示の列に積めなかった起動の頼み（宛先を指名しない）を、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    let 断り = a2s
+        .browser
+        .recall(server_core::session_host::RecallRequest {
+            account_id: a2s.account_id,
+            target: Some(agent_id),
+            cwd: common::work_dir(),
+            permission_mode: None,
+            claude_session_id: protocol::ClaudeSessionId::new(),
+        })
+        .await
+        .expect_err("★指示の列に積めなかった呼び戻しの頼みを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    assert_eq!(conn.queued_command(), 2, "断った頼みが列に積まれている");
+
+    // --- 外す口（`ws.rs` の `Archive`）と同じ3段で外す ---------------------------
+    // **CLI の口からは外さない。** CLI は記録が外れた知らせで戻るので、3段目（外した知らせ）が
+    // 書き手を流した後に走りうる——列が詰まった形で知らせたことにならない（直す前のコードでも
+    // 通った）。口の順序そのものは `接続断のカードを起こし直しの確かめ中に外すと…` が CLI で通す
+    let mut events = a2s.registry.subscribe_events();
+    let owner = Some(agent_id);
+    let 止めた = a2s
+        .browser
+        .stop_for_removal(a2s.account_id, card_id, owner)
+        .await;
+    a2s.registry
+        .archive_owned(a2s.account_id, card_id)
+        .await
+        .expect("記録を外せること");
+    let 知らせた = a2s.browser.forget(a2s.account_id, card_id, owner).await;
+    assert_eq!(
+        conn.queued_command(),
+        2,
+        "外している間に書き手が流れ出している（列が詰まった形で知らせていない）"
+    );
+
+    // 書き手を流す（約束の列が先に出る）
+    sniffer.release();
+    assert!(
+        外したことで取り下げられるのを待つ(&mut events, card_id).await,
+        "★指示の列が詰まっている間に外すと、外した知らせが PC へ届かず、起こし直しが取り下げられない"
+    );
+    assert_eq!(
+        (止めた, 知らせた),
+        (Ok(()), Ok(())),
+        "列が詰まっていても、取り下げの知らせは積めたと答えること"
+    );
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        a2s.manager.get(card_id).is_none(),
+        "外したカードの実体が PC に起きている"
+    );
+    詰まらせる.kill();
+}
+
+#[tokio::test]
+async fn 取り下げの知らせを約束の列にも積めなければ届けたと言わない() {
+    // 実装レビュー第7回 Astra 1。取り下げの知らせは約束の列（溢れても捨てない）へ乗せたが、
+    // その列も満杯なら積めない。**積めなかったことを成功と言わない**——外す口はその断りをログへ
+    // 残して記録を外し、PC がそのカードを名乗ったときの照合に任せる
+    let a2s = A2s::start_with("removal-promise-full", true).await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, _transcript) = a2s.start_session();
+    a2s.wait_until("カードが記録に載る", || {
+        a2s.registry.get(session.card_id).is_some()
+    })
+    .await;
+    let agent_id = a2s
+        .registry
+        .get(session.card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    a2s.hub.set_lane_depths(server_core::gateway::LaneDepths {
+        promise: 1,
+        command: 2,
+    });
+    sniffer.block();
+    a2s.wait_until("いったん切れる", || a2s.hub.conn(agent_id).is_none())
+        .await;
+    sniffer.unblock();
+    a2s.wait_until("繋ぎ直る", || a2s.hub.conn(agent_id).is_some())
+        .await;
+    let conn = a2s.hub.conn(agent_id).expect("繋ぎ直った接続を引けること");
+
+    // 書き手を止め、約束の列（深さ1）を埋める（Close も約束）
+    sniffer.hold();
+    a2s.browser
+        .send_input(
+            session.card_id,
+            "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
+            false,
+        )
+        .await
+        .expect("宛先が引けること");
+    a2s.wait_until("書き手が大きな指示を掴む", || {
+        conn.queued_command() == 0
+    })
+    .await;
+    conn.disconnect();
+    assert_eq!(
+        conn.queued_promise(),
+        1,
+        "約束の列が埋まっていない（形を作れていない）"
+    );
+
+    let owner = Some(agent_id);
+    for (what, result) in [
+        (
+            "外し始めた知らせ",
+            a2s.browser
+                .stop_for_removal(a2s.account_id, session.card_id, owner)
+                .await,
+        ),
+        (
+            "外した知らせ",
+            a2s.browser
+                .forget(a2s.account_id, session.card_id, owner)
+                .await,
+        ),
+    ] {
+        let 断り = result.expect_err(&format!(
+            "★約束の列に積めなかった{what}を、届けたと答えている"
+        ));
+        assert!(断り.contains("詰まって"), "{what}: {断り}");
+    }
+    session.kill();
+}
+
+#[tokio::test]
+async fn 外した知らせが届かないうちに_PC_が起こしても名乗ったところで片付けさせる() {
+    // 実装レビュー第7回 Astra 1。外す知らせは、PC が繋がっていなければ届かない（列に積めない
+    // ときも同じ）。届かないまま確かめが済むと、PC は**一覧に出ず操作もできないプロセス**を
+    // 起こす。外したことは DB に残っているので、PC がそのカードを名乗った時点でサーバが照合し、
+    // 外した知らせを送り直す。PC は繋ぎ直すたびに手持ちを全部名乗り直す
+    let a2s = A2s::start_with("revive-reconcile", true).await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    let (外, host_free, _門) = 確かめ中の抜け殻にする(&a2s, session, card_id, agent_id).await;
+
+    // PC との線を切ったまま外す（外す知らせは届かない）
+    sniffer.block();
+    a2s.wait_until("切れる", || a2s.hub.conn(agent_id).is_none())
+        .await;
+    let target = agentdashboard_core::client::Target::from_url(&format!("http://{}", a2s.addr))
+        .expect("接続先を読めること");
+    agentdashboard_core::client::archive(&target, &card_id.to_string())
+        .await
+        .expect("PC へ知らせられなくても、記録は外せること");
+    assert!(a2s.registry.get(card_id).is_none(), "記録から外れていない");
+
+    // 確かめが済むと、外したことを知らない PC は起こす（**原因が出ていることを先に確かめる**）
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    a2s.wait_until("外したことを知らない PC が起こす", || {
+        a2s.manager.get(card_id).is_some()
+    })
+    .await;
+
+    sniffer.unblock();
+    a2s.wait_until(
+        "★（外したカードを PC が名乗っても、サーバが片付けさせない）PC から実体が消える",
+        || a2s.manager.get(card_id).is_none(),
+    )
+    .await;
+    assert!(
+        a2s.registry.get(card_id).is_none(),
+        "外したカードの記録が作り直されている"
+    );
+    // 片付けた後は、遅れて届いた頼みも外したと断る（外した印が立っている）
+    let in_flight = a2s
+        .manager
+        .begin_revive(card_id, None)
+        .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
+    let 断り = a2s
+        .manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            protocol::ClaudeSessionId::new(),
+        )
+        .await
+        .expect_err("片付けた後に遅れて届いた頼みで、PC が実体を起こしている")
         .to_string();
     assert!(断り.contains("一覧から外された"), "{断り}");
 }

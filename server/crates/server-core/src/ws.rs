@@ -43,13 +43,13 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
     CardId, NodeId, SessionMeta,
     frame::{self, FrameKind},
-    ws::{ClientMessage, ErrorKind, FlowState, ServerMessage},
+    ws::{ClientMessage, ErrorKind, FlowState, OpId, ServerMessage},
 };
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -60,6 +60,77 @@ use tokio::{
 
 /// クライアント1接続あたりの送信待ち行列（メッセージ数）。
 const OUTBOUND_QUEUE_MESSAGES: usize = 64;
+
+/// 1つの接続が、答えを待っている番号付きの頼みとして覚えておく数（[`PendingOps`]）。
+///
+/// CLI は頼みを1つしか待たないので、溢れるのは答えの来ない頼み（古い PC への頼み）を積み続けた
+/// 長い接続だけである。古い順に忘れる。
+const PENDING_OPS_KEPT: usize = 64;
+
+/// この接続が番号を振って頼み、答えをまだ渡していない頼み（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 4）。
+///
+/// 答えはふだんの知らせと同じ配信で届くが、配信は混むと古いものを捨てる（`Lagged`）。答えは
+/// 1回しか出ず、後の知らせには番号が無いので、捨てられると CLI は時間切れになる。捨てられた
+/// と分かったら、ここにある番号の答えを記録層の控えから引き直して送る（[`pump_events`]）。
+#[derive(Clone, Default)]
+struct PendingOps(Arc<Mutex<VecDeque<OpId>>>);
+
+impl PendingOps {
+    fn add(&self, op: OpId) {
+        let mut ops = self.0.lock().expect("ロックが壊れていない");
+        if ops.contains(&op) {
+            return;
+        }
+        ops.push_back(op);
+        while ops.len() > PENDING_OPS_KEPT {
+            ops.pop_front();
+        }
+    }
+
+    /// 届けた知らせが答えている番号を外す（もう引き直さない）。
+    fn settle(&self, message: &ServerMessage) {
+        let Some((_, answered)) = crate::registry::op_answer_of(message) else {
+            return;
+        };
+        self.0
+            .lock()
+            .expect("ロックが壊れていない")
+            .retain(|op| !answered.contains(op));
+    }
+
+    /// 待っている番号のうち、答えを引き直せたもの。**同じ答えは1回だけ**（束ねた断りは
+    /// 複数の番号を運ぶ）。引き直せた番号は外す。
+    fn recover(&self, answer: impl Fn(OpId) -> Option<ServerMessage>) -> Vec<ServerMessage> {
+        let waiting: Vec<OpId> = self
+            .0
+            .lock()
+            .expect("ロックが壊れていない")
+            .iter()
+            .copied()
+            .collect();
+        let mut answered = HashSet::new();
+        let mut found = Vec::new();
+        for op in waiting {
+            if answered.contains(&op) {
+                continue;
+            }
+            let Some(message) = answer(op) else {
+                continue;
+            };
+            answered.insert(op);
+            if let Some((_, ops)) = crate::registry::op_answer_of(&message) {
+                answered.extend(ops.iter().copied());
+            }
+            found.push(message);
+        }
+        self.0
+            .lock()
+            .expect("ロックが壊れていない")
+            .retain(|op| !answered.contains(op));
+        found
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -415,7 +486,19 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
         .await;
     }
 
-    let event_task = tokio::spawn(pump_events(identity.account_id, events, outbound.clone()));
+    // 番号付きの頼みの答えを取りこぼしたら、記録層の控えから引き直す（実装レビュー第7回 Astra 4）
+    let pending = PendingOps::default();
+    let event_task = {
+        let registry = Arc::clone(&state.registry);
+        let account_id = identity.account_id;
+        tokio::spawn(pump_events(
+            account_id,
+            events,
+            outbound.clone(),
+            pending.clone(),
+            move |op| registry.op_answer(account_id, op),
+        ))
+    };
 
     // 札で入った接続は、その札の失効で畳む（コードレビュー対応3）。作法は PC 側の
     // `SessionHostConn::disconnect` と同じ「待ち行列へ Close を積むだけ」——TCP を
@@ -470,6 +553,7 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
                     client_id,
                     request,
                     &outbound,
+                    &pending,
                     &mut terminals,
                     &mut transcripts,
                 )
@@ -514,6 +598,7 @@ async fn handle_request(
     client_id: u64,
     request: ClientMessage,
     outbound: &mpsc::Sender<Message>,
+    pending: &PendingOps,
     terminals: &mut HashMap<CardId, JoinHandle<()>>,
     transcripts: &mut HashMap<CardId, JoinHandle<()>>,
 ) {
@@ -542,6 +627,14 @@ async fn handle_request(
         )
         .await;
         return;
+    }
+    // **番号付きの頼みは、持ち主の門を通したここで控える**（実装レビュー第7回 Astra 3・4）。
+    // 送り出す前に控えるので、答えがその場で返る道でも控えから漏れない。控えた持ち主が、他の
+    // インスタンスから回ってきた答えを配ってよいかの確かめになり、この接続が配信を取りこぼした
+    // ときに引き直す番号にもなる
+    if let (Some(card_id), Some(op)) = (target_card(&request), request_op(&request)) {
+        state.registry.accept_op(identity.account_id, card_id, op);
+        pending.add(op);
     }
 
     match request {
@@ -901,6 +994,8 @@ async fn handle_request(
             // 「一覧から外された」で断られ続けた。印は取り消せないので、外せた後にしか立てない。
             //
             // 宛先は**記録を外す前に**引いておく（外すと記録から引けない）。届かなくても記録は外す
+            // ——届かなかった知らせは、PC がそのカードを名乗ったときに照合して送り直す（実装
+            // レビュー第7回 Astra 1。`gateway.rs` の `SessionUpsert`）
             let owner = state
                 .registry
                 .owned(identity.account_id, card_id)
@@ -912,7 +1007,7 @@ async fn handle_request(
             {
                 tracing::info!(
                     %card_id,
-                    "外し始めたことを PC へ知らせられませんでした（起こし直しの途中なら、外せた後の知らせまで止まりません）: {reason}"
+                    "外し始めたことを PC へ知らせられませんでした（起こし直しの途中なら、外せた後の知らせか、PC がこのカードを名乗ったときの照合まで止まりません）: {reason}"
                 );
             }
             if let Err(err) = state
@@ -937,7 +1032,7 @@ async fn handle_request(
             {
                 tracing::info!(
                     %card_id,
-                    "外したことを PC へ知らせられませんでした（起こし直しの途中なら止まりません）: {reason}"
+                    "外したことを PC へ知らせられませんでした（起こし直しの途中なら、PC がこのカードを名乗ったときの照合で片付けます）: {reason}"
                 );
             }
         }
@@ -1198,10 +1293,16 @@ async fn handle_pty_input(
 ///
 /// 配信の口は1本のままで、受け取る側が捨てる。アカウントごとにチャネルを分けるのは
 /// インスタンスを跨ぐとき（§9-2）の話で、1インスタンスのうちはここで足りる。
+///
+/// **取りこぼしたら、番号付きの答えだけは引き直す**（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第7回 Astra 4）。`answer` は記録層の控え
+/// （`SessionRegistry::op_answer`）を引く口で、待っている番号は `pending` が持つ。
 async fn pump_events(
     account_id: uuid::Uuid,
     mut events: broadcast::Receiver<AccountEvent>,
     outbound: mpsc::Sender<Message>,
+    pending: PendingOps,
+    answer: impl Fn(OpId) -> Option<ServerMessage>,
 ) {
     loop {
         match events.recv().await {
@@ -1209,12 +1310,22 @@ async fn pump_events(
                 if event.account_id != account_id {
                     continue;
                 }
+                pending.settle(&event.message);
                 if !send_json(&outbound, event.message).await {
                     break;
                 }
             }
-            // 一覧の更新を取りこぼした場合は、状態が古いままになるより作り直す方が安全
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            // 一覧の更新は、取りこぼしても次の知らせ（`SessionUpsert` は全体を運ぶ）で追いつく。
+            // **答えは追いつかない**——1回しか出ず、後の知らせには番号が無い。捨てられたぶんに
+            // 待っている頼みの答えがあったかもしれないので、控えから引き直して送る（控えは配る前に
+            // 書かれるので、捨てられた答えは必ず控えにある）
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                for message in pending.recover(&answer) {
+                    if !send_json(&outbound, message).await {
+                        return;
+                    }
+                }
+            }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
@@ -1355,4 +1466,185 @@ async fn send_error(
         },
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::SessionStatus;
+    use std::time::Duration;
+
+    fn 答え(card_id: CardId, op: OpId) -> ServerMessage {
+        ServerMessage::Status {
+            card_id,
+            status: SessionStatus::Ended { ok: true },
+            subagent_active: 0,
+            last_activity_at: 1,
+            op: Some(op),
+        }
+    }
+
+    fn ふだんの知らせ(card_id: CardId) -> ServerMessage {
+        ServerMessage::Status {
+            card_id,
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 2,
+            op: None,
+        }
+    }
+
+    /// 最後に流す目印。**時間で「もう来ない」と決めない**ための番兵で、これが届いた時点で、
+    /// 取りこぼしからの引き直しも含めて前のものは全部送られている（引き直しは、残っていた
+    /// 知らせを送るより先に行う）。
+    const 番兵の時刻: i64 = 999;
+
+    fn 番兵(card_id: CardId) -> ServerMessage {
+        ServerMessage::Status {
+            card_id,
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 番兵の時刻,
+            op: None,
+        }
+    }
+
+    /// 番兵が届くまで読み、番号ごとの答えの回数を数える。
+    async fn 番兵まで読む(
+        outbound: &mut mpsc::Receiver<Message>,
+        ops: &[OpId],
+    ) -> Vec<usize> {
+        let mut 回数 = vec![0; ops.len()];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let message = tokio::time::timeout_at(deadline, outbound.recv())
+                .await
+                .expect("番兵が届かない（送り口が止まっている）")
+                .expect("送り口が閉じていない");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let message: ServerMessage =
+                serde_json::from_str(text.as_str()).expect("送ったものは読めること");
+            match message {
+                ServerMessage::Status {
+                    op: None,
+                    last_activity_at: 番兵の時刻,
+                    ..
+                } => return 回数,
+                ServerMessage::Status { op: Some(got), .. } => {
+                    for (at, op) in ops.iter().enumerate() {
+                        if got == *op {
+                            回数[at] += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn 流す(
+        events: &broadcast::Sender<AccountEvent>,
+        account_id: uuid::Uuid,
+        message: ServerMessage,
+    ) {
+        events
+            .send(AccountEvent {
+                account_id,
+                message,
+            })
+            .expect("受け手が居ること");
+    }
+
+    #[tokio::test]
+    async fn 配信を取りこぼしても番号付きの答えは控えから引き直して届ける() {
+        // 実装レビュー第7回 Astra 4。番号付きの答えも、ふだんの知らせと同じ配信（溢れたら古い
+        // ものを捨てる）へ1回だけ流れる。混んで捨てられると、後の知らせには番号が無いので、
+        // **止まっていても CLI は時間切れになった**。
+        //
+        // **配信をわざと溢れさせる。** 送り口が動き出す前に、深さを超える知らせを答えの後ろへ
+        // 積む（試験は current_thread なので、`await` するまで送り口は割り込めない）。答えは
+        // 送り口が受け取る前に捨てられ、受け取りは `Lagged` から始まる
+        let account_id = uuid::Uuid::new_v4();
+        let card_id = CardId::new();
+        let op = OpId::new();
+        let (events, receiver) = broadcast::channel::<AccountEvent>(4);
+        流す(&events, account_id, 答え(card_id, op));
+        for _ in 0..16 {
+            流す(&events, account_id, ふだんの知らせ(card_id));
+        }
+        流す(&events, account_id, 番兵(card_id));
+        let (outbound, mut sent) = mpsc::channel(64);
+        let pending = PendingOps::default();
+        pending.add(op);
+        let 控え = 答え(card_id, op);
+        let task = tokio::spawn(pump_events(
+            account_id,
+            receiver,
+            outbound,
+            pending.clone(),
+            move |asked| (asked == op).then(|| 控え.clone()),
+        ));
+
+        assert_eq!(
+            番兵まで読む(&mut sent, &[op]).await,
+            vec![1],
+            "★配信を取りこぼした番号付きの答えを、控えから引き直して送っていない"
+        );
+        assert!(
+            pending.0.lock().expect("ロックが壊れていない").is_empty(),
+            "引き直した番号を待ち続けている"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn 届けた答えは取りこぼした後に送り直さず他人の答えも引かない() {
+        // 引き直すのは、この接続が待っていて、まだ渡していない答えだけ
+        let account_id = uuid::Uuid::new_v4();
+        let card_id = CardId::new();
+        let (届けた, 待っていない) = (OpId::new(), OpId::new());
+        let (events, receiver) = broadcast::channel::<AccountEvent>(4);
+        let (outbound, mut sent) = mpsc::channel(64);
+        let pending = PendingOps::default();
+        pending.add(届けた);
+        let 控え = 答え(card_id, 届けた);
+        let 他の控え = 答え(card_id, 待っていない);
+        let task = tokio::spawn(pump_events(
+            account_id,
+            receiver,
+            outbound,
+            pending.clone(),
+            move |asked| {
+                if asked == 届けた {
+                    Some(控え.clone())
+                } else if asked == 待っていない {
+                    Some(他の控え.clone())
+                } else {
+                    None
+                }
+            },
+        ));
+        流す(&events, account_id, 答え(card_id, 届けた));
+        流す(&events, account_id, 番兵(card_id));
+        assert_eq!(
+            番兵まで読む(&mut sent, &[届けた]).await,
+            vec![1],
+            "ふつうに届けていない"
+        );
+
+        // 送り口が待っている間に、深さを超える知らせを積む（`await` を挟まない）。次の受け取りは
+        // `Lagged` から始まる
+        for _ in 0..16 {
+            流す(&events, account_id, ふだんの知らせ(card_id));
+        }
+        流す(&events, account_id, 番兵(card_id));
+        assert_eq!(
+            番兵まで読む(&mut sent, &[届けた, 待っていない]).await,
+            vec![0, 0],
+            "届けた答えを取りこぼした後にまた送っている／この接続が待っていない頼みの答えを送っている"
+        );
+        task.abort();
+    }
 }
