@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 181
+min_entries = 185
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1918,6 +1918,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "判定の断りと終了の取り下げが同時に用意できたとき、判定の断りではなく取り下げ（withdrawn=kill）を返す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "判定の断りと終了の取り下げが同時に用意できたら取り下げを返す" },
+]
+breaks_when = "session/mod.rs の判定の腕で、失敗のときに withdrawn_reason を見ずに判定の断りを返す（★メモリ不足の文面が返る）。直した担当が実測した。自分でも判定の腕で withdrawn_reason を常に無いと読む形にし、名指しの1本が「★終了で取り下げたのに、判定の断り（メモリが足りないので…）を返している」で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "外した知らせが起こし直しの頼みより先に届いても、外す前の札が残っている間に届いても、外したカードは起こさず終わった断りで返す（外せなかったカードには印を残さない）"
 gate        = "unit"
 tests       = [
@@ -1929,6 +1939,19 @@ tests       = [
   { file = "server/crates/core/tests/a2s.rs", name = "外した知らせが起こし直しの頼みより先に_PC_へ届いても起こさない" },
 ]
 breaks_when = "session/mod.rs の begin_revive で外した印を見ない（session_revive の2本が★、restart・a2s の各1本は起こしてしまい断りが届かず時間切れ）。archive を Retire::Always にする（外せなかったの1本が★）。印を札より後に見る（札が残っている間の1本が「★競合（復旧中）として断っている」で落ちる）。いずれも直した担当が実測した。自分でも begin_revive で外した印を見ない形にし、session_revive の「外した知らせが起こし直しの頼みより先に届いても起こさない」が★（実体を起こしている）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "寝ているカードの終了を待つとき、接続直後の写しの Ended では満ちず、頼みへの答え（取り下げ・配り直し・見つからない断り）で満ちる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは接続直後の写しのendedでは満ちず頼みへの答えで満ちる" },
+  { file = "server/crates/core/tests/restart.rs", name = "寝かせた抜け殻を確かめ中に終了させると確かめが済んでも起こさない" },
+  { file = "server/crates/core/tests/restart.rs", name = "起こし直していない寝たカードの終了は写しの後に届く答えですぐ満ちる" },
+  { file = "server/crates/core/tests/restart.rs", name = "前回の起動が残した抜け殻の終了は止めるものが無くても成功で返る" },
+]
+breaks_when = "wait.rs で写しを見送らない（単体1本と restart の確かめ中の1本が★）。session/mod.rs の kill で終わっていた実体を配り直さない（起こし直していない寝たカードの1本が Elapsed で★）。写しが Ended のときの種別 kill の断りで満ちる規則を外す（単体1本と前回の起動の1本が★）。いずれも直した担当が実測した。自分でも wait.rs で1枚目の写しを見送る分岐に入らない形にし、wait.rs の単体が「★接続直後の写しが Ended だというだけで、終了の頼みへの答えを待たずに満ちている」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1958,6 +1981,26 @@ tests       = [
   { file = "server/crates/server-core/tests/registry.rs", name = "起こし直しの終わった断りは配った後も記録から引ける" },
 ]
 breaks_when = "branch.rs で記録から断りを引くのをやめる＝目印を u64::MAX にする（取りこぼしの1本が★。配信を溢れさせる便を 400 件流し、取りこぼしが実際に起きていることも確かめた）。publish_local で断りを残すのをやめる（registry の1本が★）。owned().is_none() の照合を外す（外されたの1本が★）。いずれも直した担当が実測した。自分でも publish_local で断りを残すのをやめ、registry の1本が★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "書けなかった「外した」報告の取り込み直しと遅れて届いた更新が行き違っても、外したカードの記録を作り直さず、最後に配る知らせは「外した」になる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "外した報告の取り込み直しと行き違った更新は外したカードを一覧へ戻さない" },
+]
+breaks_when = "registry.rs の record_for で外した印を見ない（記録を取る前の止め所で「★…作り直している」）。publish_record で配った後の見直しを外す（配る前の止め所で「★最後に配られたのが外した知らせではない」）。どちらも直した担当が実測した。自分でも record_for で外した印の判定を常に偽にし、名指しの1本が「[sqlite / 記録を取る前] ★外したカードの記録を、行き違った更新が作り直している」で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "枝分かれは目印より前に届いた起こし直しの断りを、配信から受けても拾わない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/src/branch.rs", name = "目印より前に届いた断りは配信から受けても拾わない" },
+]
+breaks_when = "branch.rs の wait_for の配信の腕を、目印を見ずに起こし直しの断りの文面で返す形へ戻す（★Ready(Err(\"先の頼みの断り\"))）。直した担当が実測した。自分でも配信の腕で revive_refusal_since の代わりに配信で受けた断りの文面をそのまま返す形にし、名指しの1本が「★目印より前の断りを配信から拾って止まった: Ready(Err(\"先の頼みの断り\"))」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
