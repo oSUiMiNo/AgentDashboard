@@ -1073,7 +1073,7 @@ async fn 作業中のまま残った抜け殻を確かめ中に終了させる�
 async fn 束が満ちた後の起こし直しの頼みにはその番号への終わった断りを配る() {
     // 競合で断った頼みの番号は先の札へ束ね、先の起こし直しが断られたらその断りで答える。束には
     // 上限を設けたので、**満ちた後の頼みの番号はどこにも残らない**——ここで答えないと、その番号を
-    // 待つ CLI・枝分かれは上限まで待つ。ローカルの競合は頼んだ接続へ同期に返る（記録層を通らない）
+    // 待つ CLI・枝分かれは上限まで待つ。同期の断りは頼んだ接続にしか届かない（記録層を通らない）
     // ので、終わった断りは配信で配る
     use session_host_core::session::{REVIVE_OPS_KEPT, TOO_MANY_REVIVE_REQUESTS};
     let server = common::TestServer::start().await;
@@ -1089,53 +1089,63 @@ async fn 束が満ちた後の起こし直しの頼みにはその番号への�
         .expect("先の札が立つこと");
     let mut events = server.manager.subscribe_events();
 
-    let mut 溢れた番号 = Vec::new();
-    for _ in 0..REVIVE_OPS_KEPT + 3 {
-        let op = protocol::ws::OpId::new();
-        match server_core::session_host::SessionHost::revive(
+    // 競合も、束が満ちた後の頼みも、受付は通して断りを配信で配る（実装レビュー第11回 Astra 2。
+    // 以前は競合だけ同期の `Err` で返していた）
+    let 頼み: Vec<protocol::ws::OpId> = (0..REVIVE_OPS_KEPT + 3)
+        .map(|_| protocol::ws::OpId::new())
+        .collect();
+    for op in &頼み {
+        server_core::session_host::SessionHost::revive(
             &host,
             server_core::session_host::ReviveRequest {
                 account_id: server_core::db::LOCAL_ACCOUNT_ID,
                 card_id,
-                op: Some(op),
+                op: Some(*op),
             },
         )
         .await
-        {
-            // 束ねた（競合）。頼んだ接続へ同期に断る
-            Err(message) => assert_eq!(message, session_host_core::session::ALREADY_REVIVING),
-            Ok(()) => 溢れた番号.push(op),
-        }
+        .expect("受付は通ること（競合も断りも配信で届く）");
     }
-    assert!(
-        !溢れた番号.is_empty(),
-        "★束が満ちた後の頼みも競合として断り、その番号へ答える道を作っていない"
-    );
-    for op in 溢れた番号 {
-        let 断り = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Ok(protocol::ws::ServerMessage::Error {
-                    card_id: Some(id),
-                    kind: protocol::ws::ErrorKind::Revive,
-                    busy,
-                    message,
-                    ops,
-                    ..
-                }) = events.recv().await
-                    && id == card_id
-                    && ops == vec![op]
-                {
-                    return (busy, message);
+    let mut 答え = std::collections::HashMap::new();
+    let 期限 = tokio::time::Instant::now() + Duration::from_secs(10);
+    while 答え.len() < 頼み.len() {
+        match tokio::time::timeout_at(期限, events.recv()).await {
+            Ok(Ok(protocol::ws::ServerMessage::Error {
+                card_id: Some(id),
+                kind: protocol::ws::ErrorKind::Revive,
+                busy,
+                message,
+                ops,
+                ..
+            })) if id == card_id => {
+                if let [op] = ops.as_slice() {
+                    答え.insert(*op, (busy, message));
                 }
             }
-        })
-        .await
-        .expect("★束が満ちた後の頼みの番号へ、終わった断りを配っていない");
-        assert_eq!(
-            断り,
-            (Some(false), TOO_MANY_REVIVE_REQUESTS.to_string()),
-            "終わった断りとして配ること（待っても起きないので、枝分かれはすぐ終わってよい）"
-        );
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
     }
+    let 溢れた: Vec<_> = 頼み
+        .iter()
+        .filter(|op| {
+            答え.get(op).is_some_and(|(busy, message)| {
+                *busy == Some(false) && message == TOO_MANY_REVIVE_REQUESTS
+            })
+        })
+        .collect();
+    let 束ねた = 頼み
+        .iter()
+        .filter(|op| 答え.get(op).is_some_and(|(busy, _)| *busy == Some(true)))
+        .count();
+    assert!(
+        !溢れた.is_empty(),
+        "★束が満ちた後の頼みの番号へ、終わった断りを配っていない: {答え:?}"
+    );
+    assert_eq!(
+        溢れた.len() + 束ねた,
+        頼み.len(),
+        "どの頼みにも、競合か終わった断りのどちらかで答えること: {答え:?}"
+    );
     session.kill();
 }

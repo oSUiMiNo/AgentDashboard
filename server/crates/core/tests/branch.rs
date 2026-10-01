@@ -1360,3 +1360,205 @@ async fn cliの枝分かれは元の起こし直しの競合の知らせで落�
     結果.expect("★元の起こし直しの競合の知らせで、CLI の枝分かれが失敗している");
     assert!(二枚になるまで待つ(&server).await, "枝が作られていること");
 }
+
+// ---------------------------------------------------------------------------
+// 枝分かれは、自分が出した起こし直しの頼みの結果で進む（寝ているカードばかりなのに、メモリ
+// 不足でセッションを起こせない 実装レビュー第11回 Astra 2）
+// ---------------------------------------------------------------------------
+
+/// 寝ている元を作り、**先の起こし直し**（人が CLI で押した形）を Windows 側の確かめで止める。
+/// 返すのは元のカード・CLI の接続先・確かめの門・先の起こし直しの作業。
+async fn 先の起こし直しを確かめで止める(
+    server: &TestServer,
+    label: &str,
+) -> (
+    String,
+    CardId,
+    client::Target,
+    Arc<common::止める外側>,
+    common::門を開けて去る,
+    tokio::task::JoinHandle<Result<client::wait::Outcome, client::ClientError>>,
+) {
+    let target = target_of(server);
+    let (card, _) = 入力待ちのカード(server, &target, &work_dir(label)).await;
+    client::kill(&target, &card[..8])
+        .await
+        .expect("寝かせられること");
+    寝るまで待つ(server, &card).await;
+    let card_id = 載っているカードID(server, &card);
+    let (外, _host_free, 門) = common::確かめで止める(&server.manager);
+    let 先の起こし直し = tokio::spawn({
+        let target = target.clone();
+        let card = card.clone();
+        async move { client::revive(&target, &card[..8]).await }
+    });
+    外.聞かれるまで待つ(0).await;
+    (card, card_id, target, 外, 門, 先の起こし直し)
+}
+
+/// 起きた元を入力待ちへ倒す（段取りが撃てる状態にする）。
+async fn 起きた元を入力待ちへ(server: &TestServer, target: &client::Target, card: &str) {
+    let 目当て = card.to_string();
+    server
+        .wait_for_listed(
+            "先の起こし直しで元が起きてくる",
+            move |list| {
+                list.iter().any(|meta| {
+                    meta.card_id.to_string() == 目当て
+                        && !matches!(meta.status, SessionStatus::Ended { .. })
+                })
+            },
+        )
+        .await;
+    client::send_input(
+        target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("起きた席へ指示を送れること");
+}
+
+#[tokio::test]
+async fn 先の起こし直しへ束ねられた枝分かれはその成功で進む() {
+    // 人が先に起こしている間に枝分かれを押すと、枝分かれの起こし直しの頼みは競合で先の札へ束ね
+    // られる。**先の起こし直しの結果がこの頼みの結果**になる。以前は束ねた頼みには成功を答えず、
+    // 枝分かれはカードの状態から推し量っていた。いまは自分の頼みの結果を受けるまで状態だけでは
+    // 進まないので、PC は束ねた頼みにも成功を答える
+    let server = TestServer::start_with(外側を見ない設定()).await;
+    let (card, card_id, target, 外, _門, 先の起こし直し) =
+        先の起こし直しを確かめで止める(&server, "bundled-wake").await;
+    let 見張り = 枝分かれの断りを見張る(&server, card_id);
+    枝分かれを頼む(&target, card_id).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while server.manager.起こし直しの頼みの番号(card_id).len() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "枝分かれの頼みが先の札へ束ねられない（形を作れていない）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    外.開ける();
+    起きた元を入力待ちへ(&server, &target, &card).await;
+    assert!(
+        二枚になるまで待つ(&server).await,
+        "★先の起こし直しへ束ねられた枝分かれが、その成功を受け取れずに進まない: {:?}",
+        見張りを閉じる(見張り).await
+    );
+    先の起こし直し
+        .await
+        .expect("先の起こし直しの作業が落ちていないこと")
+        .expect("先の起こし直しは通ること");
+}
+
+#[tokio::test]
+async fn 束が満ちた後の枝分かれは先の起こし直しが成功しても断る() {
+    // 設計§22・実装レビュー第11回 Astra 2。束の上限を超えた頼みには、その番号への終わった断りが
+    // 返る。先の起こし直しがその後成功してカードが起きても、枝分かれはその断りで終わる
+    use session_host_core::session::ReviveContention;
+    let server = TestServer::start_with(外側を見ない設定()).await;
+    let (card, card_id, target, 外, _門, 先の起こし直し) =
+        先の起こし直しを確かめで止める(&server, "overflow-wake").await;
+    // 束を満たす（番号付きで、先の札へ束ねられるだけ頼む）
+    while server
+        .manager
+        .begin_revive_or_refuse(card_id, Some(protocol::ws::OpId::new()))
+        .err()
+        != Some(ReviveContention::Overflow)
+    {}
+    let 見張り = 枝分かれの断りを見張る(&server, card_id);
+    枝分かれを頼む(&target, card_id).await;
+
+    外.開ける();
+    起きた元を入力待ちへ(&server, &target, &card).await;
+    先の起こし直し
+        .await
+        .expect("先の起こし直しの作業が落ちていないこと")
+        .expect("先の起こし直しは通ること");
+    let 断り = tokio::time::timeout(Duration::from_secs(30), 見張り)
+        .await
+        .expect("枝分かれの断りの見張りが終わること")
+        .expect("見張りが落ちていないこと")
+        .expect("★束が満ちた後の枝分かれが、先の起こし直しの成功で進んでいる（断らない）");
+    assert!(断り.contains("多すぎます"), "{断り}");
+    assert_eq!(
+        server
+            .registry
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .len(),
+        1,
+        "枝が作られている"
+    );
+}
+
+#[tokio::test]
+async fn 起動中の元からの枝分かれは起こす頼みを出さないので状態だけで進む() {
+    // 実装レビュー第11回 Astra 2。自分の起こし直しの頼みの結果を待つのは、**起こした段だけ**。
+    // 起動中（`Starting`）の元は起こさずに整うのを待つので、答える頼みが無い——結果を待つと上限
+    // （180 秒）まで黙る
+    let server = TestServer::start_with(外側を見ない設定()).await;
+    let (card, _card_id, target, 外, _門, 先の起こし直し) =
+        先の起こし直しを確かめで止める(&server, "starting-branch").await;
+    外.開ける();
+    let 目当て = card.clone();
+    server
+        .wait_for_listed(
+            "先の起こし直しで元が起きてくる",
+            move |list| {
+                list.iter().any(|meta| {
+                    meta.card_id.to_string() == 目当て
+                        && !matches!(meta.status, SessionStatus::Ended { .. })
+                })
+            },
+        )
+        .await;
+    先の起こし直し
+        .await
+        .expect("先の起こし直しの作業が落ちていないこと")
+        .expect("先の起こし直しは通ること");
+    assert_eq!(
+        引く(&server, &card).status,
+        SessionStatus::Starting,
+        "元が起動中であること（形を作れていない）"
+    );
+    // 起こし直した直後の席は直前の応答が空なので、会話に中身があることを履歴で示す（本物の
+    // claude なら履歴の行が残っている。擬似 claude は履歴を書かない）
+    server
+        .registry
+        .apply(
+            &server_core::registry::ReportOrigin::local(),
+            protocol::ws::ServerMessage::TranscriptAppend {
+                card_id: 載っているカードID(&server, &card),
+                nodes: vec![protocol::TreeNode {
+                    id: protocol::NodeId("n1".to_string()),
+                    parent: None,
+                    node: protocol::Node::AssistantText {
+                        text: "はい".to_string(),
+                        error: false,
+                    },
+                    ts: 1,
+                    branch: 0,
+                }],
+            },
+        )
+        .await;
+    let 見張り = 枝分かれの断りを見張る(&server, 載っているカードID(&server, &card));
+    枝分かれを頼む(&target, 載っているカードID(&server, &card)).await;
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("起きた席へ指示を送れること");
+    assert!(
+        二枚になるまで待つ(&server).await,
+        "★起こしていない（起動中の）元からの枝分かれが、来ない頼みの結果を待って進まない: {:?}",
+        見張りを閉じる(見張り).await
+    );
+}

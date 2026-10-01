@@ -224,31 +224,32 @@ impl Branch {
         if もともと寝ていた || matches!(meta.status, SessionStatus::Starting) {
             if もともと寝ていた {
                 tracing::info!(card_id = %self.card_id, "寝ているので、起こしてから枝分かれします");
-                // **断られても続ける。** 人が先に起こしていた場合がこれで、目的
-                // （撃てる状態にすること）は既に達成されている（§3-6）
-                if let Err(reason) = self
-                    .agent
+                // **答えを記録から引き直せるよう、頼みを控えてから撃つ**（実装レビュー第11回
+                // Astra 2）。配信を取りこぼしても、成功の答えも断りも番号で引ける
+                self.registry
+                    .accept_op(self.account_id, self.card_id, 起こす頼み);
+                // **届かなかったら、その場でやめる**（実装レビュー第11回 Astra 2）。人が先に起こして
+                // いた場合（競合）は、受付は通り、番号が先の起こし直しへ束ねられる——その結果が
+                // この頼みの結果として届く。届かなかった頼みには、誰も答えない
+                self.agent
                     .revive(ReviveRequest {
                         account_id: self.account_id,
                         card_id: self.card_id,
                         op: Some(起こす頼み),
                     })
                     .await
-                {
-                    tracing::info!(
-                        card_id = %self.card_id,
-                        "起こす頼みは通りませんでした（既に起きている可能性があります）: {reason}"
-                    );
-                }
+                    .map_err(|reason| format!("元のセッションを起こせませんでした：{reason}"))?;
             }
             let card_id = self.card_id;
-            // **起こし直しの終わった断りを拾うのは、この段だけ**（寝ているカードばかり
-            // なのに、メモリ不足でセッションを起こせない 設計§7-3）。拾わないと、
-            // 断られた後も上限（180 秒）まで待ち、事実と違う理由で終わる
+            // **自分が出した起こし直しの頼みの結果を待つのは、この段だけ**（寝ているカード
+            // ばかりなのに、メモリ不足でセッションを起こせない 設計§7-3・実装レビュー第11回
+            // Astra 2）。断りを拾わないと、断られた後も上限（180 秒）まで待ち、事実と違う理由で
+            // 終わる。**起こしていない（起動中で整うのを待つだけの）ときは渡さない**——答えが
+            // 来ないので、状態だけで待つ
             self.wait_for(
                 &mut events,
                 WAKE_TIMEOUT,
-                Some((card_id, 起こす頼み)),
+                もともと寝ていた.then_some((card_id, 起こす頼み)),
                 move |meta| meta.card_id == card_id && 整った(meta.status),
             )
             .await
@@ -440,9 +441,10 @@ impl Branch {
     /// **購読と記録の両方を見る。** 配信は `Lagged` で取りこぼしうるので、報せを待つ
     /// 傍らで一定の間隔で記録層を直に確かめる。
     ///
-    /// `断りを拾う` にカードと起こす頼みの番号を渡すと、その番号を運ぶ**起こし直しの終わった
-    /// 断り**が届いた時点で、その文面を `Err` で返す（[`起こし直しの断り`]）。渡すのは起きるのを
-    /// 待つ段だけ——他の段で拾うと、無関係な断りで段取りを止めてしまう。
+    /// `起こす頼み` にカードと起こす頼みの番号を渡すと、**その頼みの結果**を待つ（[`頼みの答え`]）。
+    /// 終わった断りが届いた時点で、その文面を `Err` で返す。成功の答えを受けるまでは、カードの状態
+    /// だけでは満ちない。渡すのは起こした段だけ——他の段で拾うと、無関係な断りで段取りを止めて
+    /// しまう。
     /// `Ok(None)` は上限まで待っても現れなかったこと。
     ///
     /// **断りも記録から引き直す**（実装レビュー Astra 4）。配信で取りこぼす（`Lagged`）と
@@ -451,7 +453,7 @@ impl Branch {
         &self,
         events: &mut tokio::sync::broadcast::Receiver<crate::registry::AccountEvent>,
         限度: Duration,
-        断りを拾う: Option<(CardId, protocol::ws::OpId)>,
+        起こす頼み: Option<(CardId, protocol::ws::OpId)>,
         条件: impl Fn(&SessionMeta) -> bool,
     ) -> Result<Option<SessionMeta>, String> {
         wait_for(
@@ -459,7 +461,7 @@ impl Branch {
             self.account_id,
             events,
             限度,
-            断りを拾う,
+            起こす頼み,
             条件,
         )
         .await
@@ -628,33 +630,56 @@ fn pushable(status: SessionStatus) -> Result<(), String> {
 /// 先の起こし直し A の断りが、枝分かれ B の起こし直しを受け付けた後に取り込まれると B の目印より
 /// 大きい番号が付き、B は古い断りを自分の結果と取り違えて止まった。配信で受けたものも記録から
 /// 引き直すものも、同じ番号で見分ける。
+///
+/// # 自分の頼みの結果と、カードの状態を分ける（実装レビュー第11回 Astra 2）
+///
+/// 以前は、カードが起きた状態を見た時点で満ち、自分の番号への断りを読むのはその後だった。束の
+/// 上限を超えてこの頼みが断られていても、先の起こし直しが成功していれば、知らせの届く順で成功に
+/// なった（設計§22 の「上限を超えた頼みは終わった断りで終わる」と食い違う）。いまは：
+///
+/// - **自分への終わった断りがあれば、状態に関わらず `Err`**（毎周、状態より先に見る）
+/// - **自分への成功の答え（番号付きの状態）を受けるまで、カードの状態だけでは満ちない**——他の
+///   起こし直しで起きたことは、この頼みの結果ではない
+/// - 競合（`busy: Some(true)`）は途中の知らせで、束ねた先の起こし直しの結果を待つ
 async fn wait_for(
     registry: &SessionRegistry,
     account_id: uuid::Uuid,
     events: &mut tokio::sync::broadcast::Receiver<crate::registry::AccountEvent>,
     限度: Duration,
-    断りを拾う: Option<(CardId, protocol::ws::OpId)>,
+    起こす頼み: Option<(CardId, protocol::ws::OpId)>,
     条件: impl Fn(&SessionMeta) -> bool,
 ) -> Result<Option<SessionMeta>, String> {
     let 期限 = tokio::time::Instant::now() + 限度;
+    // 起こす頼みが無ければ、状態だけで待つ（起動中で整うのを待つ段・撃った後の段）
+    let mut 頼みが通った = 起こす頼み.is_none();
     loop {
-        // 記録を直に確かめる（取りこぼしの保険であり、既に満たしている場合の近道）
-        if let Some(meta) = registry
-            .list(account_id)
-            .into_iter()
-            .find(|meta| 条件(meta))
-        {
-            return Ok(Some(meta));
-        }
-        if let Some((拾うカード, 頼み)) = 断りを拾う {
+        if let Some((拾うカード, 頼み)) = 起こす頼み {
             // **待っている相手が一覧から外されたら、もう起きてこない。** 外したカードは
             // 記録ごと消えるので、断りも残らない——待ち続けると上限まで黙る
             if registry.owned(account_id, 拾うカード).is_none() {
                 return Err("一覧から外されました".to_string());
             }
+            // 記録から自分の頼みの結果を引き直す（配信の取りこぼしの保険）
+            match registry
+                .op_answer(account_id, 頼み)
+                .and_then(|answer| 頼みの答え(&answer, 拾うカード, 頼み))
+            {
+                Some(Err(理由)) => return Err(理由),
+                Some(Ok(())) => 頼みが通った = true,
+                None => {}
+            }
             if let Some(理由) = registry.revive_refusal_for(account_id, 拾うカード, 頼み) {
                 return Err(理由);
             }
+        }
+        // 記録を直に確かめる（取りこぼしの保険であり、既に満たしている場合の近道）
+        if 頼みが通った
+            && let Some(meta) = registry
+                .list(account_id)
+                .into_iter()
+                .find(|meta| 条件(meta))
+        {
+            return Ok(Some(meta));
         }
         if tokio::time::Instant::now() >= 期限 {
             return Ok(None);
@@ -670,12 +695,19 @@ async fn wait_for(
                 if event.account_id != account_id {
                     continue;
                 }
-                if let Some((拾うカード, 頼み)) = 断りを拾う
-                    && let Some(理由) = 起こし直しの断り(&event.message, 拾うカード, 頼み)
-                {
-                    return Err(理由.to_string());
+                if let Some((拾うカード, 頼み)) = 起こす頼み {
+                    match 頼みの答え(&event.message, 拾うカード, 頼み) {
+                        Some(Err(理由)) => return Err(理由),
+                        // 次の周回で記録の状態を見る（状態は答えより先に届いている）
+                        Some(Ok(())) => {
+                            頼みが通った = true;
+                            continue;
+                        }
+                        None => {}
+                    }
                 }
-                if let ServerMessage::SessionUpsert { session } = event.message
+                if 頼みが通った
+                    && let ServerMessage::SessionUpsert { session } = event.message
                     && 条件(&session)
                 {
                     return Ok(Some(*session));
@@ -686,6 +718,26 @@ async fn wait_for(
             // 配信そのものが閉じた。記録の確認だけで続ける意味は無い
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
         }
+    }
+}
+
+/// そのカードの、頼み `op` への起こし直しの**結果**（実装レビュー第11回 Astra 2）。
+///
+/// - 成功の答え（番号付きの状態。PC が実体を作り終えた）：`Ok`
+/// - 終わった断り（[`起こし直しの断り`]）：`Err`（文面）
+/// - それ以外（競合・他の頼み・他のカード・番号の無い知らせ）：`None`
+fn 頼みの答え(
+    message: &ServerMessage,
+    card_id: CardId,
+    op: protocol::ws::OpId,
+) -> Option<Result<(), String>> {
+    match message {
+        ServerMessage::Status {
+            card_id: 宛先,
+            op: Some(答えた),
+            ..
+        } if *宛先 == card_id && *答えた == op => Some(Ok(())),
+        other => 起こし直しの断り(other, card_id, op).map(|理由| Err(理由.to_string())),
     }
 }
 
@@ -992,15 +1044,219 @@ mod tests {
             "★先の起こし直しの断りを、自分の起こし直しの結果と取り違えて止まった: {二回目:?}"
         );
 
-        // B の起こし直しが通って起きた（手元に記録があるので DB を通らない）
+        // B の起こし直しが通って起きた（手元に記録があるので DB を通らない）。成功の答えは状態の
+        // 後に届く（実装レビュー第11回 Astra 2。自分の頼みの結果を受けるまで状態だけでは満ちない）
         registry
             .adopt(account_id, 寝ている元(card_id, SessionStatus::WaitingInput))
             .await;
+        registry.answer_revive(&crate::registry::ReportOrigin::local(), card_id, 起こす頼み);
         let 起きた = 待ち
             .await
             .expect("自分の起こし直しは断られていない")
             .expect("起きたことを受け取ること");
         assert_eq!(起きた.card_id, card_id);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 1回だけ進める（時計は使わない）。
+    async fn 一回進める<F: std::future::Future + ?Sized>(
+        待ち: &mut std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        std::future::poll_fn(|cx| std::task::Poll::Ready(待ち.as_mut().poll(cx))).await
+    }
+
+    fn 自分への成功(card_id: CardId, op: OpId) -> ServerMessage {
+        ServerMessage::Status {
+            card_id,
+            status: SessionStatus::WaitingInput,
+            subagent_active: 0,
+            last_activity_at: 2,
+            op: Some(op),
+        }
+    }
+
+    fn 知らせ(account_id: uuid::Uuid, message: ServerMessage) -> crate::registry::AccountEvent {
+        crate::registry::AccountEvent {
+            account_id,
+            message,
+        }
+    }
+
+    #[tokio::test]
+    async fn 配信で起きた状態と自分への終わった断りがどちらの順で届いても断りで止まる() {
+        // 実装レビュー第11回 Astra 2（配信の道）。束の上限を超えてこの枝分かれの起こし直しが断られて
+        // いても、先の起こし直しが起こしていれば、以前は起きた状態を見た時点で満ちた——知らせの順で
+        // 結果が変わった。**断りは配信だけで運ぶ**（記録層へ入れない）ので、拾えるのは配信の道だけ。
+        // 起きた状態は記録にも配信にも載る（本番と同じ）
+        for 断りが先 in [false, true] {
+            let (registry, account_id, card_id, path) = 寝ている元を載せた記録層().await;
+            let 起こす頼み = OpId::new();
+            let (配る, mut events) = tokio::sync::broadcast::channel(16);
+            let mut 待ち = std::pin::pin!(wait_for(
+                &registry,
+                account_id,
+                &mut events,
+                WAKE_TIMEOUT,
+                Some((card_id, 起こす頼み)),
+                move |meta| meta.card_id == card_id && 整った(meta.status),
+            ));
+            assert!(一回進める(&mut 待ち).await.is_pending());
+
+            let 断り = 知らせ(
+                account_id,
+                終わった断り(card_id, "起こし直しの頼みが多すぎます", &[起こす頼み]),
+            );
+            if 断りが先 {
+                配る.send(断り.clone()).expect("受け手が居ること");
+            }
+            registry
+                .adopt(account_id, 寝ている元(card_id, SessionStatus::WaitingInput))
+                .await;
+            配る
+                .send(知らせ(
+                    account_id,
+                    寝ている元(card_id, SessionStatus::WaitingInput),
+                ))
+                .expect("受け手が居ること");
+            if !断りが先 {
+                配る.send(断り).expect("受け手が居ること");
+            }
+            assert_eq!(
+                一回進める(&mut 待ち).await,
+                std::task::Poll::Ready(Err("起こし直しの頼みが多すぎます".to_string())),
+                "★（断りが{}）先の起こし直しで起きた状態を、自分への終わった断りより優先している",
+                if 断りが先 { "先" } else { "後" }
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[tokio::test]
+    async fn 記録で起きた状態と自分への終わった断りがどちらの順で入っても断りで止まる() {
+        // 実装レビュー第11回 Astra 2（記録の道）。待ち始める前に、起きた状態と断りの両方が記録へ
+        // 入っている形。以前は毎周の初めに状態を先に見たので、どちらの順で入っても成功した
+        for 断りが先 in [false, true] {
+            let (registry, account_id, card_id, path) = 寝ている元を載せた記録層().await;
+            let origin = crate::registry::ReportOrigin::local();
+            let 起こす頼み = OpId::new();
+            registry.accept_op(account_id, card_id, 起こす頼み);
+            let 断り = 終わった断り(card_id, "起こし直しの頼みが多すぎます", &[起こす頼み]);
+            if 断りが先 {
+                registry.apply(&origin, 断り.clone()).await;
+            }
+            registry
+                .adopt(account_id, 寝ている元(card_id, SessionStatus::WaitingInput))
+                .await;
+            if !断りが先 {
+                registry.apply(&origin, 断り).await;
+            }
+            let mut events = registry.subscribe_events();
+            let mut 待ち = std::pin::pin!(wait_for(
+                &registry,
+                account_id,
+                &mut events,
+                WAKE_TIMEOUT,
+                Some((card_id, 起こす頼み)),
+                move |meta| meta.card_id == card_id && 整った(meta.status),
+            ));
+            assert_eq!(
+                一回進める(&mut 待ち).await,
+                std::task::Poll::Ready(Err("起こし直しの頼みが多すぎます".to_string())),
+                "★（断りが{}）記録で起きた状態を、記録に残った自分への終わった断りより優先している",
+                if 断りが先 { "先" } else { "後" }
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[tokio::test]
+    async fn 他の起こし直しで起きただけでは満ちず自分への成功の答えで満ちる() {
+        // 実装レビュー第11回 Astra 2。カードが起きた状態は、他の起こし直しの結果でもありうる。自分の
+        // 頼みへの成功の答え（番号付きの状態）を受けるまで満ちない。配信の道と記録の道の両方
+        let (registry, account_id, card_id, path) = 寝ている元を載せた記録層().await;
+        let 起こす頼み = OpId::new();
+        let (配る, mut events) = tokio::sync::broadcast::channel(16);
+        let mut 待ち = std::pin::pin!(wait_for(
+            &registry,
+            account_id,
+            &mut events,
+            WAKE_TIMEOUT,
+            Some((card_id, 起こす頼み)),
+            move |meta| meta.card_id == card_id && 整った(meta.status),
+        ));
+        registry
+            .adopt(account_id, 寝ている元(card_id, SessionStatus::WaitingInput))
+            .await;
+        配る
+            .send(知らせ(
+                account_id,
+                寝ている元(card_id, SessionStatus::WaitingInput),
+            ))
+            .expect("受け手が居ること");
+        assert!(
+            一回進める(&mut 待ち).await.is_pending(),
+            "★自分の頼みの結果を受ける前に、カードが起きた状態だけで満ちている"
+        );
+        // 競合（途中の知らせ）では満ちない
+        配る
+            .send(知らせ(
+                account_id,
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: "このカードは復旧中です".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(true),
+                    withdrawn: None,
+                    ops: vec![起こす頼み],
+                },
+            ))
+            .expect("受け手が居ること");
+        assert!(一回進める(&mut 待ち).await.is_pending(), "競合で満ちている");
+        配る
+            .send(知らせ(account_id, 自分への成功(card_id, 起こす頼み)))
+            .expect("受け手が居ること");
+        assert!(
+            matches!(
+                一回進める(&mut 待ち).await,
+                std::task::Poll::Ready(Ok(Some(meta))) if meta.card_id == card_id
+            ),
+            "自分への成功の答えを受けたら満ちること"
+        );
+
+        // 記録の道：競合が先に控えへ入っても、後から届いた成功の答えで置き換わる
+        let 次の頼み = OpId::new();
+        let origin = crate::registry::ReportOrigin::local();
+        registry.accept_op(account_id, card_id, 次の頼み);
+        registry
+            .apply(
+                &origin,
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: "このカードは復旧中です".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(true),
+                    withdrawn: None,
+                    ops: vec![次の頼み],
+                },
+            )
+            .await;
+        registry.answer_revive(&origin, card_id, 次の頼み);
+        let mut events = registry.subscribe_events();
+        let mut 待ち = std::pin::pin!(wait_for(
+            &registry,
+            account_id,
+            &mut events,
+            WAKE_TIMEOUT,
+            Some((card_id, 次の頼み)),
+            move |meta| meta.card_id == card_id && 整った(meta.status),
+        ));
+        assert!(
+            matches!(
+                一回進める(&mut 待ち).await,
+                std::task::Poll::Ready(Ok(Some(_)))
+            ),
+            "★競合が先に控えへ入ると、後から届いた成功の答えを記録から引けない"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

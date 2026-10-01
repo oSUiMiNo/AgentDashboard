@@ -159,7 +159,8 @@ pub trait SessionHost: Send + Sync + 'static {
     ///
     /// `op` は頼みの番号（実装レビュー第6回 Astra 1）。付いていれば PC が何をしたかを番号付きで
     /// 答え、記録層がそれを合否にして配る（[`crate::registry::SessionRegistry::answer_kill`]）。
-    /// **`Err` は届けられなかったことだけを言う**——番号付きの頼みを PC が断ることは無い。
+    /// **`Err` は届けられなかったことだけを言う**——PC が番号付きの頼みを断るとき（答えを待たせる
+    /// 頼みが多すぎる。実装レビュー第11回 Astra 1）は、番号付きの断りが配信で届く。
     async fn kill(
         &self,
         account_id: uuid::Uuid,

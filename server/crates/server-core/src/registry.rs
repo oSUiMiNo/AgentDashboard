@@ -498,8 +498,10 @@ impl 照合の止め所 {
 ///   届いているのに捨てた。ここに控えた**受け付けた頼み**の持ち主で確かめる
 ///
 /// 控えるのは**このインスタンスが受け付けた頼みだけ**（`ws.rs` が持ち主の門を通した後に
-/// [`SessionRegistry::accept_op`] で入れる）。答えは最初の1つだけを残す（CLI は自分の番号の
-/// 断りなら競合でも落ちるので、最初の答えが結果である）。
+/// [`SessionRegistry::accept_op`] で入れる。枝分かれの段取りも自分の起こし直しの頼みを入れる）。
+/// 答えは最初の1つだけを残す。**ただし競合（途中の知らせ）は、後から届く終わりの答えで置き換える**
+/// （実装レビュー第11回 Astra 2。[`is_interim_answer`]）。CLI は自分の番号の断りなら競合でも
+/// その場で落ちるので、配信で受けた CLI の結果は変わらない。
 ///
 /// **再起動で消える**（メモリにだけ持つ）。消えた後に取りこぼした答えは引き直せず、CLI は
 /// 時間切れで終わる。
@@ -554,11 +556,13 @@ impl OpLedger {
             return;
         };
         let mut shared: Option<Arc<ServerMessage>> = None;
+        let 途中 = is_interim_answer(message);
         for op in ops {
             if let Some(entry) = self.entries.get_mut(op)
                 && entry.account_id == account_id
                 && card_id.is_none_or(|card_id| card_id == entry.card_id)
-                && entry.answer.is_none()
+                && (entry.answer.is_none()
+                    || (!途中 && entry.answer.as_deref().is_some_and(is_interim_answer)))
             {
                 let body = shared.get_or_insert_with(|| Arc::new(message.clone()));
                 entry.answer = Some(Arc::clone(body));
@@ -584,6 +588,22 @@ impl OpLedger {
             .map(|body| op_answer_of(body).map_or(0, |(_, ops)| ops.len()))
             .sum()
     }
+}
+
+/// 途中の知らせ（起こし直しの競合。`busy: Some(true)`）か（実装レビュー第11回 Astra 2）。
+///
+/// 競合で束ねた頼みは、先の起こし直しの結果（成功の答え・終わった断り）が後から届く。控えに競合を
+/// 先に残すと、後の結果が残らず、記録から引き直す枝分かれは結果を知れない。**途中の知らせは、
+/// 後から届いた終わりの答えで置き換える**（終わりの答え同士は、これまでどおり最初のものを残す）。
+fn is_interim_answer(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::Error {
+            kind: ErrorKind::Revive,
+            busy: Some(true),
+            ..
+        }
+    )
 }
 
 /// 番号付きの頼みへの答えなら、宛先のカードと答えた番号（実装レビュー第7回 Astra 3・4）。

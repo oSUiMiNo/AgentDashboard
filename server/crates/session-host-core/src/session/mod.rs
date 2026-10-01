@@ -40,7 +40,7 @@ use protocol::{
     a2s::KillOutcome,
     frame::{self, FrameKind},
     ipc::ParsedNode,
-    ws::{OpId, ServerMessage},
+    ws::{ErrorKind, OpId, ServerMessage},
 };
 use pty::{PtyExit, PtyProcess};
 use std::path::Path;
@@ -327,6 +327,17 @@ pub const ALREADY_REVIVING: &str = "このカードは復旧中です";
 /// 来ないので、これで足りる。
 pub const REVIVE_OPS_KEPT: usize = 16;
 
+/// 1枚のカードにつき、答えを待たせておける番号付きの終了の頼みの数（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 実装レビュー第11回 Astra 1。[`SessionManager::kill_answering`]）。
+///
+/// 番号付きの終了は、止めた実体が終わるのを見届けてから答える。終わりが進まない間に頼みを
+/// 繰り返すと、そのたびに待ち手（実体の [`EndWaiters`]・起こしている最中の札の
+/// [`TicketState::kill_ops`]）が足され、頼んだ CLI が時間切れで去っても残っていた。
+pub const KILL_WAITERS_KEPT: usize = 16;
+
+/// 答えを待たせておける終了の頼みが満ちた後に来た頼みへの断り（[`SessionManager::kill_answering`]）。
+pub const TOO_MANY_KILL_REQUESTS: &str = "このカードへの終了の頼みが多すぎます（止める操作はもう一度行いました。先に頼んだ終了の結果を待ってください）";
+
 /// 束が上限に達した後に来た頼みへの断り（[`ReviveContention::Overflow`]）。
 pub const TOO_MANY_REVIVE_REQUESTS: &str =
     "このカードへの起こし直しの頼みが多すぎます（先に進んでいる起こし直しの結果を待ってください）";
@@ -334,7 +345,8 @@ pub const TOO_MANY_REVIVE_REQUESTS: &str =
 /// 起こし直しを受け付けなかった理由（[`SessionManager::begin_revive_or_refuse`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviveContention {
-    /// 先に起こしている札がある。頼みの番号はその札へ束ねた（番号が無ければ束ねない）。
+    /// 先に起こしている札がある。頼みの番号はその札へ束ねた（番号が無ければ束ねない）。その札が
+    /// 既に実体を作り終えていたら、束ねずにその場で成功を答えた（実装レビュー第11回 Astra 2）。
     /// **待てば起きる**ので、競合と名乗る（[`ALREADY_REVIVING`]・`busy: Some(true)`）
     Busy,
     /// 先の札の束が上限（[`REVIVE_OPS_KEPT`]）に達している。この頼みの番号は束ねず、**その番号への
@@ -2547,6 +2559,10 @@ pub struct SessionManager {
     events: Arc<dyn EventSink>,
     /// 終了の頼みへの答えの手元の配信（[`SessionManager::subscribe_kill_answers`]）
     kill_answers: broadcast::Sender<crate::events::KillAnswered>,
+    /// 答えを待っている番号付きの終了の頼み（実装レビュー第11回 Astra 1。
+    /// [`SessionManager::kill_answering`] が入れ、[`SessionManager::answer_kill`] が出す）。
+    /// **待ち手を持つ道は全部ここを通る**ので、ここで数を抑えれば実体の待ち手も札の番号も抑えられる
+    pending_kills: Mutex<HashMap<CardId, HashSet<OpId>>>,
     /// 起こし直しの頼みへの成功の答えの手元の配信（[`SessionManager::subscribe_revive_answers`]）
     revive_answers: broadcast::Sender<crate::events::ReviveAnswered>,
     /// パーサへ監視を頼む口。パーサが立ち上がってから差し込まれる。
@@ -2780,7 +2796,8 @@ struct TicketState {
     /// 下ろされたか、なぜ下ろされたか
     withdrawn: Option<WithdrawReason>,
     stage: ReviveStage,
-    /// この起こし直しの終わった断りが答える頼みの番号（実装レビュー第6回 Astra 3）。
+    /// この起こし直しの結果（終わった断り・成功の答え）が答える頼みの番号（実装レビュー第6回
+    /// Astra 3・第11回 Astra 2）。
     ///
     /// 受け付けた頼みの番号に、**進んでいる間に届いて競合で断った頼み**の番号を束ねる。競合で
     /// 断られた側（人が先に起こしていたときの枝分かれ）は、先の起こし直しが断られれば同じく
@@ -2790,6 +2807,12 @@ struct TicketState {
     /// 束ねるのは頼んだ側が振った番号だけで、同じ番号は1回だけ、数は [`REVIVE_OPS_KEPT`] まで
     /// （実装レビュー第10回 Astra 2。[`SessionManager::begin_revive_or_refuse`]）
     ops: Vec<OpId>,
+    /// 受け付けた頼みが番号を振っていなかったとき、受け付けた時点で振った番号。**誰も待って
+    /// いない**ので、成功の答えは出さない（実装レビュー第11回 Astra 2）
+    unnumbered: Option<OpId>,
+    /// この起こし直しが実体を作り終えたか（成功の答えを出したか。実装レビュー第11回 Astra 2）。
+    /// 立った後に束ねられた頼みには、その場で成功を答える——先の起こし直しはもう答え終えている
+    succeeded: bool,
     /// 起こしている最中（[`ReviveStage::Spawning`]）に届いた終了の頼みの番号（実装レビュー
     /// 第6回 Astra 1）。作り終えた起こす側が引き取り、作った実体を止めてから答える
     kill_ops: Vec<OpId>,
@@ -3431,6 +3454,7 @@ impl SessionManager {
             tokens: Mutex::new(HashMap::new()),
             events,
             kill_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
+            pending_kills: Mutex::new(HashMap::new()),
             revive_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
             parser: Mutex::new(None),
             claude_settings,
@@ -3986,11 +4010,96 @@ impl SessionManager {
     /// | 実体は既に終わっていた（同上） | `AlreadyEnded` | その場で |
     /// | 何も無い | `Nothing` | その場で |
     ///
-    /// **断らない。** 何も無かったことも答えで返る——成功か失敗かは、サーバがカードの記録と
-    /// 合わせて決める。番号の無い頼みの答え（取り下げの断り・`Ended`・配り直し・見つからない）は
+    /// **何も無かったことも答えで返る**——成功か失敗かは、サーバがカードの記録と合わせて決める。
+    /// 断るのは、答えを待たせる頼みが多すぎるときだけ（下記）。番号の無い頼みの答え（取り下げの断り・`Ended`・配り直し・見つからない）は
     /// 出さない：番号を持つ待ち手はそれを読まず、画面は状態の変化で足りる。
+    ///
+    /// # 同じ番号は重ねず、待たせる数に上限がある（実装レビュー第11回 Astra 1）
+    ///
+    /// 答えを待っている頼みはカードごとに番号で控える（`pending_kills`）。
+    ///
+    /// - **同じ番号がまだ答えを待っている**（送り直し）：止める操作だけをもう一度行い、待ち手は
+    ///   足さない。答えは先の頼みが1回だけ返す
+    /// - **待っている頼みが上限（[`KILL_WAITERS_KEPT`]）に達している**：止める操作はもう一度行い、
+    ///   この番号には断り（[`TOO_MANY_KILL_REQUESTS`]）を返す。止めないと、先の待ち手が終わりの
+    ///   来ない実体に掛かったままのとき、番号付きの頼みではもう止められなくなる
     pub fn kill_answering(&self, card_id: CardId, op: OpId) {
-        self.halt(card_id, WithdrawReason::Kill, Some(op));
+        enum 受付 {
+            受けた,
+            送り直し,
+            多すぎる,
+        }
+        let 受付 = {
+            let mut pending = self.pending_kills.lock().expect("ロックが壊れていない");
+            let ops = pending.entry(card_id).or_default();
+            if ops.contains(&op) {
+                受付::送り直し
+            } else if ops.len() >= KILL_WAITERS_KEPT {
+                受付::多すぎる
+            } else {
+                ops.insert(op);
+                受付::受けた
+            }
+        };
+        match 受付 {
+            受付::受けた => {
+                self.halt(card_id, WithdrawReason::Kill, Some(op));
+            }
+            受付::送り直し => {
+                self.halt(card_id, WithdrawReason::Kill, None);
+            }
+            受付::多すぎる => {
+                tracing::warn!(
+                    %card_id,
+                    %op,
+                    "答えを待っている終了の頼みが多すぎるので、この頼みは止める操作だけ行って断ります"
+                );
+                self.halt(card_id, WithdrawReason::Kill, None);
+                self.broadcast(ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: TOO_MANY_KILL_REQUESTS.to_string(),
+                    kind: ErrorKind::Kill,
+                    busy: None,
+                    withdrawn: None,
+                    ops: vec![op],
+                });
+            }
+        }
+    }
+
+    /// 答えを待っている終了の頼みの数（**テスト専用**。実装レビュー第11回 Astra 1）。
+    /// `(控えた番号, 表の実体に預けた待ち手, 起こしている最中の札に預けた番号)`。
+    #[doc(hidden)]
+    pub fn 終了の待ち手の数(&self, card_id: CardId) -> (usize, usize, usize) {
+        let 控え = self
+            .pending_kills
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&card_id)
+            .map_or(0, HashSet::len);
+        let 実体 = self.get(card_id).map_or(0, |session| {
+            session
+                .end_waiters
+                .lock()
+                .expect("ロックが壊れていない")
+                .joints
+                .len()
+        });
+        let 札 = self
+            .reviving
+            .lock()
+            .expect("ロックが壊れていない")
+            .tickets
+            .get(&card_id)
+            .map_or(0, |ticket| {
+                ticket
+                    .state
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .kill_ops
+                    .len()
+            });
+        (控え, 実体, 札)
     }
 
     /// 記録の側から一覧から外し始めたカードを、この PC で止める（実装レビュー第3回 Astra 1）。
@@ -4099,7 +4208,19 @@ impl SessionManager {
     }
 
     /// 終了の頼みに答える（[`SessionManager::kill`] の表）。番号1つにつき1回だけ呼ぶ。
+    ///
+    /// **答えたら控えから外す**（実装レビュー第11回 Astra 1。[`SessionManager::kill_answering`]）。
+    /// 番号付きの終了の答えは全部ここを通る。
     fn answer_kill(&self, card_id: CardId, op: OpId, outcome: KillOutcome) {
+        {
+            let mut pending = self.pending_kills.lock().expect("ロックが壊れていない");
+            if let Some(ops) = pending.get_mut(&card_id) {
+                ops.remove(&op);
+                if ops.is_empty() {
+                    pending.remove(&card_id);
+                }
+            }
+        }
         tracing::info!(%card_id, %op, ?outcome, "終了の頼みに答えます");
         let answer = crate::events::KillAnswered {
             card_id,
@@ -4238,8 +4359,8 @@ impl SessionManager {
     /// # 頼みの番号（実装レビュー第6回 Astra 3）
     ///
     /// `op` は頼んだ側の番号で、欠けていればここで振る（受け付けた時点で決まる）。競合で断る
-    /// ときは、**先に進んでいる札へ番号を束ねてから** `None` を返す——先の起こし直しが断られたら、
-    /// その断りがこの番号も運ぶ（[`TicketState::ops`]）。
+    /// ときは、**先に進んでいる札へ番号を束ねてから** `None` を返す——先の起こし直しの結果が、
+    /// 断りでも成功でもこの番号にも答える（[`TicketState::ops`]。成功は実装レビュー第11回 Astra 2）。
     ///
     /// 競合を「束ねた」と「束が満ちていた」で分けて知りたい頼み手は
     /// [`SessionManager::begin_revive_or_refuse`] を使う。
@@ -4263,6 +4384,8 @@ impl SessionManager {
     /// - 束ねるのは**頼んだ側が振った番号だけ**（ここで振った番号は誰も待っていない）
     /// - 同じ番号は1回だけ
     /// - 上限（[`REVIVE_OPS_KEPT`]）に達したら束ねず [`ReviveContention::Overflow`]
+    /// - 先の札が既に実体を作り終えていたら、束ねずにその場で成功を答える（実装レビュー第11回
+    ///   Astra 2。先の起こし直しはもう答え終えている）
     pub fn begin_revive_or_refuse(
         self: &Arc<Self>,
         card_id: CardId,
@@ -4270,6 +4393,7 @@ impl SessionManager {
     ) -> Result<ReviveInFlight, ReviveContention> {
         let given = op;
         let op = op.unwrap_or_else(OpId::new);
+        let unnumbered = given.is_none().then_some(op);
         let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
         if reviving.removed.contains(&card_id) {
             let ticket = ReviveTicket::default();
@@ -4277,6 +4401,7 @@ impl SessionManager {
                 let mut state = ticket.state.lock().expect("ロックが壊れていない");
                 state.withdrawn = Some(WithdrawReason::Remove);
                 state.ops.push(op);
+                state.unnumbered = unnumbered;
             }
             return Ok(ReviveInFlight {
                 manager: Arc::clone(self),
@@ -4293,24 +4418,36 @@ impl SessionManager {
                 let Some(given) = given else {
                     return Err(ReviveContention::Busy);
                 };
-                let mut state = ahead.get().state.lock().expect("ロックが壊れていない");
-                if state.ops.contains(&given) {
-                    return Err(ReviveContention::Busy);
+                let 済んでいた = {
+                    let mut state = ahead.get().state.lock().expect("ロックが壊れていない");
+                    if state.succeeded {
+                        true
+                    } else {
+                        if state.ops.contains(&given) {
+                            return Err(ReviveContention::Busy);
+                        }
+                        if state.ops.len() >= REVIVE_OPS_KEPT {
+                            return Err(ReviveContention::Overflow);
+                        }
+                        state.ops.push(given);
+                        false
+                    }
+                };
+                drop(reviving);
+                // **先の起こし直しがもう実体を作り終えていたら、その場で成功を答える**（実装
+                // レビュー第11回 Astra 2）。束ねても、先の起こし直しはもう答え終えている
+                if 済んでいた {
+                    self.answer_revive(card_id, given);
                 }
-                if state.ops.len() >= REVIVE_OPS_KEPT {
-                    return Err(ReviveContention::Overflow);
-                }
-                state.ops.push(given);
                 return Err(ReviveContention::Busy);
             }
         };
         let ticket = ReviveTicket::default();
-        ticket
-            .state
-            .lock()
-            .expect("ロックが壊れていない")
-            .ops
-            .push(op);
+        {
+            let mut state = ticket.state.lock().expect("ロックが壊れていない");
+            state.ops.push(op);
+            state.unnumbered = unnumbered;
+        }
         let ticket = Arc::clone(slot.insert(Arc::new(ticket)));
         Ok(ReviveInFlight {
             manager: Arc::clone(self),
@@ -4594,7 +4731,24 @@ impl SessionManager {
         // **作り終えたら答える**（実装レビュー第6回）。作った実体の姿は `spawn_as` が配り終えて
         // いるので、答えはその後ろに並ぶ。立ち上がりきるのは待たない——以前の CLI も、起動中で
         // 繋がった姿を見た時点で「起こし直しました」と言っていた
-        if let Some(op) = reply {
+        //
+        // **束ねた頼みにも答える**（実装レビュー第11回 Astra 2）。競合で束ねた頼みは、この起こし直しの
+        // 結果が自分の結果になる。断りは以前から束ね全部へ答えていたが、成功は受け付けた頼みにしか
+        // 答えず、束ねた側はカードの状態から推し量るしかなかった。番号を振っていない頼みには答えない。
+        // 答え終えた印を同じロックで立てるので、この後に束ねられた頼みはその場で答えを受ける
+        let 答える番号: Vec<OpId> = {
+            let mut state = ticket.state.lock().expect("ロックが壊れていない");
+            state.succeeded = true;
+            let unnumbered = state.unnumbered;
+            state
+                .ops
+                .iter()
+                .copied()
+                .filter(|op| Some(*op) != unnumbered)
+                .collect()
+        };
+        debug_assert!(reply.is_none_or(|op| 答える番号.contains(&op)));
+        for op in 答える番号 {
             self.answer_revive(card_id, op);
         }
 

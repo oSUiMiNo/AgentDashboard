@@ -125,15 +125,26 @@ impl SessionHost for LocalSessionHost {
         // 「材料が揃っているか」だけ——呼び戻し先が無ければ `--resume` に渡す値が無い
         let claude_session_id = meta.claude_session_id.ok_or(NO_RESUME_TARGET)?;
         // 競合で断るときも、番号は先に進んでいる札へ束ねてある（実装レビュー第6回 Astra 3）。
-        // ローカルの競合はここで同期に返るので、断りの番号を添える先が無い——束ねておけば、
-        // 先の起こし直しが断られたときにその断りがこの番号も運ぶ
+        // 先の起こし直しの結果（断りも成功も）がこの番号にも答える（第11回 Astra 2）
         let in_flight = match self
             .manager
             .begin_revive_or_refuse(request.card_id, request.op)
         {
             Ok(in_flight) => in_flight,
+            // **競合も配信で配り、受付は通す**（実装レビュー第11回 Astra 2）。以前は同期の断り
+            // （`Err`）で返していたが、番号は先の札へ束ねてあり、その起こし直しの結果がこの頼みの
+            // 結果になる。`Err` にすると「届かなかった」と見分けが付かない（枝分かれは届かなかった
+            // 頼みをその場で諦める）。セルフホスト（`link.rs`）と同じ形
             Err(session::ReviveContention::Busy) => {
-                return Err(session::ALREADY_REVIVING.to_string());
+                self.manager.broadcast(ServerMessage::Error {
+                    card_id: Some(request.card_id),
+                    message: session::ALREADY_REVIVING.to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(true),
+                    withdrawn: None,
+                    ops: request.op.into_iter().collect(),
+                });
+                return Ok(());
             }
             // **束が満ちていて番号を束ねられなかった**（実装レビュー第10回 Astra 2）。同期の断り
             // （`Err`）は頼んだ接続にしか届かず記録層を通らないので、起きるのを待つ枝分かれが
@@ -224,7 +235,9 @@ impl SessionHost for LocalSessionHost {
         op: Option<protocol::ws::OpId>,
     ) -> Result<(), String> {
         match op {
-            // 番号付きの頼みは断らない——何をしたかは答え（`ReportingSink::kill_answered`）で返る
+            // 番号付きの頼みは同期には断らない——何をしたかは答え（`ReportingSink::kill_answered`）で
+            // 返る。待たせる頼みが多すぎるときの断りも、番号付きで配信に乗る（実装レビュー第11回
+            // Astra 1）
             Some(op) => {
                 self.manager.kill_answering(card_id, op);
                 Ok(())

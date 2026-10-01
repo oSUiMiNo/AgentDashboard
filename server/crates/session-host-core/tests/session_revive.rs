@@ -2848,6 +2848,191 @@ async fn 起こしている最中の終了は新しい実体が先に終わっ�
     assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
 }
 
+/// 終了の頼みへの断り（番号付き）を、配信から待たずに全部取る。
+fn 終了の断り(
+    bus: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+    card_id: CardId,
+) -> Vec<OpId> {
+    let mut 断った = Vec::new();
+    while let Ok(message) = bus.try_recv() {
+        if let ServerMessage::Error {
+            card_id: Some(id),
+            kind: protocol::ws::ErrorKind::Kill,
+            ops,
+            ..
+        } = message
+            && id == card_id
+        {
+            断った.extend(ops);
+        }
+    }
+    断った
+}
+
+#[tokio::test]
+async fn 終わりが進まない間に番号付きの終了を繰り返しても待ち手は上限に収まり同じ番号は重ねない() {
+    // 実装レビュー第11回 Astra 1。番号付きの終了は、止めた実体が終わるのを見届けてから答える。
+    // 終わりが進まない間に頼みを繰り返すと、そのたびに実体の待ち手が足され、同じ番号の送り直しも
+    // 重なり、頼んだ CLI が時間切れで去っても残っていた。終わりの見届けを門で止めて形を作る
+    use session_host_core::session::KILL_WAITERS_KEPT;
+    let manager = common::manager();
+    let 門 = manager.終わりの見届けを止める();
+    let session = manager.spawn(&common::work_dir()).expect("起こせること");
+    let card_id = session.card_id;
+    let mut answers = manager.subscribe_kill_answers();
+    let mut bus = manager.subscribe_events();
+
+    let 送り直す = OpId::new();
+    let mut 受けた = vec![送り直す];
+    for _ in 0..5 {
+        manager.kill_answering(card_id, 送り直す);
+    }
+    let 頼み: Vec<OpId> = (0..40).map(|_| OpId::new()).collect();
+    for op in &頼み {
+        manager.kill_answering(card_id, *op);
+    }
+    受けた.extend(頼み.iter().take(KILL_WAITERS_KEPT - 1));
+
+    let (控え, 実体, _) = manager.終了の待ち手の数(card_id);
+    assert_eq!(
+        実体, KILL_WAITERS_KEPT,
+        "★終わりが進まない間に、実体の待ち手が上限（{KILL_WAITERS_KEPT}）を超えて溜まっている（送り直しも重ねていないか）"
+    );
+    assert_eq!(控え, KILL_WAITERS_KEPT);
+    let 断った = 終了の断り(&mut bus, card_id);
+    assert_eq!(
+        断った,
+        頼み[KILL_WAITERS_KEPT - 1..].to_vec(),
+        "★上限を超えた頼みに、番号付きの断りを返していない"
+    );
+    assert!(
+        !断った.contains(&送り直す),
+        "★同じ番号の送り直しを、上限を超えた頼みとして断っている"
+    );
+
+    門.add_permits(10);
+    let mut 答えた = std::collections::HashSet::new();
+    while 答えた.len() < 受けた.len() {
+        let 答え = 答えを待つ(&mut answers, "受けた頼み").await;
+        assert_eq!(答え.outcome, KillOutcome::Stopped);
+        assert!(答えた.insert(答え.op), "★同じ頼みに2回答えている");
+    }
+    assert_eq!(
+        答えた,
+        受けた.into_iter().collect(),
+        "受けた頼みに1回ずつ答えること"
+    );
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "受けていない頼みに答えている"
+    );
+    assert_eq!(
+        manager.終了の待ち手の数(card_id).0,
+        0,
+        "答えた頼みが控えに残っている"
+    );
+}
+
+#[tokio::test]
+async fn 終了の頼みが上限を超えても止める操作は届く() {
+    // 実装レビュー第11回 Astra 1。上限を超えた番号付きの終了には断りを返すが、**止める操作は行う**。
+    // 行わないと、先の待ち手が終わりの来ない実体に掛かったままのとき、番号付きの頼みではもう
+    // 止められない。ここでは、待ち手で満ちた後に始まった起こし直しを、17 本目の頼みが取り下げる
+    use session_host_core::session::KILL_WAITERS_KEPT;
+    let manager = common::manager_with(実機の設定());
+    let 終わりの門 = manager.終わりの見届けを止める();
+    let 古い実体 = manager
+        .spawn(&common::work_dir())
+        .expect("古い実体を起こせること");
+    let card_id = 古い実体.card_id;
+    for _ in 0..KILL_WAITERS_KEPT {
+        manager.kill_answering(card_id, OpId::new());
+    }
+    let (外, _host_free, _門) = common::確かめで止める(&manager);
+    let 起こし直し = 切り離して頼む(&manager, card_id);
+    外.聞かれるまで待つ(0).await;
+
+    let mut bus = manager.subscribe_events();
+    let 溢れる = OpId::new();
+    manager.kill_answering(card_id, 溢れる);
+    assert_eq!(
+        終了の断り(&mut bus, card_id),
+        vec![溢れる],
+        "上限を超えた頼みに断りを返すこと"
+    );
+    let 結果 = timeout(Duration::from_secs(10), 起こし直し)
+        .await
+        .expect("★上限を超えた終了の頼みで、止める操作をしていない（起こし直しが確かめを待ち続けている）")
+        .expect("起こし直しの作業が落ちていないこと");
+    assert!(
+        結果.is_err_and(|断り| 断り.contains("終了を頼まれた")),
+        "終了の頼みで取り下げられたこと"
+    );
+    外.開ける();
+    終わりの門.add_permits(100);
+}
+
+#[tokio::test]
+async fn 起こしている最中に番号付きの終了を繰り返しても札に預ける番号は上限に収まる() {
+    // 実装レビュー第11回 Astra 1。起こしている最中（`Spawning`）の終了の番号は札（`kill_ops`）へ
+    // 預け、作り終えた起こす側が答える。起こす処理が止まっていると、頼みを繰り返すたびに札の番号が
+    // 増えた。起こす直前に止めた形で、何度も頼む
+    use session_host_core::session::KILL_WAITERS_KEPT;
+    let manager = common::manager();
+    let 古い実体 = manager.spawn(&common::work_dir()).expect("起こせること");
+    let card_id = 古い実体.card_id;
+    let 札の番号: Arc<std::sync::Mutex<Option<(usize, usize, usize)>>> = Arc::default();
+    let 頼み: Vec<OpId> = (0..40).map(|_| OpId::new()).collect();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 札の番号 = Arc::clone(&札の番号);
+        let 頼み = 頼み.clone();
+        manager.起こす直前に差し込む(Arc::new(move || {
+            let Some(manager) = manager_weak.upgrade() else {
+                return;
+            };
+            if 札の番号.lock().expect("ロックが壊れていない").is_some() {
+                return;
+            }
+            for op in &頼み {
+                manager.kill_answering(card_id, *op);
+                manager.kill_answering(card_id, *op);
+            }
+            *札の番号.lock().expect("ロックが壊れていない") =
+                Some(manager.終了の待ち手の数(card_id));
+        }));
+    }
+    let mut answers = manager.subscribe_kill_answers();
+    let in_flight = manager
+        .begin_revive(card_id, None)
+        .expect("起こし直しの札は無いので立つこと");
+    manager
+        .revive(in_flight, &common::work_dir(), None, ClaudeSessionId::new())
+        .await
+        .expect_err("終了を頼まれたのだから断ること");
+    let (控え, _, 札) = 札の番号
+        .lock()
+        .expect("ロックが壊れていない")
+        .expect("起こす直前に頼んだこと");
+    assert_eq!(
+        札, KILL_WAITERS_KEPT,
+        "★起こしている最中の札に、終了の頼みの番号が上限（{KILL_WAITERS_KEPT}）を超えて溜まっている（送り直しも重ねていないか）"
+    );
+    assert_eq!(控え, KILL_WAITERS_KEPT);
+
+    let mut 答えた = std::collections::HashSet::new();
+    while 答えた.len() < KILL_WAITERS_KEPT {
+        let 答え = 答えを待つ(&mut answers, "受けた頼み").await;
+        assert!(答えた.insert(答え.op), "★同じ頼みに2回答えている");
+    }
+    assert_eq!(
+        答えた,
+        頼み[..KILL_WAITERS_KEPT].iter().copied().collect(),
+        "受けた頼みに1回ずつ答えること"
+    );
+}
+
 #[tokio::test]
 async fn 確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える() {
     // 実装レビュー第6回 Astra 1。確かめ・席を待っている起こし直しは、札を見て作る前にやめる
@@ -3091,6 +3276,66 @@ async fn 起こし直しの断りは受け付けた頼みと競合で束ねた�
         1,
         "受付時に番号を振ること"
     );
+}
+
+#[tokio::test]
+async fn 束ねた頼みにも先の起こし直しの成功を答え済んだ札へ束ねたらその場で答える() {
+    // 実装レビュー第11回 Astra 2。競合で束ねた頼みは、先の起こし直しの結果が自分の結果になる。
+    // 断りは束ね全部へ答えていたが、**成功は受け付けた頼みにしか答えなかった**——束ねた側
+    // （人が先に起こしていたときの枝分かれ）は、カードの状態から推し量るしかなかった。先の起こし
+    // 直しが作り終えた後（札が立ち上がりきるまで残っている間）に束ねた頼みには、その場で答える
+    use session_host_core::events::ReviveAnswered;
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let card_id = CardId::new();
+    let (外, host_free, _古い実体, 起こし直し, _門) =
+        寝かせて確かめ中にする(&manager, card_id).await;
+    let mut answers = manager.subscribe_revive_answers();
+
+    // 確かめを待っている先の起こし直し（番号無し＝画面）へ、番号付きの頼みを束ねる
+    let 束ねる = OpId::new();
+    assert!(manager.begin_revive(card_id, Some(束ねる)).is_none());
+    assert!(
+        answers.try_recv().is_err(),
+        "まだ起こしていないのに答えている"
+    );
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    let 答え = timeout(common::TIMEOUT, answers.recv())
+        .await
+        .expect("★先の起こし直しが成功したのに、束ねた頼みに答えていない")
+        .expect("答えの配信が閉じていない");
+    assert_eq!(
+        答え,
+        ReviveAnswered {
+            card_id,
+            op: 束ねる
+        }
+    );
+    起こし直し
+        .await
+        .expect("起こし直しの作業が落ちていないこと")
+        .expect("先の起こし直しは通ること");
+    assert!(
+        answers.try_recv().is_err(),
+        "番号の無い先の頼みにまで答えている"
+    );
+
+    // 作り終えた後、立ち上がりきるまで札は表に残る。そこへ束ねた頼みには、その場で答える
+    let 後から = OpId::new();
+    assert!(
+        manager.begin_revive(card_id, Some(後から)).is_none(),
+        "札が残っていること（形を作れていない）"
+    );
+    assert_eq!(
+        answers.try_recv().ok(),
+        Some(ReviveAnswered {
+            card_id,
+            op: 後から
+        }),
+        "★先の起こし直しが作り終えた後に束ねた頼みに、成功を答えていない"
+    );
+    manager.get(card_id).expect("実体があること").kill();
 }
 
 #[tokio::test]

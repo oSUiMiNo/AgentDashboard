@@ -1481,7 +1481,8 @@ fn apply_command(
                 // **競合と名乗る**（寝ているカードばかりなのに、メモリ不足でセッションを
                 // 起こせない 設計§7-3）。先に起こしている側が居るので、待てば起きる——
                 // 枝分かれはこれで失敗してはいけない。番号は先の札へ束ねてあるので、先の
-                // 起こし直しが断られればその断りでも答える（実装レビュー第6回 Astra 3）
+                // 起こし直しの結果（断りも成功も）がこの頼みにも答える（実装レビュー第6回 Astra 3・
+                // 第11回 Astra 2）
                 Err(ReviveContention::Busy) => {
                     report_revive(
                         manager,
@@ -1561,7 +1562,8 @@ fn apply_command(
         ServerToAgent::SessionsExist { request_id, ids } => {
             answer_ask(outgoing.clone(), request_id, Ask::Sessions(ids));
         }
-        // 番号付きの頼みは断らない——何も無かったことも答え（`KillAnswer`）で返る
+        // 番号付きの頼みは、何も無かったことも答え（`KillAnswer`）で返る。待たせる頼みが多すぎる
+        // ときだけ、番号付きの断りを返す（実装レビュー第11回 Astra 1）
         ServerToAgent::Kill {
             card_id,
             op: Some(op),
