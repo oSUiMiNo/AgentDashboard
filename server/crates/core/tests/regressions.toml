@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 222
+min_entries = 224
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -2161,6 +2161,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "外す前に「外していない」を読んだ古い照合の答えが遅れて届いても、後の照合の失敗で控えたカードを控えから外さず、その後の確かめ直しで外した知らせを届ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/gateway.rs", name = "遅れて届いた古い照合の答えは後の照合で控えたカードを外さない" },
+]
+breaks_when = "gateway.rs の ReconcileBook::verified で世代を見ずに控えから外すと★で落ちることを直した担当が実測した（実装レビュー第12回 Astra 2）。自分でも verified の世代の照合（self.latest.get(&card_id) == Some(&generation)）を常に真にし、名指しの1本が「★外す前に読んだ古い照合の答えが遅れて届き、後の照合が失敗して控えたカードを外した（外した知らせが届かない）」で落ちることを確かめた（SQLite 側で）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "外す知らせが届かないうちに PC が実体を起こしても、PC がそのカードを名乗ったときにサーバが照合して片付けさせる"
 gate        = "unit"
 tests       = [
@@ -2452,7 +2462,7 @@ tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こしている最中の終了は新しい実体を作れなくても古い実体の終わりを見届けてから答える" },
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こしている最中の終了は新しい実体が先に終わっても古い実体の終わりまで答えない" },
 ]
-breaks_when = "session/mod.rs で、起こし直しの作り終えたところ（預かった終了の頼みを引き取った後）で畳んだ古い実体に終わりの見届けを預けない形にすると、2本とも★で落ちることを直した担当が実測した（実装レビュー第8回）。自分でも同じ所で古い実体への attach を飛ばし、「…作れなくても…」が「★新しい実体を作れなかったとき、古い実体の終わりを見届ける前に答えている」、「…先に終わっても…」が「★新しい実体が先に終わった時点で答えている（古いプロセスの終わりを見届けていない）」で落ちることを当て直した"
+breaks_when = "session/mod.rs の revive で、起こし直しの作り終えたところ（預かった終了の頼みを引き取った後）で畳んだ古い実体に終わりの見届けを預けない形にすると、2本とも★で落ちることを直した担当が実測した（実装レビュー第8回）。第8回のときは自分でも同じ所で古い実体への attach を飛ばし、「…作れなくても…」が「★新しい実体を作れなかったとき、古い実体の終わりを見届ける前に答えている」、「…先に終わっても…」が「★新しい実体が先に終わった時点で答えている（古いプロセスの終わりを見届けていない）」で落ちることを当て直した。実装レビュー第12回で、その所は畳んだ実体の控えから引く形（stop_folded(card_id, Some(&joint))）に変わった（試験は変わっていない）。変わった後のコードに、そこを stop_folded(card_id, None) にする壊し方を当て直し（直した担当も実測した）、2本とも同じ★で落ちることを確かめた"
 verified    = true
 
 [[entry]]
@@ -2499,6 +2509,16 @@ tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "windows側が本当に逼迫していればその値を添えて断る" },
 ]
 breaks_when = "reserve_memory の OutOfMemory へ effective_mb として memory.available_mb を渡す形へ戻す（2本とも落ち、文面が「使える空き 18983 MB」になった）。limit を Limit::Wsl に固定する（Windows 側の1本が「＝Windows 側の空き」の検査で落ちた）。どちらも実測した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こし直しを作り終えた後や札が下りた後に番号付きの終了を頼んだときも、畳んだ古い実体の終わりを見届けるまで答えない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こし直しを終えた後の終了も畳んだ古い実体の終わりまで答えない" },
+]
+breaks_when = "session/mod.rs の halt の Some(ReviveStage::Spawned) | None の腕で、stop_folded に待ち手を渡さない（None にする）と、2周（作り終えた直後・札が下りた後）とも★で落ちることを直した担当が実測した（実装レビュー第12回 Astra 1。1周目で落ちると2周目は走らないので、2周目は周を絞って当てた）。自分でも同じ腕の stop_folded の2か所（実体がある・無い）を None にし、名指しの1本が1周目の「★（作り終えた直後）新しい実体が終わった時点で、畳んだ古い実体の終わりを見届けずに答えている」で落ちることを確かめた（2周目は自分では見ていない）"
 verified    = true
 
 [[entry]]
