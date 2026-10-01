@@ -91,7 +91,9 @@ pub struct Config {
     pub revive_estimate_mb: u64,
     /// 起こし直しで使い切らずに残す余白（MB。起こし直し設計§18）
     pub revive_headroom_mb: u64,
-    /// WSL の外側（Windows）の空きを覚えておく期限（秒）。**0 なら外側を見ない**
+    /// Windows 側の空きを、起こし直しの判定にそのまま使ってよい期間（秒）。過ぎていたら
+    /// 起こすときに取り直して待つ（普段は約1秒）。長くすると、この窓の間に Windows 側の
+    /// 他のアプリや新規起動・呼び戻しが使ったぶんを見逃しやすくなる。**0 なら Windows 側を見ない**
     pub revive_host_free_ttl_sec: u64,
 
     // --- 縮小（設計§8）---
