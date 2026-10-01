@@ -3034,6 +3034,71 @@ async fn 起こしている最中に番号付きの終了を繰り返しても�
 }
 
 #[tokio::test]
+async fn 起こし直しを終えた後の終了も畳んだ古い実体の終わりまで答えない() {
+    // 実装レビュー第12回 Astra 1。起こし直しは古い実体を畳んで（止めて）から新しい実体を作る。古い
+    // プロセスの終わりを確かめる前に作り終えて段が `Spawned` へ進み、その後に番号付きの終了が届くと、
+    // 以前は新しい実体だけを待った。**新しい実体が先に終わると、古いプロセスの終わりを見届けない
+    // まま「止めた」と答えていた**。作り終えた直後（札が残っている）と、札が下りた後の両方で見る
+    for 札が下りてから in [false, true] {
+        let manager = common::manager();
+        // 古い実体の終わりだけを門で遅らせる（門の後に作った実体だけが止まる）
+        let 門 = manager.終わりの見届けを止める();
+        let 古い実体 = manager
+            .spawn(&common::work_dir())
+            .expect("古い実体を起こせること");
+        let card_id = 古い実体.card_id;
+        manager.終わりの見届けを止めるのをやめる();
+        let 新しい実体 = revive(&manager, card_id, ClaudeSessionId::new()).await;
+        assert!(!Arc::ptr_eq(&古い実体, &新しい実体));
+        assert_eq!(
+            manager.畳んだ実体の数(card_id),
+            1,
+            "畳んだ古い実体の終わりがまだ見届けられていないこと（形を作れていない）"
+        );
+        if 札が下りてから {
+            立ち上がりきらせる(&manager, &新しい実体);
+            wait_until("起こし直しの札が下りる", || {
+                manager.起こし直しの頼みの番号(card_id).is_empty()
+            })
+            .await;
+        }
+
+        let mut answers = manager.subscribe_kill_answers();
+        let op = OpId::new();
+        manager.kill_answering(card_id, op);
+        wait_until("新しい実体が終わる", || {
+            matches!(新しい実体.status(), SessionStatus::Ended { .. })
+        })
+        .await;
+        assert_eq!(
+            答えを取る(&mut answers),
+            None,
+            "★（{}）新しい実体が終わった時点で、畳んだ古い実体の終わりを見届けずに答えている",
+            if 札が下りてから {
+                "札が下りた後"
+            } else {
+                "作り終えた直後"
+            }
+        );
+
+        門.add_permits(10);
+        assert_eq!(
+            答えを待つ(&mut answers, "古い実体の終わり").await,
+            KillAnswered {
+                card_id,
+                op,
+                outcome: KillOutcome::Stopped,
+            }
+        );
+        assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+        wait_until("畳んだ実体の控えが空になる", || {
+            manager.畳んだ実体の数(card_id) == 0
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn 確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える() {
     // 実装レビュー第6回 Astra 1。確かめ・席を待っている起こし直しは、札を見て作る前にやめる
     // ので、もう実体は作られない——その場で答えてよい。**起こし直しの断りは起こし直しの番号を

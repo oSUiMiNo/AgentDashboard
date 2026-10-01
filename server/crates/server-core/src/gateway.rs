@@ -137,9 +137,9 @@ pub struct SessionHostConn {
     /// 畳むよう頼まれたことを、待っている接続のループへ知らせる。**待っていなくても知らせを
     /// 1つ残す**（`notify_one`）ので、ループが別の報告を処理している間に頼まれても落とさない
     close_wake: tokio::sync::Notify,
-    /// 照合で、外したカードかを確かめられなかったカード（実装レビュー第9回 Astra 3。
-    /// [`reconcile`]）。生存確認のたびに確かめ直し、確かめられたら外す
-    unverified: Mutex<HashSet<CardId>>,
+    /// 照合の控え（実装レビュー第9回 Astra 3・第12回 Astra 2。[`ReconcileBook`]）。外したカードかを
+    /// 確かめられなかったカードと、カードごとの照合の世代を持つ
+    reconcile: Mutex<ReconcileBook>,
     /// 確かめ直しを今すぐ行わせる（**テスト専用**の口が鳴らす。[`SessionHostConn::確かめ直しを急かす`]）
     recheck_wake: tokio::sync::Notify,
     /// 繋いだ時点の照合の上限（実装レビュー第10回 Astra 1。[`RecheckLimits`]）
@@ -279,6 +279,14 @@ impl SessionHostConn {
         self.recheck_wake.notify_one();
     }
 
+    /// そのカードの照合を1つ始める。世代を返す（[`ReconcileBook`]）。
+    fn begin_reconcile(&self, card_id: CardId) -> u64 {
+        self.reconcile
+            .lock()
+            .expect("ロックが壊れていない")
+            .begin(card_id)
+    }
+
     /// 畳むよう頼まれているか（接続のループが毎周の初めに見る）。
     fn close_requested(&self) -> bool {
         self.closing.load(Ordering::SeqCst)
@@ -311,6 +319,52 @@ impl SessionHostConn {
     /// 詰まっているときこそ畳みたい。
     pub fn disconnect(&self) {
         let _ = self.lanes.promise.try_send(Message::Close(None));
+    }
+}
+
+/// 照合の控え（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第9回
+/// Astra 3・第12回 Astra 2。[`reconcile`]・[`recheck_unverified`]）。
+///
+/// # なぜ世代が要るのか
+///
+/// 名乗りを受けたときの照合（接続の受信の中）と、確かめ直し（別のタスク）は、同じカードで並んで
+/// 走りうる。以前はどちらの答えでも、「確かめられた」なら無条件に控えから外していた。**外す前に
+/// 「外していない」を読んだ古い問い合わせが遅れて返ると、その後の照合の失敗で控えたカードまで
+/// 消し**、外した知らせが PC へ届かなかったとき、以後名乗らないプロセスを片付ける試し直しが
+/// 途切れた。
+///
+/// 照合を始めるたびにカードの世代を進め、**始めたときの世代が今もそのカードの最新である答え
+/// だけ**で控えから外す。後から始まった照合がある答えは、控えを触らない（外した知らせを送るのは
+/// 世代に関わらない——「外した」は古い答えでも本当である）。
+#[derive(Default)]
+struct ReconcileBook {
+    /// 世代の通し番号（接続の中で増え続ける）
+    next: u64,
+    /// カードごとの、最後に始めた照合の世代。控えから外れたら消す
+    latest: HashMap<CardId, u64>,
+    /// 外したカードかを確かめられなかったカード。確かめ直しで引く
+    unverified: HashSet<CardId>,
+}
+
+impl ReconcileBook {
+    /// 照合を1つ始める。その世代を返す。
+    fn begin(&mut self, card_id: CardId) -> u64 {
+        self.next += 1;
+        self.latest.insert(card_id, self.next);
+        self.next
+    }
+
+    /// 確かめられた。**始めたときの世代が最新なら**控えから外す。
+    fn verified(&mut self, card_id: CardId, generation: u64) {
+        if self.latest.get(&card_id) == Some(&generation) {
+            self.latest.remove(&card_id);
+            self.unverified.remove(&card_id);
+        }
+    }
+
+    /// 確かめられなかった。控えに入れる。初めて入れたら `true`。
+    fn unverified(&mut self, card_id: CardId) -> bool {
+        self.unverified.insert(card_id)
     }
 }
 
@@ -2506,7 +2560,7 @@ async fn agent_loop(
         lanes: lanes.clone(),
         closing: AtomicBool::new(false),
         close_wake: tokio::sync::Notify::new(),
-        unverified: Mutex::new(HashSet::new()),
+        reconcile: Mutex::new(ReconcileBook::default()),
         recheck_wake: tokio::sync::Notify::new(),
         recheck_limits: hub.recheck_limits(),
     });
@@ -2644,18 +2698,21 @@ async fn reconcile(
     origin: &ReportOrigin,
     card_id: CardId,
 ) {
+    let generation = conn.begin_reconcile(card_id);
     let checked = tokio::time::timeout(
         conn.recheck_limits.timeout,
         hub.registry.removed_card(origin.account_id, card_id),
     )
     .await;
-    settle_reconcile(conn, card_id, checked);
+    settle_reconcile(conn, card_id, generation, checked);
 }
 
-/// 照合の答えを受けて、外した知らせを送るか、持ち続けるかを決める。
+/// 照合の答えを受けて、外した知らせを送るか、持ち続けるかを決める。`generation` はその照合を
+/// 始めたときの世代（[`ReconcileBook`]）。
 fn settle_reconcile(
     conn: &SessionHostConn,
     card_id: CardId,
+    generation: u64,
     checked: Result<Result<bool, sea_orm::DbErr>, tokio::time::error::Elapsed>,
 ) {
     let removed = match checked {
@@ -2676,10 +2733,10 @@ fn settle_reconcile(
             return;
         }
     };
-    conn.unverified
+    conn.reconcile
         .lock()
         .expect("ロックが壊れていない")
-        .remove(&card_id);
+        .verified(card_id, generation);
     if removed
         && conn
             .send_or_refuse(&ServerToAgent::Forget { card_id })
@@ -2697,10 +2754,10 @@ fn settle_reconcile(
 /// 出すと、DB の断の間ずっと同じ行で埋まる）。
 fn hold_unverified(conn: &SessionHostConn, card_id: CardId, reason: &str) {
     let first = conn
-        .unverified
+        .reconcile
         .lock()
         .expect("ロックが壊れていない")
-        .insert(card_id);
+        .unverified(card_id);
     if first {
         tracing::warn!(
             %card_id,
@@ -2739,20 +2796,22 @@ async fn recheck_unverified(
     origin: &ReportOrigin,
 ) {
     let cards: Vec<CardId> = conn
-        .unverified
+        .reconcile
         .lock()
         .expect("ロックが壊れていない")
+        .unverified
         .iter()
         .copied()
         .collect();
     futures_util::stream::iter(cards)
         .for_each_concurrent(conn.recheck_limits.parallel, |card_id| async move {
+            let generation = conn.begin_reconcile(card_id);
             let checked = tokio::time::timeout(
                 conn.recheck_limits.timeout,
                 hub.registry.removed_card(origin.account_id, card_id),
             )
             .await;
-            settle_reconcile(conn, card_id, checked);
+            settle_reconcile(conn, card_id, generation, checked);
         })
         .await;
 }

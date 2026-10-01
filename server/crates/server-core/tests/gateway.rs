@@ -1541,6 +1541,144 @@ async fn 名乗りの照合の_DB_の答えが遅くても時間の上限で受�
 }
 
 #[tokio::test]
+async fn 遅れて届いた古い照合の答えは後の照合で控えたカードを外さない() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第12回 Astra 2。
+    // 確かめ直し（別のタスク）と名乗りの照合は、同じカードで並んで走りうる。以前はどちらの答えでも
+    // 「確かめられた」なら無条件に控えから外していたので、**外す前に「外していない」を読んだ古い
+    // 答えが遅れて届くと、その後の照合の失敗で控えたカードまで消し**、以後確かめ直さなかった。
+    //
+    // 順を固定する：古い確かめ直しが「外していない」を読む → 外すが確定する → 新しい名乗りの照合が
+    // 失敗する → 古い答えが届く。その後の確かめ直しで、外した知らせが届くことを見る
+    for backend in common::backends("gw-reconcile-generation").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        // 止めている間に上限を過ぎないようにする（過ぎると、古い答えが「確かめられなかった」になる）
+        gateway
+            .hub
+            .set_recheck_limits(server_core::gateway::RecheckLimits {
+                timeout: Duration::from_secs(60),
+                parallel: 4,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let (mut socket, 生きている, conn) = 繋いで1枚名乗る(&gateway, &token).await;
+        let 外す = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        受信が追いつくまで待つ(&gateway, &mut socket, 生きている, 1).await;
+
+        // 読んだ後で止める。差し込んだ失敗は読む前に返るので、名乗りの照合はここで止まらない
+        let 止め所 = gateway.registry.照合の答えを止める();
+        gateway.registry.照合の読みを1回失敗させる();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        満ちるまで待つ(
+            "1回目の失敗が照合で使われない（形を作れていない）",
+            || gateway.registry.照合の読みの失敗が使われた(),
+        )
+        .await;
+        受信が追いつくまで待つ(&gateway, &mut socket, 生きている, 2).await;
+
+        // 古い確かめ直しが「外していない」を読み、答えを返す前で止まる
+        conn.確かめ直しを急かす();
+        満ちるまで待つ(
+            "確かめ直しが DB を読み終えない（形を作れていない）",
+            || 止め所.来た数() >= 1,
+        )
+        .await;
+
+        // 外すが確定し、その後の名乗りの照合が失敗する
+        gateway
+            .registry
+            .archive_owned(account_id, 外す)
+            .await
+            .expect("外せること");
+        gateway.registry.照合の読みを1回失敗させる();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        満ちるまで待つ(
+            "2回目の失敗が照合で使われない（形を作れていない）",
+            || gateway.registry.照合の読みの失敗が使われた(),
+        )
+        .await;
+        受信が追いつくまで待つ(&gateway, &mut socket, 生きている, 3).await;
+        assert_eq!(
+            止め所.来た数(),
+            1,
+            "[{}] 古い確かめ直しのほかに答えまで来た照合がある（順を固定できていない）",
+            backend.name
+        );
+
+        // 古い答えが届く。その後の確かめ直しで外した知らせが届くこと
+        止め所.開ける();
+        let 期限 = tokio::time::Instant::now() + TIMEOUT;
+        let mut 届いた = false;
+        while !届いた && tokio::time::Instant::now() < 期限 {
+            conn.確かめ直しを急かす();
+            let 次 = (tokio::time::Instant::now() + Duration::from_millis(100)).min(期限);
+            while let Ok(Some(Ok(frame))) =
+                tokio::time::timeout_at(次, futures_util::StreamExt::next(&mut socket.socket)).await
+            {
+                if let tungstenite::Message::Text(text) = frame
+                    && let Ok(ServerToAgent::Forget { card_id }) =
+                        serde_json::from_str::<ServerToAgent>(&text)
+                    && card_id == 外す
+                {
+                    届いた = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            届いた,
+            "[{}] ★外す前に読んだ古い照合の答えが遅れて届き、後の照合が失敗して控えたカードを外した（外した知らせが届かない）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// 残量の便を送り、それが記録に載るまで待つ。**この接続の受信が、それより前に送った名乗りの照合を
+/// 終えた**ことの合図になる（名乗りの照合は受信の中で済ませる。残量の便は DB を読まない）。
+async fn 受信が追いつくまで待つ(
+    gateway: &TestGateway,
+    socket: &mut common::SessionHostSocket,
+    card_id: CardId,
+    印: u8,
+) {
+    socket
+        .send(&AgentMessage::ContextUsage {
+            card_id,
+            usage: Some(protocol::ContextUsage {
+                used_percentage: 印,
+                total_input_tokens: 1_000,
+                context_window_size: 1_000_000,
+            }),
+        })
+        .await;
+    満ちるまで待つ(
+        &format!("受信が残量の便（{印}）まで進まない"),
+        || {
+            gateway.registry.get(card_id).is_some_and(|record| {
+                record
+                    .meta()
+                    .context_usage
+                    .is_some_and(|usage| usage.used_percentage == 印)
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn 答えない_PC_への問いは時間切れになる() {
     // **「確かめられなかった」の3つ目**（名前付け設計§8-5）。寝ている・版が古いは
     // 投げる前に断るが、**繋がっているのに黙る**相手には投げてから待つしかない。

@@ -959,6 +959,17 @@ impl EndWaiters {
     }
 }
 
+/// 表から畳んだが、終わりをまだ見届けていない実体（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第12回 Astra 1）。
+///
+/// 起こし直しは古い実体を畳んで（止めて）から新しい実体を作る。古いプロセスが終わるのは後になる
+/// ので、その間に届いた番号付きの終了は、新しい実体だけでなく**これの終わりも待つ**。実体そのもの
+/// は弱く握る（解放を妨げない）。終わりの待ち手は見張りと分け合う（[`EndWaiters`]）。
+struct FoldedSession {
+    session: std::sync::Weak<Session>,
+    waiters: Arc<Mutex<EndWaiters>>,
+}
+
 /// 番号付きの終了の頼み1つと、それが止める実体の全部（寝ているカードばかりなのに、メモリ不足で
 /// セッションを起こせない 実装レビュー第8回 Astra 2）。
 ///
@@ -2563,6 +2574,9 @@ pub struct SessionManager {
     /// [`SessionManager::kill_answering`] が入れ、[`SessionManager::answer_kill`] が出す）。
     /// **待ち手を持つ道は全部ここを通る**ので、ここで数を抑えれば実体の待ち手も札の番号も抑えられる
     pending_kills: Mutex<HashMap<CardId, HashSet<OpId>>>,
+    /// 表から畳んだが、終わりをまだ見届けていない実体（実装レビュー第12回 Astra 1。
+    /// [`SessionManager::stop_folded`]）。カードごとに持ち、終わりを見届けたら外す
+    folded: Mutex<HashMap<CardId, Vec<FoldedSession>>>,
     /// 起こし直しの頼みへの成功の答えの手元の配信（[`SessionManager::subscribe_revive_answers`]）
     revive_answers: broadcast::Sender<crate::events::ReviveAnswered>,
     /// パーサへ監視を頼む口。パーサが立ち上がってから差し込まれる。
@@ -3455,6 +3469,7 @@ impl SessionManager {
             events,
             kill_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
             pending_kills: Mutex::new(HashMap::new()),
+            folded: Mutex::new(HashMap::new()),
             revive_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
             parser: Mutex::new(None),
             claude_settings,
@@ -3934,6 +3949,7 @@ impl SessionManager {
                 Some(session) => manager.on_exit(&session, exit),
                 None => manager.answer_end_waiters(&待ち手),
             }
+            manager.forget_folded(card_id, &待ち手);
         });
 
         // 全承認をスキップで起動した初回だけ、TUI が責任の受諾を尋ねてくる。
@@ -4173,6 +4189,7 @@ impl SessionManager {
                     }
                     session.kill();
                 }
+                self.stop_folded(card_id, joint.as_ref());
                 if let Some(joint) = joint {
                     joint.seal(self, KillOutcome::Withdrew);
                 }
@@ -4180,20 +4197,26 @@ impl SessionManager {
             }
             // 起こし終えている、または札が無い。**実体の話**
             Some(ReviveStage::Spawned) | None => match session {
+                // **畳んだが終わりを見届けていない古い実体も待つ**（実装レビュー第12回 Astra 1）。
+                // 起こし直しを作り終えた後や札が下りた後でも、古いプロセスはまだ終わっていない
+                // ことがある
                 Some(session) => {
                     let joint = op.map(|op| KillJoint::new(card_id, op));
                     if let Some(joint) = &joint {
                         joint.attach(&session.end_waiters);
                     }
                     session.kill();
+                    self.stop_folded(card_id, joint.as_ref());
                     if let Some(joint) = joint {
                         joint.seal(self, KillOutcome::AlreadyEnded);
                     }
                     Halted::Stopped(session)
                 }
                 None => {
-                    if let Some(op) = op {
-                        self.answer_kill(card_id, op, KillOutcome::Nothing);
+                    let joint = op.map(|op| KillJoint::new(card_id, op));
+                    self.stop_folded(card_id, joint.as_ref());
+                    if let Some(joint) = joint {
+                        joint.seal(self, KillOutcome::Nothing);
                     }
                     // 起こし終えた札だけが残り、実体が無い（作るのに失敗した・畳まれた）。
                     // 番号の無い頼みには、以前どおり断らない（起こす側が断りを配る）
@@ -4301,7 +4324,75 @@ impl SessionManager {
         session.kill();
         hooks_settings::cleanup(&session.settings);
         self.stop_watching_transcript(card_id);
+        // **終わりを見届けるまで控える**（実装レビュー第12回 Astra 1）。止めたプロセスが終わるのは
+        // 後になる。その間に届いた番号付きの終了は、これの終わりも待つ（[`SessionManager::stop_folded`]）
+        if !session
+            .end_waiters
+            .lock()
+            .expect("ロックが壊れていない")
+            .ended
+        {
+            let mut folded = self.folded.lock().expect("ロックが壊れていない");
+            let entries = folded.entry(card_id).or_default();
+            entries.retain(|entry| !entry.waiters.lock().expect("ロックが壊れていない").ended);
+            entries.push(FoldedSession {
+                session: Arc::downgrade(&session),
+                waiters: Arc::clone(&session.end_waiters),
+            });
+        }
         Some(session)
+    }
+
+    /// 畳んだが終わりをまだ見届けていない実体を、もう一度止める。`joint` があれば、その終わりも
+    /// 待たせる（実装レビュー第12回 Astra 1）。
+    ///
+    /// 起こし直しは古い実体を畳んでから新しい実体を作るので、作り終えた後（`Spawned`）や札が
+    /// 下りた後に届いた終了は、表に居る新しい実体しか見えない。以前はそれだけを待ち、新しい実体が
+    /// 先に終わると、古いプロセスの終わりを見届けないまま「止めた」と答えていた。
+    ///
+    /// 待たせた実体があれば `true`。
+    fn stop_folded(&self, card_id: CardId, joint: Option<&Arc<KillJoint>>) -> bool {
+        let mut folded = self.folded.lock().expect("ロックが壊れていない");
+        let Some(entries) = folded.get_mut(&card_id) else {
+            return false;
+        };
+        let mut 待たせた = false;
+        entries.retain(|entry| {
+            let 生きている = match joint {
+                Some(joint) => joint.attach(&entry.waiters),
+                None => !entry.waiters.lock().expect("ロックが壊れていない").ended,
+            };
+            if 生きている && let Some(session) = entry.session.upgrade() {
+                session.kill();
+            }
+            待たせた |= 生きている && joint.is_some();
+            生きている
+        });
+        if entries.is_empty() {
+            folded.remove(&card_id);
+        }
+        待たせた
+    }
+
+    /// 終わりを見届けた実体を、畳んだ実体の控えから外す（終わりを見届けた見張りが呼ぶ）。
+    fn forget_folded(&self, card_id: CardId, waiters: &Arc<Mutex<EndWaiters>>) {
+        let mut folded = self.folded.lock().expect("ロックが壊れていない");
+        if let Some(entries) = folded.get_mut(&card_id) {
+            entries.retain(|entry| !Arc::ptr_eq(&entry.waiters, waiters));
+            if entries.is_empty() {
+                folded.remove(&card_id);
+            }
+        }
+    }
+
+    /// 畳んだが終わりをまだ見届けていない実体の数（**テスト専用**。実装レビュー第12回 Astra 1）。
+    #[doc(hidden)]
+    pub fn 畳んだ実体の数(&self, card_id: CardId) -> usize {
+        self.folded
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&card_id)
+            .map_or(0, Vec::len)
     }
 
     /// カードを一覧から消す。生きていれば先に終了させる。
@@ -4655,10 +4746,10 @@ impl SessionManager {
 
         // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
         //
-        // 畳んだ実体は手元に残す（実装レビュー第8回 Astra 2）。起こしている最中に届いた終了の
-        // 頼みは、これの終わりも待つ——畳むのは止めることでもあり、プロセスが終わるのは後になる
-        let 古い実体 = self.fold(card_id);
-        if 古い実体.is_some() {
+        // 畳んだ実体は、終わりを見届けるまで控える（実装レビュー第8回 Astra 2・第12回 Astra 1。
+        // `fold` の中）。この後に届く終了の頼みは、どの段でもこれの終わりも待つ——畳むのは止める
+        // ことでもあり、プロセスが終わるのは後になる
+        if self.fold(card_id).is_some() {
             tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
         }
         let args = lifecycle::permission_mode_args(mode.as_ref());
@@ -4689,9 +4780,9 @@ impl SessionManager {
         // 何も止めていないので取り下げたと答える
         for op in 終了の頼み {
             let joint = KillJoint::new(card_id, op);
-            if let Some(old) = &古い実体 {
-                joint.attach(&old.end_waiters);
-            }
+            // 畳んだ古い実体（いま畳んだもの・それより前に畳んで終わっていないもの）は控えから
+            // 引く（実装レビュー第12回 Astra 1）
+            self.stop_folded(card_id, Some(&joint));
             if let Ok(session) = &spawned {
                 joint.attach(&session.end_waiters);
             }

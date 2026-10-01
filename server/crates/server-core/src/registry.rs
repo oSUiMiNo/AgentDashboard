@@ -346,6 +346,8 @@ pub struct SessionRegistry {
     reconcile_fail_once: AtomicBool,
     /// 照合の読み取りを止める門（**テスト専用**。[`Self::照合の読みを止める`]）
     reconcile_hold: Mutex<Option<照合の止め所>>,
+    /// 照合の読み取りの後、答えを返す前で止める門（**テスト専用**。[`Self::照合の答えを止める`]）
+    reconcile_answer_hold: Mutex<Option<照合の止め所>>,
     /// 番号付きの頼みの控え（実装レビュー第7回 Astra 3・4。[`OpLedger`]）。**他のロックと跨がない**
     ops: Mutex<OpLedger>,
     events: broadcast::Sender<AccountEvent>,
@@ -462,7 +464,8 @@ impl RemovedCards {
     }
 }
 
-/// 照合の DB の読み取りを止める門（**テスト専用**。[`SessionRegistry::照合の読みを止める`]）。
+/// 照合の DB の読み取りを止める門（**テスト専用**。[`SessionRegistry::照合の読みを止める`]・
+/// [`SessionRegistry::照合の答えを止める`]）。
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct 照合の止め所 {
@@ -788,6 +791,7 @@ impl SessionRegistry {
             removed: Mutex::new(RemovedCards::default()),
             reconcile_fail_once: AtomicBool::new(false),
             reconcile_hold: Mutex::new(None),
+            reconcile_answer_hold: Mutex::new(None),
             ops: Mutex::new(OpLedger::default()),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
@@ -3423,10 +3427,22 @@ impl SessionRegistry {
                 tracing::warn!(%card_id, "照合の読み取りを止める門が閉じられました（試験の作り）");
             }
         }
-        Ok(matches!(
+        let removed = matches!(
             self.stored(card_id).await?,
             Some((owner, true, _, _)) if owner == account_id
-        ))
+        );
+        let hold = self
+            .reconcile_answer_hold
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone();
+        if let Some(hold) = hold {
+            hold.reached.fetch_add(1, Ordering::SeqCst);
+            if hold.gate.acquire().await.is_err() {
+                tracing::warn!(%card_id, "照合の答えを止める門が閉じられました（試験の作り）");
+            }
+        }
+        Ok(removed)
     }
 
     /// 次の照合（[`Self::removed_card`]）の DB の読み取りを1回だけ失敗させる（**テスト専用**）。
@@ -3445,6 +3461,22 @@ impl SessionRegistry {
             reached: Arc::default(),
         };
         *self.reconcile_hold.lock().expect("ロックが壊れていない") = Some(hold.clone());
+        hold
+    }
+
+    /// 照合（[`Self::removed_card`]）の DB を読み終えた後、答えを返す前で、開けるまで止める
+    /// （**テスト専用**。実装レビュー第12回 Astra 2）。「読んだ時点の古い答えが遅れて届く」形を作る。
+    /// 差し込んだ失敗（[`Self::照合の読みを1回失敗させる`]）は読む前に返るので、ここでは止まらない。
+    #[doc(hidden)]
+    pub fn 照合の答えを止める(&self) -> 照合の止め所 {
+        let hold = 照合の止め所 {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            reached: Arc::default(),
+        };
+        *self
+            .reconcile_answer_hold
+            .lock()
+            .expect("ロックが壊れていない") = Some(hold.clone());
         hold
     }
 
