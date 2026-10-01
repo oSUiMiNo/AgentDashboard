@@ -6,19 +6,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ago,
   ASK_LIMIT_MS,
+  deadlineIn,
+  elapsedMs,
   fetchHostResources,
   hostOf,
+  instantNow,
+  isPast,
   NO_ANSWER,
   needsRecheck,
   noAnswer,
   planRevive,
   RECHECK_INTERVAL_MS,
   RECHECK_LIMIT_MS,
+  remainingMs,
   settleHostResources,
   SIGNED_OUT,
   type HostAnswer,
   type HostFreeState,
   type HostResources,
+  type Settled,
 } from '@/lib/reviveBudget'
 
 function resources(fits: number | null): HostResources {
@@ -516,7 +522,7 @@ describe('settleHostResources', () => {
     const controller = new AbortController()
     const 箱: { answer?: Awaited<ReturnType<typeof settleHostResources>> } = {}
     void settleHostResources(hosts, {
-      deadline: Date.now() + RECHECK_LIMIT_MS,
+      deadline: deadlineIn(RECHECK_LIMIT_MS),
       signal: controller.signal,
       ...options,
     }).then((got) => {
@@ -525,10 +531,17 @@ describe('settleHostResources', () => {
     return { 箱, controller }
   }
 
+  /** 全台の答えを取り出す（まだ返っていない・打ち切られたなら `undefined`） */
+  function 表(箱: { answer?: unknown }): Map<string, HostAnswer> | undefined {
+    const answer = 箱.answer
+    return typeof answer === 'object' && answer !== null && 'answers' in answer
+      ? (answer as Settled).answers
+      : undefined
+  }
+
   /** 1台ぶんの答えを取り出す */
   function 台(箱: { answer?: unknown }, host: string): HostAnswer | undefined {
-    const answer = 箱.answer
-    return answer instanceof Map ? (answer.get(host) as HostAnswer) : undefined
+    return 表(箱)?.get(host)
   }
 
   it('新しい値が返るまで1秒おきに聞き直す', async () => {
@@ -613,7 +626,7 @@ describe('settleHostResources', () => {
     const { 箱 } = 聞かせる(['local'], { previous: new Map([['local', 前回]]) })
     await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS * 2)
     expect(台(箱, 'local')).toEqual(noAnswer(前回))
-    const plan = planRevive([target('a', 'local', 1)], 箱.answer as Map<string, HostAnswer>)
+    const plan = planRevive([target('a', 'local', 1)], 表(箱)!)
     expect(plan.hosts[0]).toMatchObject({ fits: 0, unconfirmed: 'no_answer' })
   })
 
@@ -663,7 +676,7 @@ describe('settleHostResources', () => {
     // 計画も最後の周の数で立つ（A は 2 枚のうち 1 枚しか入らない）
     const plan = planRevive(
       [target('a1', 'a', 1), target('a2', 'a', 2), target('b1', 'b', 1)],
-      箱.answer as Map<string, HostAnswer>,
+      表(箱)!,
     )
     expect(plan.over).toBe(true)
     expect(plan.fitting.toSorted()).toEqual(['a2', 'b1'])
@@ -677,13 +690,13 @@ describe('settleHostResources', () => {
       a: [{ 遅れて: 500, 答え: wsl(2, 'fresh') }],
       b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
     })
-    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 300 })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2 * 一周の長さ + 300) })
     await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
 
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 2 })
     const plan = planRevive(
       [target('a1', 'a', 1), target('b1', 'b', 1)],
-      箱.answer as Map<string, HostAnswer>,
+      表(箱)!,
     )
     expect(plan.fitting).toEqual(['a1'])
     expect(plan.hosts.find((host) => host.host === 'a')).toMatchObject({
@@ -706,7 +719,7 @@ describe('settleHostResources', () => {
       a: [{ 遅れて: 500, 答え: 前 }, { 遅れて: 500, 答え: 前 }, { status: 503 }],
       b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
     })
-    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 300 })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2 * 一周の長さ + 300) })
     await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
 
     expect(台(箱, 'a')).toEqual(noAnswer(前))
@@ -741,14 +754,14 @@ describe('settleHostResources', () => {
       a: [wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 })],
       b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
     })
-    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 3_500 })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2 * 一周の長さ + 3_500) })
     await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
 
     expect(回数).toEqual({ a: 3, b: 3 })
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
     const plan = planRevive(
       [target('a1', 'a', 1), target('b1', 'b', 1)],
-      箱.answer as Map<string, HostAnswer>,
+      表(箱)!,
     )
     expect(plan.hosts.find((host) => host.host === 'a')).toMatchObject({
       fits: 0,
@@ -769,7 +782,7 @@ describe('settleHostResources', () => {
       a: [{ 遅れて: 500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 1 }) }],
       b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
     })
-    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2_800 })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2_800) })
     await vi.advanceTimersByTimeAsync(4_000)
 
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
@@ -820,5 +833,150 @@ describe('settleHostResources', () => {
     await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
     // 1周目：a が Windows 側を確かめている。2周目：答えが来ないのは b だけ
     expect(onWaiting.mock.calls.map((call) => call[0])).toEqual(['windows', 'answer'])
+  })
+
+  /** 壁時計（`Date.now()`）だけを `ms` 戻す。**単調時計（`performance.now()`）は動かない** */
+  function 時計を巻き戻す(ms: number) {
+    vi.setSystemTime(Date.now() - ms)
+  }
+
+  it('聞いている間にブラウザの時計が巻き戻っても、新しさの残りを使い切った fresh を新しいと読まない', async () => {
+    // a は即答するが、あと 2 秒しか新しくない。b は答えるのに 3 秒かかる。その間に時計が 30 秒戻る。
+    // **壁時計だけで測ると経過が負になり**、3 秒経った a を新しいと読んで1周で返していた（Astra 4）
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({
+      a: [
+        wsl(5, 'fresh', { host_free_fresh_for_sec: 2 }),
+        wsl(1, 'fresh', { host_free_fresh_for_sec: 60 }),
+      ],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(1_000)
+    時計を巻き戻す(30_000)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(箱.answer).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + 3_000)
+
+    expect(回数).toEqual({ a: 2, b: 2 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
+  })
+
+  it('壁時計が巻き戻ったら、単調時計で残りがあっても期限切れとして聞き直す', async () => {
+    // a はあと 60 秒新しい。待っている間に時計が戻ると、何秒経ったのか言えない——切れた側へ倒す
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({
+      a: [
+        wsl(5, 'fresh', { host_free_fresh_for_sec: 60 }),
+        wsl(2, 'fresh', { host_free_fresh_for_sec: 60 }),
+      ],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(1_000)
+    時計を巻き戻す(30_000)
+    await vi.advanceTimersByTimeAsync(2_000 + RECHECK_INTERVAL_MS + 3_000)
+
+    expect(回数).toEqual({ a: 2, b: 2 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 2 })
+  })
+
+  it('壁時計が巻き戻って古くなった答えは、何秒前の値かを言わない（Infinity を画面へ渡さない）', async () => {
+    // 1周目は 0.5 秒で終わり、眠っている間に時計が戻り、締切（1.2 秒）で返す
+    vi.useFakeTimers()
+    偽の口({
+      a: [{ 遅れて: 500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 60 }) }],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(1_200) })
+    await vi.advanceTimersByTimeAsync(1_000)
+    時計を巻き戻す(30_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale', host_free_age_sec: null })
+  })
+
+  it('ブラウザの時計が巻き戻っても、65 秒の締切は伸びない', async () => {
+    // **壁時計で締切を測ると、戻ったぶんだけ聞き直しが続いていた**（Astra 4）
+    vi.useFakeTimers()
+    const { fetch } = 偽の口({ local: [wsl(9, 'checking')] })
+    const { 箱 } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(10_000)
+    時計を巻き戻す(60_000)
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS - 10_000 + RECHECK_INTERVAL_MS * 2)
+
+    expect(台(箱, 'local')).toMatchObject({ host_free_state: 'checking' })
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(RECHECK_LIMIT_MS / RECHECK_INTERVAL_MS + 2)
+  })
+
+  it('数えた枚数の有効期限は、PC ごとの「最後の周で聞き始めた時刻＋新しさの残り」の最も早いもの', async () => {
+    vi.useFakeTimers()
+    偽の口({
+      a: [wsl(5, 'fresh', { host_free_fresh_for_sec: 30 })],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 50 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    const freshUntil = (箱.answer as Settled).freshUntil
+    expect(freshUntil).not.toBeNull()
+    // 聞き始めたのは 3 秒前。**受け取った時刻から測らない**（運ぶ間に古くなったぶんを足さない）
+    expect(remainingMs(freshUntil!, instantNow())).toBe(27_000)
+    await vi.advanceTimersByTimeAsync(26_999)
+    expect(isPast(freshUntil!, instantNow())).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(isPast(freshUntil!, instantNow())).toBe(true)
+  })
+
+  it('期限を持つ答えが無ければ、有効期限は付かない（WSL でない・古い PC・数えない PC）', async () => {
+    vi.useFakeTimers()
+    const 古い = { ...wsl(5, 'fresh') } as Partial<HostResources>
+    delete 古い.host_free_fresh_for_sec
+    偽の口({
+      old: [古い as HostResources],
+      linux: [resources(3)],
+      off: [wsl(null, 'fresh', { estimate_mb: 0, host_free_fresh_for_sec: 30 })],
+    })
+    const { 箱 } = 聞かせる(['old', 'linux', 'off'])
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(箱.answer).toMatchObject({ freshUntil: null })
+  })
+
+  it('返す瞬間に古くなっていた PC は、有効期限に数えない（確かめられていない側にいる）', async () => {
+    vi.useFakeTimers()
+    偽の口({
+      a: [{ 遅れて: 500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 1 }) }],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2_800) })
+    await vi.advanceTimersByTimeAsync(4_000)
+
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
+    expect(箱.answer).toMatchObject({ freshUntil: null })
+  })
+})
+
+describe('時計（実装レビュー第3回 Astra 4）', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('新しさの経過は単調時計で測り、壁時計の巻き戻りは期限切れとして扱う', async () => {
+    vi.useFakeTimers()
+    const 期限 = { since: instantNow(), ms: 10_000 }
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(remainingMs(期限, instantNow())).toBe(6_000)
+    // 聞き始めた時刻より前へ戻す。単調時計ではまだ 4 秒しか経っていない
+    vi.setSystemTime(Date.now() - 5_000)
+    expect(elapsedMs(期限.since, instantNow())).toBe(Number.POSITIVE_INFINITY)
+    expect(isPast(期限, instantNow())).toBe(true)
+  })
+
+  it('単調時計が止まっていても（寝ていた間）、壁時計が進んだぶんは経ったとみなす', () => {
+    vi.useFakeTimers()
+    const 期限 = { since: instantNow(), ms: 10_000 }
+    const 起きた = { mono: 期限.since.mono, wall: 期限.since.wall + 60_000 }
+    expect(isPast(期限, 起きた)).toBe(true)
   })
 })

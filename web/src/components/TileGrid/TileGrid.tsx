@@ -21,11 +21,15 @@ import { moveItem } from '@/lib/reorder'
 import { nicknameOf } from '@/lib/protocol'
 import { reviveState } from '@/lib/protocol'
 import {
+  deadlineIn,
   hostOf,
+  instantNow,
+  isPast,
   planRevive,
   RECHECK_LIMIT_MS,
   settleHostResources,
   SIGNED_OUT,
+  type FreshUntil,
   type HostResources,
   type RevivePlan,
   type ReviveTarget,
@@ -200,6 +204,16 @@ export function TileGrid() {
     plan: RevivePlan
     /** 押した時点の対象。「もう一度確かめる」は**ここから減らすだけ**（設計§6-3） */
     対象: ReviveTarget[]
+    /**
+     * 数えた枚数の有効期限（`Settled.freshUntil`）。**過ぎてから枚数で送らない**
+     * （実装レビュー第3回 Astra 3）。ダイアログは開けたまま、いつまでも考えていられる
+     */
+    新しいうち: FreshUntil | null
+    /**
+     * 枚数が古くなっていたので、押された操作の代わりに確かめ直した後か。**押したのに
+     * 送られなかったわけを画面で言う**——言わないと、押しても何も起きない壊れたボタンに見える
+     */
+    古くて確かめ直した: boolean
   } | null>(null)
   const [asking, setAsking] = useState(false)
   /**
@@ -417,7 +431,11 @@ export function TileGrid() {
     自分の世代: number,
     前回?: ReadonlyMap<string, HostResources | null>,
     onWaiting?: (waitingFor: WaitingFor) => void,
-  ): Promise<RevivePlan | typeof SIGNED_OUT | 'cancelled'> => {
+  ): Promise<
+    | { plan: RevivePlan; 新しいうち: FreshUntil | null }
+    | typeof SIGNED_OUT
+    | 'cancelled'
+  > => {
     const 外れた = () => 世代.current !== 自分の世代
     中断.current?.abort()
     const 打ち切り = new AbortController()
@@ -426,7 +444,7 @@ export function TileGrid() {
       [...new Set(対象.map((target) => target.host))],
       {
         // **締切は押した時点で1回だけ作り、PC 全台・全周で共有する**
-        deadline: Date.now() + RECHECK_LIMIT_MS,
+        deadline: deadlineIn(RECHECK_LIMIT_MS),
         signal: 打ち切り.signal,
         previous: 前回,
         onWaiting: (waitingFor) => {
@@ -452,10 +470,13 @@ export function TileGrid() {
     const いま戻せる = new Set(
       最新の対象.current.map((target) => target.cardId),
     )
-    return planRevive(
-      対象.filter((target) => いま戻せる.has(target.cardId)),
-      答え,
-    )
+    return {
+      plan: planRevive(
+        対象.filter((target) => いま戻せる.has(target.cardId)),
+        答え.answers,
+      ),
+      新しいうち: 答え.freshUntil,
+    }
   }
 
   /**
@@ -481,12 +502,12 @@ export function TileGrid() {
       if (立てた === 'cancelled' || 立てた === SIGNED_OUT) {
         return
       }
-      if (!立てた.over) {
+      if (!立てた.plan.over) {
         // 全部入る。**いままでどおり黙って進む**
-        送る(立てた.all)
+        送る(立てた.plan.all)
         return
       }
-      setPlan({ plan: 立てた, 対象 })
+      setPlan({ ...立てた, 対象, 古くて確かめ直した: false })
     } finally {
       clearTimeout(合図)
       if (世代.current === 自分の世代) {
@@ -507,8 +528,12 @@ export function TileGrid() {
     setWaiting(null)
   }
 
-  /** ダイアログの「もう一度確かめる」。**開けたまま**聞き直し、答えで計画を立て直す */
-  const 確かめ直す = async () => {
+  /**
+   * ダイアログの「もう一度確かめる」。**開けたまま**聞き直し、答えで計画を立て直す。
+   *
+   * `古かった` は、枚数が古くなっていたので押された操作の代わりに来たとき（[`数えた枚数で送る`]）
+   */
+  const 確かめ直す = async (古かった = false) => {
     if (plan === null) {
       return
     }
@@ -529,7 +554,7 @@ export function TileGrid() {
       }
       // **全部入ると分かっても、黙って送らない。** 押したのは「確かめる」で「戻す」ではない
       // ——確かめた結果を見てから押したい人の手を飛ばさない（初回の門が黙って送るのとは別）
-      setPlan({ plan: 立てた, 対象: plan.対象 })
+      setPlan({ ...立てた, 対象: plan.対象, 古くて確かめ直した: 古かった })
     } finally {
       if (世代.current === 自分の世代) {
         setRechecking(false)
@@ -542,6 +567,27 @@ export function TileGrid() {
     打ち切る()
     setRechecking(false)
     setPlan(null)
+  }
+
+  /**
+   * 枚数に基づいて送る（「入るぶんだけ戻す」と、確かめ直しの後の「全部戻す」）。
+   *
+   * **数えた枚数が古くなっていたら、送らずに確かめ直して結果を見せる**（実装レビュー第3回
+   * Astra 3）。ダイアログを開けたまま考えている間に、数えた空きは古くなる——保存した
+   * `fitting` で送ると、古い数で何枚戻すかを決めることになる。
+   *
+   * **期限は押した瞬間に読む。** タイマーで立てた旗では、壁時計の巻き戻りを拾えない
+   */
+  const 数えた枚数で送る = (ids: string[]) => {
+    if (plan === null) {
+      return
+    }
+    if (plan.新しいうち !== null && isPast(plan.新しいうち, instantNow())) {
+      void 確かめ直す(true)
+      return
+    }
+    送る(ids)
+    閉じる()
   }
 
   return (
@@ -574,11 +620,20 @@ export function TileGrid() {
         <ReviveBudgetDialog
           plan={plan.plan}
           rechecking={rechecking}
+          recheckedBecauseStale={plan.古くて確かめ直した}
           onFitting={() => {
-            送る(plan.plan.fitting)
-            閉じる()
+            数えた枚数で送る(plan.plan.fitting)
           }}
           onAll={() => {
+            if (!plan.plan.over) {
+              数えた枚数で送る(plan.plan.all)
+              return
+            }
+            /*
+              **「それでも全部戻す」は古さで止めない。** 枚数を見ずに全部と選ぶ操作なので、
+              数が古くても押した人の選んだものは変わらない——起こすときに PC 側の判定が
+              確かめ直し、足りなければ断る（設計§6-3）
+            */
             送る(plan.plan.all)
             閉じる()
           }}

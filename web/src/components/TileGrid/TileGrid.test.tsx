@@ -1259,6 +1259,210 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     expect(帯).toHaveAttribute('aria-hidden', 'false')
     expect(screen.getByTestId('bulk-revive-stop')).toBeInTheDocument()
   })
+
+  /*
+    **ダイアログを出した後も、数えた枚数は古くなる**（実装レビュー第3回 Astra 3）。
+    `答え()` の既定は新しさの残りが `null`（期限なし）なので、ここでは必ず値を渡す
+  */
+  describe('ダイアログを開けている間に、数えた枚数が古くなったら', () => {
+    it('「入るぶんだけ戻す」を押しても送らずに確かめ直し、結果をダイアログに出す', async () => {
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const fetch = 順に答える({
+        local: [
+          答え(1, 'fresh', { host_free_fresh_for_sec: 30 }),
+          答え(0, 'checking'),
+          答え(0, 'fresh', { host_free_fresh_for_sec: 60 }),
+        ],
+      })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      expect(screen.getByTestId('revive-budget-fitting')).toHaveTextContent('1枚')
+      await 進める(30_000)
+      fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+      await 進める(0)
+
+      // **古い数で送らない。** 確かめている間は忙しさを出す（全台確かめられていても出す）
+      expect(revive).not.toHaveBeenCalled()
+      expect(screen.getByTestId('revive-budget-recheck')).toHaveTextContent('確かめています')
+      expect(screen.getByTestId('revive-budget-recheck')).toBeDisabled()
+      expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
+      await 進める(1_000)
+
+      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(revive).not.toHaveBeenCalled()
+      expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
+      expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
+      // 押したのに送られなかったわけを言う
+      expect(screen.getByTestId('revive-budget-dialog')).toHaveTextContent(
+        '枚数が古くなっていたので、送らずに確かめ直しました',
+      )
+    })
+
+    it('期限の内なら、いまどおり数えたぶんを送る', async () => {
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const fetch = 順に答える({ local: [答え(1, 'fresh', { host_free_fresh_for_sec: 30 })] })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      await 進める(29_000)
+      fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(revive.mock.calls.map((call) => call[0])).toEqual(['b'])
+      expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    })
+
+    it('確かめ直しの後の「全部戻す」も、古くなっていたら送らずに確かめ直す', async () => {
+      // **「全部起こし直せます」を古い数のまま残さない**
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const fetch = 順に答える({
+        local: [
+          答え(99, 'failed'),
+          答え(5, 'fresh', { host_free_fresh_for_sec: 30 }),
+          答え(1, 'fresh', { host_free_fresh_for_sec: 60 }),
+        ],
+      })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+      await 進める(0)
+      expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+        'aria-label',
+        '全部起こし直せます',
+      )
+
+      await 進める(30_000)
+      fireEvent.click(screen.getByTestId('revive-budget-all'))
+      await 進める(0)
+
+      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(revive).not.toHaveBeenCalled()
+      expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+        'aria-label',
+        '起こし直せますが、メモリが足りません',
+      )
+      expect(screen.getByTestId('revive-budget-fitting')).toHaveTextContent('1枚')
+    })
+
+    it('「それでも全部戻す」は枚数を見ない操作なので、古くなっていてもそのまま送る', async () => {
+      // 起こすときに PC 側の判定が確かめ直す（設計§6-3）
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const fetch = 順に答える({ local: [答え(1, 'fresh', { host_free_fresh_for_sec: 30 })] })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      await 進める(31_000)
+      fireEvent.click(screen.getByTestId('revive-budget-all'))
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a', 'b'])
+    })
+
+    it('新しさの残りを送ってこない古い PC は、いまどおり期限が付かない', async () => {
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const 古い = { ...答え(1, 'fresh') } as Partial<HostResources>
+      delete 古い.host_free_fresh_for_sec
+      const fetch = 順に答える({ local: [古い as HostResources] })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      await 進める(10 * 60_000)
+      fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(revive.mock.calls.map((call) => call[0])).toEqual(['b'])
+    })
+
+    it('ブラウザの時計が巻き戻ったら、残りがあっても古くなったとみなして確かめ直す', async () => {
+      // **壁時計で測ると、巻き戻ったぶんだけ新しく見える**（Astra 4）
+      const revive = vi.fn()
+      useWsStore.setState({ revive })
+      const fetch = 順に答える({
+        local: [
+          答え(1, 'fresh', { host_free_fresh_for_sec: 30 }),
+          答え(1, 'fresh', { host_free_fresh_for_sec: 60 }),
+        ],
+      })
+      applySessionSnapshot([stale('a', 1), stale('b', 2)])
+      renderGrid()
+
+      await 押す('a', 'b')
+      await 進める(5_000)
+      act(() => {
+        vi.setSystemTime(Date.now() - 60_000)
+      })
+      fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+      await 進める(0)
+
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(revive).not.toHaveBeenCalled()
+      expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+    })
+  })
+
+  it('確かめ直しで、枚数を数えない設定の PC が返ったら、空いた数ではなく数えない理由を出す', async () => {
+    // 通信が失敗して確かめ直したら、見積もり 0（歯止めを外している）の答えが返った（Astra 5）。
+    // 以前は「いま入るのは 枚」と数が空いていた
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const 列: Record<string, 一手[]> = { local: ['投げる'] }
+    順に答える(列)
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    await 進める(66_000)
+    expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+      'aria-label',
+      'PC の空きメモリを聞けませんでした',
+    )
+
+    列.local.push(答え(null, 'fresh', { estimate_mb: 0, host_free_fresh_for_sec: 60 }))
+    fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+    await 進める(0)
+
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveAttribute('aria-label', '全部起こし直せます')
+    const 行 = screen.getByTestId('revive-budget-fits')
+    expect(行).not.toHaveTextContent('いま入るのは')
+    expect(行).toHaveTextContent('この PC は枚数を数えない設定です')
+    // 見積もっていないものを「何も要らない」と読ませない
+    expect(dialog).not.toHaveTextContent('必要')
+    expect(dialog).not.toHaveTextContent('約0MB')
+    // 確かめていない数を「全部入ります」と言わない
+    expect(dialog).not.toHaveTextContent('全部入ります')
+    expect(dialog).toHaveTextContent('数えない PC のぶんは、空きを確かめずに送ります')
+
+    fireEvent.click(screen.getByTestId('revive-budget-all'))
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a', 'b'])
+  })
+  it('「この機械では数えない」と答えた PC は、足元の文で「設定」と言わない', async () => {
+    // 501（読めない機械）・409（古い版）は設定で外したのではない。片方の PC が入りきらないと
+    // ダイアログが出て、数えない PC のぶんも「入るぶん」に入る
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: [答え(1, 'fresh')], [PC]: [{ status: 501 }] })
+    applySessionSnapshot([stale('a1', 1), stale('a2', 2), stale('b1', 1, PC)])
+    renderGrid()
+
+    await 押す('a1', 'a2', 'b1')
+
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveTextContent('数えない PC のぶんは、空きを確かめずに送ります')
+    expect(dialog).not.toHaveTextContent('設定')
+    expect(screen.getByTestId('revive-budget-fitting')).toHaveTextContent('2枚')
+  })
 })
 
 describe('選択モードから出る道', () => {

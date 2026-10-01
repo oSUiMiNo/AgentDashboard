@@ -362,6 +362,83 @@ export async function fetchHostResources(
   }
 }
 
+/**
+ * 時刻の控え。**経過は単調時計（`performance.now()`）で測り、壁時計（`Date.now()`）は
+ * 見張りのために併せて持つ**（実装レビュー第3回 Astra 4）。
+ *
+ * 壁時計だけで測ると、ブラウザの時計が巻き戻ったとき経過が負になり、期限の切れた答えを
+ * 新しいと読み、65 秒の締切も伸びる。
+ */
+export interface Instant {
+  readonly mono: number
+  readonly wall: number
+}
+
+/** いまの時刻。**使うたびにグローバルから読む**——取り置くと偽の時計が効かない */
+export function instantNow(): Instant {
+  return { mono: performance.now(), wall: Date.now() }
+}
+
+/**
+ * 答えが `from` から `to` までにどれだけ古くなったか（ミリ秒）。**新しさを測るのはこれだけ。**
+ *
+ * - **壁時計が巻き戻っていたら `Infinity`**——どれだけ経ったか言えないので、期限は切れた側へ倒す
+ * - それ以外は**単調時計と壁時計の長いほう**。単調時計は機械が寝ている間に進まないことがあり、
+ *   寝ていた間に古くなった答えを新しいと読まないため
+ */
+export function elapsedMs(from: Instant, to: Instant): number {
+  const wall = to.wall - from.wall
+  if (wall < 0) {
+    return Number.POSITIVE_INFINITY
+  }
+  return Math.max(to.mono - from.mono, wall)
+}
+
+/**
+ * 聞き直しの締切。**単調時計だけで測る**——壁時計が巻き戻っても伸びず、縮みもしない。
+ *
+ * 巻き戻りで締切まで切ると、聞き直せば確かめられた PC まで諦めることになる。古くなった
+ * 答えは [`elapsedMs`] が期限切れとして読むので、聞き直しが続けば新しい答えに替わる。
+ *
+ * 数（`Date.now()` の値）で持たないのは、単調時計の数と比べ違えないため——型で見分けがつく
+ */
+export interface Deadline {
+  /** 作った時刻（`performance.now()`） */
+  readonly since: number
+  readonly ms: number
+}
+
+/** いまから `ms` ミリ秒の締切 */
+export function deadlineIn(ms: number): Deadline {
+  return { since: performance.now(), ms }
+}
+
+function 締切までの残り(deadline: Deadline, at: Instant): number {
+  return deadline.ms - (at.mono - deadline.since)
+}
+
+function 締切に達した(deadline: Deadline, at: Instant): boolean {
+  return 締切までの残り(deadline, at) <= 0
+}
+
+/**
+ * 数えた枚数の有効期限（[`Settled.freshUntil`]）。**経過は [`elapsedMs`] で測る**
+ * ——巻き戻ったら切れたとみなす
+ */
+export interface FreshUntil {
+  readonly since: Instant
+  readonly ms: number
+}
+
+/** 有効期限まであと何ミリ秒か。切れていれば 0 以下（壁時計の巻き戻りは `-Infinity`） */
+export function remainingMs(freshUntil: FreshUntil, at: Instant): number {
+  return freshUntil.ms - elapsedMs(freshUntil.since, at)
+}
+
+export function isPast(freshUntil: FreshUntil, at: Instant): boolean {
+  return remainingMs(freshUntil, at) <= 0
+}
+
 /** 聞き直す間隔（設計§6-3） */
 export const RECHECK_INTERVAL_MS = 1_000
 
@@ -395,12 +472,12 @@ type RoundAnswer = HostResources | null | typeof NO_ANSWER
 interface 受け取り {
   answer: RoundAnswer
   /**
-   * その周で聞き始めた時刻（`Date.now()`）。**新しさの残りはここから測る。**
+   * その周で聞き始めた時刻。**新しさの残りはここから測る。**
    *
    * PC が残りを数えたのは、聞き始めてから受け取るまでのどこかである。受け取った時刻から
    * 測ると、運ぶのにかかったぶんだけ新しく見積もる——確かめられていない側へ倒すため、早いほうを使う
    */
-  askedAt: number
+  askedAt: Instant
 }
 
 /** 1周で受け取ったもの。**締切で切られたか**を添える */
@@ -420,8 +497,11 @@ interface 周の答え extends 受け取り {
  * 何枚戻すか（[`planRevive`]）・どう見せるかは、`stale` の答えと同じ道を通る。
  *
  * **残りの欄が無い（古い PC）なら、いまの扱いのまま。** 欄そのものが来ないので `== null` で比べる
+ *
+ * **壁時計が巻き戻ったら、何秒前の値かも言えない**（経過が `Infinity`）。古さの欄は空にする
+ * ——足し算した `Infinity` を画面へ渡すと「Infinity 時間前」と出る
  */
-function 今の答え(got: 受け取り, now: number): RoundAnswer {
+function 今の答え(got: 受け取り, now: Instant): RoundAnswer {
   const answer = got.answer
   if (
     answer === null ||
@@ -431,7 +511,7 @@ function 今の答え(got: 受け取り, now: number): RoundAnswer {
   ) {
     return answer
   }
-  const 経過 = now - got.askedAt
+  const 経過 = elapsedMs(got.askedAt, now)
   if (経過 < answer.host_free_fresh_for_sec * 1_000) {
     return answer
   }
@@ -439,11 +519,31 @@ function 今の答え(got: 受け取り, now: number): RoundAnswer {
     ...answer,
     host_free_state: 'stale',
     host_free_age_sec:
-      answer.host_free_age_sec == null
+      answer.host_free_age_sec == null || !Number.isFinite(経過)
         ? null
         : answer.host_free_age_sec + Math.floor(経過 / 1_000),
     host_free_fresh_for_sec: 0,
   }
+}
+
+/**
+ * この答えで数えた枚数が、いつまで新しいか（実装レビュー第3回 Astra 3）。
+ *
+ * **数えるのに使う答えだけが期限を持つ**——`fresh` で、数えていて（`fits_now`）、新しさの残りを
+ * 送ってきたもの。WSL でない PC・古い PC（残りの欄が無い）はいまどおり期限を持たない。
+ * 確かめられていない PC は 0 枚に数えているので、古くなっても数が増える側へは動かない
+ */
+function 新しいうち(got: 受け取り, answer: RoundAnswer): FreshUntil | null {
+  if (
+    answer === null ||
+    answer === NO_ANSWER ||
+    answer.fits_now == null ||
+    answer.host_free_state !== 'fresh' ||
+    answer.host_free_fresh_for_sec == null
+  ) {
+    return null
+  }
+  return { since: got.askedAt, ms: answer.host_free_fresh_for_sec * 1_000 }
 }
 
 /** この答えなら、もう1周聞く */
@@ -460,12 +560,12 @@ function 落ち着いていない(answer: RoundAnswer): boolean {
  */
 async function 一周(
   hosts: readonly string[],
-  deadline: number,
+  deadline: Deadline,
   outer: AbortSignal,
 ): Promise<Map<string, 周の答え> | typeof SIGNED_OUT> {
   const 周 = new AbortController()
-  const askedAt = Date.now()
-  const 残り = deadline - askedAt
+  const askedAt = instantNow()
+  const 残り = 締切までの残り(deadline, askedAt)
   const 締切で切る = 残り < ASK_LIMIT_MS
   let 締切に達した = false
   const 打ち切る = () => {
@@ -527,8 +627,8 @@ function 眠る(ms: number, signal: AbortSignal): Promise<void> {
 
 /** [`settleHostResources`] の頼み方 */
 export interface SettleOptions {
-  /** 締切（`Date.now()` の値）。**押した時点で1回だけ作り**、全周で共有する */
-  deadline: number
+  /** 締切（[`deadlineIn`]）。**押した時点で1回だけ作り**、全周で共有する */
+  deadline: Deadline
   /** 閉じた・やめた・画面を離れたら打ち切る。**進行中の問い合わせも切る** */
   signal: AbortSignal
   /** 前に聞けた答え（確かめ直しのとき）。**表示にだけ使い、数えない** */
@@ -568,11 +668,12 @@ export interface SettleOptions {
  *   1回の上限で切った PC・503・通信の失敗はここに入る。前回の答えは表示にだけ使う
  * - 1台でも 401 なら [`SIGNED_OUT`]（1枚も送らない側）
  * - 打ち切られたら `'cancelled'`。**遅れた答えで送らないため**
+ * - **数えた枚数の有効期限を添えて返す**（[`Settled`]）
  */
 export async function settleHostResources(
   hosts: readonly string[],
   { deadline, signal, previous, onWaiting }: SettleOptions,
-): Promise<Map<string, HostAnswer> | typeof SIGNED_OUT | 'cancelled'> {
+): Promise<Settled | typeof SIGNED_OUT | 'cancelled'> {
   const 前に聞けた = new Map<string, HostResources>()
   for (const [host, found] of previous ?? []) {
     if (found !== null) {
@@ -597,11 +698,11 @@ export async function settleHostResources(
         前に聞けた.set(host, got.answer)
       }
     }
-    const いま = Date.now()
+    const いま = instantNow()
     const 待つ = [...最後の周.values()]
       .map((got) => 今の答え(got, いま))
       .filter(落ち着いていない)
-    if (待つ.length === 0 || いま >= deadline) {
+    if (待つ.length === 0 || 締切に達した(deadline, いま)) {
       break
     }
     onWaiting?.(待つ.every((answer) => answer === NO_ANSWER) ? 'answer' : 'windows')
@@ -610,23 +711,48 @@ export async function settleHostResources(
       return 'cancelled'
     }
     // **眠った後にも締切を見る。** 残り0ミリ秒で次の周を始めても、何も聞けずに切られるだけ
-    if (Date.now() >= deadline) {
+    if (締切に達した(deadline, instantNow())) {
       break
     }
   }
   // **返す瞬間の時刻で読み直す。** 眠った後に締切で抜けたときは、最後の周から1秒以上経っている
-  const 返す時刻 = Date.now()
-  return new Map(
-    hosts.map((host): [string, HostAnswer] => {
-      const got = 最後の周.get(host)
-      // **`??` で既定を当てない。** `null`（数えない）まで答え無しに化ける
-      const answer = got === undefined ? NO_ANSWER : 今の答え(got, 返す時刻)
-      return [
-        host,
-        answer === NO_ANSWER ? noAnswer(前に聞けた.get(host) ?? null) : answer,
-      ]
-    }),
-  )
+  const 返す時刻 = instantNow()
+  const answers = new Map<string, HostAnswer>()
+  let freshUntil: FreshUntil | null = null
+  for (const host of hosts) {
+    const got = 最後の周.get(host)
+    // **`??` で既定を当てない。** `null`（数えない）まで答え無しに化ける
+    const answer = got === undefined ? NO_ANSWER : 今の答え(got, 返す時刻)
+    answers.set(
+      host,
+      answer === NO_ANSWER ? noAnswer(前に聞けた.get(host) ?? null) : answer,
+    )
+    // **有効期限も同じ時刻で決める。** 読み直しで `stale` へ移った答えは期限を持たない
+    const 期限 = got === undefined ? null : 新しいうち(got, answer)
+    if (
+      期限 !== null &&
+      (freshUntil === null ||
+        remainingMs(期限, 返す時刻) < remainingMs(freshUntil, 返す時刻))
+    ) {
+      freshUntil = 期限
+    }
+  }
+  return { answers, freshUntil }
+}
+
+/** [`settleHostResources`] の答え */
+export interface Settled {
+  answers: Map<string, HostAnswer>
+  /**
+   * この答えで数えた枚数が、**いつまで新しいか**（実装レビュー第3回 Astra 3）。PC ごとの
+   * 「最後の周で聞き始めた時刻＋新しさの残り」のうち、最も早く切れるもの。
+   *
+   * ダイアログを開けたまま考えている間に過ぎることがある。**過ぎてから枚数に基づく操作を
+   * 押したら、送る前に確かめ直す**——古い数で何枚戻すかを決めない。
+   *
+   * **`null` は期限を持つ答えが無い**（WSL でない・古い PC・確かめられていない PC だけ）
+   */
+  freshUntil: FreshUntil | null
 }
 
 /** 何秒前かを、人が読む形にする（「12 秒前」「4 分前」「2 時間前」） */

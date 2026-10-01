@@ -27,11 +27,16 @@ interface Props {
   plan: RevivePlan
   /** 「もう一度確かめる」が聞き直している間 */
   rechecking: boolean
+  /**
+   * 数えた枚数が古くなっていたので、押された操作の代わりに確かめ直した後か
+   * （実装レビュー第3回 Astra 3）。**押したのに送られなかったわけを言う**
+   */
+  recheckedBecauseStale: boolean
   /** 入るぶんだけ戻す */
   onFitting: () => void
   /** それでも全部戻す */
   onAll: () => void
-  /** もう一度確かめる（確かめられていない PC があるときだけ出す） */
+  /** もう一度確かめる（確かめられていない PC があるときと、確かめ直している間だけ出す） */
   onRecheck: () => void
   onCancel: () => void
 }
@@ -166,7 +171,29 @@ function 予約の行(host: HostBudget, resources: HostResources) {
   )
 }
 
+/**
+ * 枚数を数えない PC か。答えがあれば `fits_now === null`＝`revive_estimate_mb = 0`（設定で
+ * 外している）、答えが無ければ「この機械では数えない」と答えた PC（501・409）。
+ *
+ * **1枚あたりの見積もりも 0 なので、「必要」の数も出さない**——「必要 0.0 GB」と出すと、
+ * 見積もっていないものが「何も要らない」に読める
+ */
+function 数えない設定(host: HostBudget): boolean {
+  return host.unconfirmed === null && host.fits === null
+}
+
 function 入る行(host: HostBudget) {
+  if (数えない設定(host)) {
+    /*
+      **数が空いたまま出さない**（実装レビュー第3回 Astra 5）。以前は `null` をそのまま描き
+      「いま入るのは 枚」と出ていた。言い方は CLI（`render_resources`）に揃える
+    */
+    return (
+      <span className="text-muted-foreground">
+        この PC は枚数を数えない設定です（revive_estimate_mb = 0 で歯止めを外しています）
+      </span>
+    )
+  }
   if (host.unconfirmed !== null) {
     return (
       <>
@@ -187,6 +214,7 @@ function 入る行(host: HostBudget) {
 export function ReviveBudgetDialog({
   plan,
   rechecking,
+  recheckedBecauseStale,
   onFitting,
   onAll,
   onRecheck,
@@ -215,6 +243,21 @@ export function ReviveBudgetDialog({
     (host) =>
       host.unconfirmed === null && host.fits !== null && host.targets > host.fits,
   )
+  /*
+    **数えない PC のぶんは「入る」と言わない。** 空きを確かめずに送るだけなので、
+    「全部入ります」と書くと確かめていない数を確かめたように言うことになる。
+
+    **足元の文では「設定」と言わない。** 「この機械では数えない」と答えた PC（501・409。
+    `resources` が無い）もここに入る——読めない機械・古い版で、設定で外したのではない
+  */
+  const 数えないPCがある = plan.hosts.some(数えない設定)
+  const 数えるPCがある = plan.hosts.some((host) => !数えない設定(host))
+  /*
+    **確かめている間は、どこから押しても忙しさを出す。** 枚数が古くなっていて押した操作の
+    代わりに確かめ直すとき、全台が確かめられていれば「もう一度確かめる」は出ていない——
+    出さないと、押せないボタンが並ぶだけで何が起きているのか見えない
+  */
+  const 確かめるボタン = 確かめられていない || rechecking
 
   return (
     <>
@@ -250,7 +293,7 @@ export function ReviveBudgetDialog({
                 <strong data-testid="revive-budget-targets">
                   {host.targets}枚
                 </strong>
-                {resources !== null && (
+                {resources !== null && resources.fits_now != null && (
                   <>
                     {' ／ '}
                     必要{' '}
@@ -319,7 +362,25 @@ export function ReviveBudgetDialog({
         })}
 
         <p className="text-muted-foreground text-xs">
-          {!plan.over && <>確かめ直した結果、選んだぶんは全部入ります。</>}
+          {recheckedBecauseStale && (
+            <>
+              数えてから時間が経ち、枚数が古くなっていたので、送らずに確かめ直しました。
+              <br />
+            </>
+          )}
+          {!plan.over && 数えるPCがある && (
+            <>
+              確かめ直した結果、
+              {数えないPCがある ? '数える PC のぶん' : '選んだぶん'}は全部入ります。
+              <br />
+            </>
+          )}
+          {数えないPCがある && (
+            <>
+              枚数を数えない PC のぶんは、空きを確かめずに送ります。
+              <br />
+            </>
+          )}
           {足りない && (
             <>
               全部戻すと空きを超え、機械が固まることがあります。
@@ -343,7 +404,7 @@ export function ReviveBudgetDialog({
         </p>
 
         <div className="flex flex-wrap gap-2">
-          {確かめられていない && (
+          {確かめるボタン && (
             <Button
               type="button"
               size="sm"
