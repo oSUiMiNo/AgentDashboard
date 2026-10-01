@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 189
+min_entries = 193
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1814,10 +1814,10 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "まとめて復旧で答える時間の違う PC が複数あるとき、毎周すべての PC に聞き直し、前の周の答えを使い回さない"
+behavior    = "まとめて復旧で答える時間の違う PC が複数あるとき、遅い PC を待つ間も先に答えた PC を1秒おきに聞き直し、最後の答えで数える（前の答えを使い回さない）"
 gate        = "unit"
 tests       = [
-  { file = "web/src/lib/reviveBudget.test.ts", name = "答える時間の違う2台では、毎周すべての PC を聞き、最後の周の答えで返す" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "答える時間の違う2台では、遅い PC を待つ間も先に答えた PC を1秒おきに聞き直し、最後の答えで返す" },
 ]
 breaks_when = "落ち着いた PC の前の周の答えを持ち越す形へ戻す（2台のテストが、期待 fits_now 1 に対し 5 で落ちた）。直した担当が実測した。自分でも、落ち着いた PC へは聞き直さず前の周の答えを持ち越す形にし、名指しの1本が PC ごとの問い合わせ回数の検査で落ちることを当て直した"
 verified    = true
@@ -1847,7 +1847,7 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "まとめて復旧のダイアログを開けている間に、数えた枚数の有効期限（最後の周で聞き始めた時刻＋host_free_fresh_for_sec の最も早いもの）が過ぎたら、「入るぶんだけ戻す」と確かめ直しの後の「全部戻す」は送らずに確かめ直し、結果をダイアログに出す。「それでも全部戻す」はいまどおり送る。欄を送らない古い PC はいまどおり期限なし"
+behavior    = "まとめて復旧のダイアログを開けている間に、数えた枚数の有効期限（最後の答えを聞き始めた時刻＋host_free_fresh_for_sec の最も早いもの）が過ぎたら、「入るぶんだけ戻す」と確かめ直しの後の「全部戻す」は送らずに確かめ直し、結果をダイアログに出す。「それでも全部戻す」はいまどおり送る。欄を送らない古い PC はいまどおり期限なし"
 gate        = "unit"
 tests       = [
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "「入るぶんだけ戻す」を押しても送らずに確かめ直し、結果をダイアログに出す" },
@@ -1855,7 +1855,7 @@ tests       = [
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめ直しの後の「全部戻す」も、古くなっていたら送らずに確かめ直す" },
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "「それでも全部戻す」は枚数を見ない操作なので、古くなっていてもそのまま送る" },
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "新しさの残りを送ってこない古い PC は、いまどおり期限が付かない" },
-  { file = "web/src/lib/reviveBudget.test.ts", name = "数えた枚数の有効期限は、PC ごとの「最後の周で聞き始めた時刻＋新しさの残り」の最も早いもの" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "数えた枚数の有効期限は、PC ごとの「最後の答えを聞き始めた時刻＋新しさの残り」の最も早いもの" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "期限を持つ答えが無ければ、有効期限は付かない（WSL でない・古い PC・数えない PC）" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "返す瞬間に古くなっていた PC は、有効期限に数えない（確かめられていない側にいる）" },
 ]
@@ -1878,15 +1878,42 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "まとめて復旧の聞き直しで、同じ周の中で新しさの残り（host_free_fresh_for_sec）を使い切った fresh を古いとみなして聞き直し、締切までに確かめ直せなければ 0 枚に数える。欄を送らない古い PC はいまどおり"
+behavior    = "まとめて復旧の聞き直しで、1回の上限で切った問い合わせは、断りが届く前に締切が来ても「答え無し」のまま（締切で切ったと取り違えて前の答えへ戻さない）"
 gate        = "unit"
 tests       = [
-  { file = "web/src/lib/reviveBudget.test.ts", name = "先に答えた PC の fresh が、同じ周の中で新しさの残りを使い切ったら、聞き直してから返す" },
-  { file = "web/src/lib/reviveBudget.test.ts", name = "締切までに新しい値で確かめ直せなければ、その PC は確かめられていない（0 枚）" },
-  { file = "web/src/lib/reviveBudget.test.ts", name = "最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる" },
-  { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの残りを送ってこない古い PC は、いまどおり1つの周の答えで返す" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "1回の上限で切った問い合わせは、断りが届く前に締切が来ても「答え無し」のまま（前の答えへ戻さない）" },
 ]
-breaks_when = "reviveBudget.ts で周の終わりの読み直し（今の答え）を外す（1・2本目）。返す瞬間の読み直しを外す（2・3本目）。== null を === null にする（4本目）。いずれも直した担当が実測した。自分でも周の終わりの読み直し（今の答え）を外し、1本目が「ここで返さない」の検査（test:741）、2本目が聞き直した回数の検査（test:760）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の 一回聞く で、締切で切ったかを最初に切った瞬間ではなく戻ってきた時点で決める（切られた を 締切に達していた() で見る）→ 期待した「答え無し」でなく前の checking が返って落ちる。直した担当が実測した。自分でも同じ1行を当て、名指しの1本が「答え無し」の検査（test:816）で前の checking が返って落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧の聞き直しで、何を待っているかの知らせ（onWaiting）は、全台の最初の答えが揃うまで出さず、その後は中身が変わったときだけ出す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "聞き直しに入るたびに、何を待っているかを知らせる" },
+]
+breaks_when = "reviveBudget.ts の 待っているもの で、全台の最初の答えを待ち合わせない（['answer','windows','answer'] で落ちる）。知らせの重複をまとめない（['windows','windows','answer'] で落ちる）。どちらも直した担当が実測した。自分でも 聞き続ける の重複をまとめる条件（待ち !== 知らせた）を外し、名指しの1本が知らせの並びの検査（test:943）で ['windows','windows','answer'] になって落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧の聞き直しで、知らせ（onWaiting）が投げて抜けたときでも、残りの PC への聞き直しを裏に残さない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "知らせ（onWaiting）が投げて抜けても、残りの PC への聞き直しを裏に残さない" },
+]
+breaks_when = "reviveBudget.ts の settleHostResources で、抜けるときに全体を止める行（finally の 全体.abort()）を外す → 聞いた回数が2回のはずが7回で落ちる。直した担当が実測した。自分でも同じ1行を外し、名指しの1本が聞いた回数の検査（test:966）で7回になって落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧の聞き直しで、答えない PC が居ても、ほかの PC は PC ごとに1秒おきに聞き直し、遅い PC に合わせて間隔を延ばさない（新しさの窓が短い正常な PC を締切で 0 枚にしない）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの窓が短い正常な PC は、答えない PC が居ても1秒おきに聞き直し、締切で数えられる" },
+]
+breaks_when = "全台の答えを揃えてから次を聞く旧版へ戻す（聞いた回数が65回のはずが6回。回数の検査を外すと、その PC が 0 枚・確かめられなかった扱いになる。期待は4枚）。落ち着いた PC を聞き直さない形（65回のはずが2回）。どちらも直した担当が実測した。自分でも reviveBudget.ts の 聞き続ける の眠りを1回の上限ぶん延ばし（RECHECK_INTERVAL_MS + ASK_LIMIT_MS）、名指しの1本が聞いた回数の検査（test:721）で6回になって落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1898,6 +1925,19 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "締切で切った周でも、切る前に答えが来なかった PC は「答え無し」のまま" },
 ]
 breaks_when = "reviveBudget.ts で前の周へ戻す行を 最後の周.set(host, got) にする（1本目が a の no_answer で落ちる）。切られた印を周の始めの 締切で切る で見る（2本目が前の周の fresh へ戻って落ちる）。どちらも直した担当が実測した。自分でも前の周へ戻す行を 最後の周.set(host, got) にし、1本目が a の no_answer（test:696）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧の聞き直しで、遅い PC を待つ間に新しさの残り（host_free_fresh_for_sec）を使い切った fresh を古いとみなして聞き直し、締切までに確かめ直せなければ 0 枚に数える。欄を送らない古い PC はいまどおり"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "遅い PC を待つ間に、先に答えた PC の fresh が新しさの残りを使い切ったら、聞き直してから返す" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "締切までに新しい値で確かめ直せなければ、その PC は確かめられていない（0 枚）" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの残りを送ってこない古い PC は、いまどおり古くなったと読まず、他の PC が答えた時点で返す" },
+]
+breaks_when = "reviveBudget.ts で周の終わりの読み直し（今の答え）を外す（1・2本目）。返す瞬間の読み直しを外す（2・3本目）。== null を === null にする（4本目）。いずれも直した担当が実測した。自分でも周の終わりの読み直し（今の答え）を外し、1本目が「ここで返さない」の検査（test:741）、2本目が聞き直した回数の検査（test:760）で落ちることを当て直した"
 verified    = true
 
 [[entry]]

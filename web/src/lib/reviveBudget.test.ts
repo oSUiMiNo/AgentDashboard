@@ -731,7 +731,7 @@ describe('settleHostResources', () => {
     expect(plan.fitting).toEqual(['a1'])
   })
 
-  it('答える時間の違う2台では、毎周すべての PC を聞き、最後の周の答えで返す', async () => {
+  it('答える時間の違う2台では、遅い PC を待つ間も先に答えた PC を1秒おきに聞き直し、最後の答えで返す', async () => {
     // A は即答、B は1回3秒かかり、しばらく checking。**先に答えた A の最初の `fresh` は、
     // B が落ち着く頃には期限切れ**（A は途中で stale を返し、取り直して 1 枚に減っている）
     vi.useFakeTimers()
@@ -816,7 +816,7 @@ describe('settleHostResources', () => {
     expect(台(箱, 'a')).toEqual(noAnswer(wsl(9, 'checking')))
   })
 
-  it('先に答えた PC の fresh が、同じ周の中で新しさの残りを使い切ったら、聞き直してから返す', async () => {
+  it('遅い PC を待つ間に、先に答えた PC の fresh が新しさの残りを使い切ったら、聞き直してから返す', async () => {
     // a は答えるのに 1.5 秒かかり、最初の答えはあと 2 秒しか新しくない（聞き始めた 0 秒から
     // 2 秒まで）。b は答えるのに 3 秒かかる。**b が答えた 3 秒の時点で、a の手元の答えは
     // 使い切っている**——a の次の答え（4 秒に届く）を待たずに返してはいけない
@@ -894,7 +894,7 @@ describe('settleHostResources', () => {
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
   })
 
-  it('新しさの残りを送ってこない古い PC は、いまどおり1つの周の答えで返す', async () => {
+  it('新しさの残りを送ってこない古い PC は、いまどおり古くなったと読まず、他の PC が答えた時点で返す', async () => {
     vi.useFakeTimers()
     // 古い PC は欄そのものを送ってこない（`null` ではなく、読むと `undefined`）
     const 古い = { ...wsl(5, 'fresh', { host_free_age_sec: 58 }) } as Partial<HostResources>
@@ -1046,7 +1046,7 @@ describe('settleHostResources', () => {
     expect(fetch.mock.calls.length).toBeLessThanOrEqual(RECHECK_LIMIT_MS / RECHECK_INTERVAL_MS + 2)
   })
 
-  it('数えた枚数の有効期限は、PC ごとの「最後の周で聞き始めた時刻＋新しさの残り」の最も早いもの', async () => {
+  it('数えた枚数の有効期限は、PC ごとの「最後の答えを聞き始めた時刻＋新しさの残り」の最も早いもの', async () => {
     // 先に切れるのは、答えるのに 3 秒かかる b のほう（a は即答で、1 秒おきに聞き直している）
     vi.useFakeTimers()
     偽の口({
