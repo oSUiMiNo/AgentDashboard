@@ -1493,6 +1493,60 @@ async fn 確かめ直しても使えなければ締切で諦める() {
     assert!(manager.get(card_id).is_none());
 }
 
+/// 1回目はすぐ答え、2回目からは眠ってから答える外側。
+#[derive(Debug)]
+struct 二回目から遅い外側(std::sync::atomic::AtomicUsize);
+
+impl session_host_core::resources::HostFreeProbe for 二回目から遅い外側 {
+    fn read(&self) -> Result<u64, String> {
+        if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            std::thread::sleep(Duration::from_millis(2_500));
+        }
+        Ok(6_000)
+    }
+}
+
+#[tokio::test]
+async fn やり直した後の取得が締切に間に合わなければ入れ替わりのせいにせず時間切れと言う() {
+    // 1周目の観測が判定の前に使えなくなり、やり直した取得が遅くて締切（1秒）を越える。
+    // **取得が間に合わなかった**のであって、予約が入れ替わり続けたのではない
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = Arc::new(二回目から遅い外側(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    manager.set_host_free(session_host_core::resources::HostFree::with_wait(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+        Duration::from_secs(1),
+    ));
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 一度だけ = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.確認の後に差し込む(Arc::new(move || {
+            if 一度だけ.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            if let Some(manager) = manager_weak.upgrade() {
+                manager.観測を失効させる();
+            }
+        }));
+    }
+
+    let card_id = CardId::new();
+    let refusal = 頼む(&manager, card_id)
+        .await
+        .expect_err("締切までに取得が終わらなければ断ること");
+    assert!(refusal.contains("確かめられなかった"), "{refusal}");
+    assert!(
+        !refusal.contains("入れ替わり続けました"),
+        "★取得の時間切れを、予約の入れ替わりのせいにしないこと: {refusal}"
+    );
+    assert!(refusal.contains("答えが返りませんでした"), "{refusal}");
+    assert!(manager.get(card_id).is_none());
+}
+
 /// 眠ってから答える外側。**待ったかどうか**を時間で見るため。
 #[derive(Debug)]
 struct 遅い外側(std::sync::atomic::AtomicUsize);

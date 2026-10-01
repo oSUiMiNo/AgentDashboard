@@ -2662,6 +2662,10 @@ impl SessionManager {
                 .lock()
                 .expect("ロックが壊れていない")
                 .required_after;
+            // **呼ぶ前に締切が過ぎていたかを控える。** 過ぎていたなら、やり直しで時間を
+            // 使い切った（入れ替わり続けた）。呼んだ後に過ぎたなら、取得そのものが
+            // 間に合わなかった（Windows 側が遅い）——理由が違うので言い分ける
+            let expired_before = tokio::time::Instant::now() >= deadline;
             let confirmed = 物差し.host_free().confirm(required_after, deadline).await;
             let hook = self
                 .after_confirm
@@ -2672,9 +2676,11 @@ impl SessionManager {
                 hook();
             }
             let waited_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
-            // **やり直している間に締切を過ぎたなら、取得の失敗とは言い分ける**
+            // **やり直しで締切を使い切ったときだけ「入れ替わり続けた」と言う。** 取得を
+            // 待っている間に締切が来たのなら、取得の理由（時間切れ）をそのまま出す——
+            // 入れ替わりのせいにすると、本当の理由と、そのときの値のログが消える
             let churned = retried
-                && tokio::time::Instant::now() >= deadline
+                && expired_before
                 && matches!(
                     confirmed.checked(),
                     crate::resources::Checked::Unconfirmed(_)
