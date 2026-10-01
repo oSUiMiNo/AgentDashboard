@@ -312,6 +312,73 @@ async fn 抜け殻のカードは同じidのまま起こし直せる() {
     session.kill();
 }
 
+/// 空きが足りない機械（床を切らせて断らせるため）。
+#[derive(Debug)]
+struct 足りないメモリ;
+
+impl session_host_core::resources::Probe for 足りないメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb: 1_000,
+            swap_free_mb: 0,
+            free_mb: 1_000,
+        })
+    }
+}
+
+/// ローカルモードの起こし直しの断りは `revive` 種別で配られる（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 設計§6-2）。
+///
+/// 画面は押し直したときに `revive` の断りだけを消すので、`Other` で配ると実機では
+/// 押し直しても古い断りが残る。セルフホスト（`link.rs`）は既に `Revive` だった。
+#[tokio::test]
+async fn ローカルモードの起こし直しの断りはrevive種別で配られる() {
+    let config = config_for("revive-refused");
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        let card_id = session.card_id;
+        session.kill();
+        card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let server = common::TestServer::start_with(config).await;
+    server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    server
+        .manager
+        .set_memory_probe(std::sync::Arc::new(足りないメモリ));
+    let mut watcher = common::EventWatcher::attach(&server.manager);
+
+    let refusal = agentdashboard_core::client::revive(&target_of(&server), &card_id.to_string())
+        .await
+        .expect_err("空きが足りないので断られること");
+    assert!(
+        refusal.to_string().contains("メモリが足りない"),
+        "{refusal}"
+    );
+
+    let message = watcher
+        .wait_for("このカード宛ての断り", |message| {
+            matches!(
+                message,
+                protocol::ws::ServerMessage::Error { card_id: Some(id), .. } if *id == card_id
+            )
+        })
+        .await;
+    let protocol::ws::ServerMessage::Error { kind, .. } = message else {
+        unreachable!("断りを待っていた");
+    };
+    assert_eq!(
+        kind,
+        protocol::ws::ErrorKind::Revive,
+        "★起こし直しの断りは revive 種別で配ること"
+    );
+}
+
 #[tokio::test]
 async fn 動いているカードは起こし直せない() {
     // **画面はボタンを出さないだけ**で、CLI には効かない。走っているカードへ撃つと

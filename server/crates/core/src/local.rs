@@ -139,10 +139,14 @@ impl SessionHost for LocalSessionHost {
             {
                 // **黙って失敗させない。** 待っている相手（画面・CLI）には状態でしか
                 // 返らないので、届かなかったことは自分から配る（`link.rs` と同じ形）
+                //
+                // **種別は `Revive`**（寝ているカードばかりなのに、メモリ不足でセッションを
+                // 起こせない 設計§6-2）。画面は押し直したときに `revive` の断りだけを消すので、
+                // `Other` だと実機（ローカルモード）では押し直しても古い断りが残っていた
                 manager.broadcast(ServerMessage::Error {
                     card_id: Some(request.card_id),
                     message: err.to_string(),
-                    kind: ErrorKind::Other,
+                    kind: ErrorKind::Revive,
                 });
             }
         });
