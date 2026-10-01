@@ -21,12 +21,13 @@ import { moveItem } from '@/lib/reorder'
 import { nicknameOf } from '@/lib/protocol'
 import { reviveState } from '@/lib/protocol'
 import {
-  fetchHostResources,
+  fetchSettledHostResources,
   hostOf,
   planRevive,
+  RECHECK_LIMIT_MS,
   SIGNED_OUT,
   type HostResources,
-  type HostResourcesAnswer,
+  type SettledAnswer,
   type RevivePlan,
   type ReviveTarget,
 } from '@/lib/reviveBudget'
@@ -170,8 +171,30 @@ export function TileGrid() {
     押したときの計画（設計§18-5）。**聞くのは押した瞬間だけ**——常時持っていると
     古い値で判断することになる。全部入るなら黙って進み、入りきらないときだけ出す。
   */
-  const [plan, setPlan] = useState<RevivePlan | null>(null)
+  const [plan, setPlan] = useState<{
+    plan: RevivePlan
+    /** 押した時点の対象。「もう一度確かめる」は**ここから減らすだけ**（設計§6-3） */
+    対象: ReviveTarget[]
+  } | null>(null)
   const [asking, setAsking] = useState(false)
+  /** ダイアログの「もう一度確かめる」が聞き直している間 */
+  const [rechecking, setRechecking] = useState(false)
+  /*
+    **聞き直しの間に古くなる値は、ref から読む。** 聞き直しは最長 65 秒かかるので、
+    押した時点の閉包の `targets` で送ると、その間に戻ったカード・消えたカードへ送る
+  */
+  const 最新の対象 = useRef(targets)
+  最新の対象.current = targets
+  /*
+    **聞き直しの世代。** 閉じた・画面を離れたら進める。遅れて届いた答えは、
+    自分の世代が古ければ**送らないし、ダイアログも開き直さない**（設計§6-3）
+  */
+  const 世代 = useRef(0)
+  useEffect(() => {
+    return () => {
+      世代.current += 1
+    }
+  }, [])
 
   const 送る = (ids: string[]) => {
     /*
@@ -182,12 +205,15 @@ export function TileGrid() {
       **既に live なカードへも送る**ことになる——PC が「このカードは復旧中です」や
       `NotFound` を返し、**押していない断りがカードに並ぶ**。
 
-      `targets` は記録から毎回作り直しているので、ここで突き合わせれば足りる。
+      `targets` は記録から毎回作り直しているので、ここで突き合わせれば足りる
+      （聞き直しを挟むと閉包が古くなるので、ref から最新を読む）。
       **閉じるのではなく絞る**のは、閉じると数え直しからやり直しになるため。
       絞る側は**常に安全側**（減る方向にしか動かない）で、押した人が見た数より
       増えることはない。
     */
-    const いま戻せる = new Set(targets.map((target) => target.cardId))
+    const いま戻せる = new Set(
+      最新の対象.current.map((target) => target.cardId),
+    )
     // 口は増やさない。**対象ぶん1枚ずつ送る**——並べるのは PC 側なので、
     // 押し手は数を気にしなくてよい（PC が複数あれば自然に台数ぶん並列になる）
     for (const cardId of ids) {
@@ -331,43 +357,116 @@ export function TileGrid() {
    * 止められる枚数が、選んで押すと止められないことになる——**同じ結果になる操作に、
    * 片方だけ保護が付いている状態を作らない**。
    */
+  /**
+   * 資源を聞き、計画を立てる。**`checking`・`stale` の PC は聞き直してから**
+   * （設計§6-3）。遅れた答え（世代が進んだ）なら `'cancelled'`。
+   */
+  const 計画する = async (
+    対象: ReviveTarget[],
+    自分の世代: number,
+  ): Promise<RevivePlan | typeof SIGNED_OUT | 'cancelled'> => {
+    const 外れた = () => 世代.current !== 自分の世代
+    // **締切は押した時点で1回だけ作り、PC 全台で共有する**
+    const deadline = Date.now() + RECHECK_LIMIT_MS
+    const hosts = [...new Set(対象.map((target) => target.host))]
+    const answers = await Promise.all(
+      hosts.map(
+        async (host) =>
+          [host, await fetchSettledHostResources(host, deadline, 外れた)] as [
+            string,
+            SettledAnswer,
+          ],
+      ),
+    )
+    if (外れた() || answers.some(([, answer]) => answer === 'cancelled')) {
+      return 'cancelled'
+    }
+    // **入館証が切れていたら1枚も送らない**（コードレビュー対応13）。
+    // `null`（聞けなかった）は歯止め無しで進む側だが、こちらは進んではいけない
+    // ——ログイン画面へ落ちずに26枚流すことになる。`markSignedOut()` は
+    // `fetchHostResources` が呼んでいるので、ここは送らずに返るだけでよい
+    if (answers.some(([, answer]) => answer === SIGNED_OUT)) {
+      return SIGNED_OUT
+    }
+    // `planRevive` の契約は変えない。`SIGNED_OUT`・`'cancelled'` は上で弾いてある
+    const 数えた = new Map(
+      answers.map(([host, answer]) => [host, answer as HostResources | null]),
+    )
+    // **対象は押した時点の集合から減らすだけ**（聞き直しの間に増えたカードを足さない）
+    const いま戻せる = new Set(
+      最新の対象.current.map((target) => target.cardId),
+    )
+    return planRevive(
+      対象.filter((target) => いま戻せる.has(target.cardId)),
+      数えた,
+    )
+  }
+
+  /**
+   * 起こし直しの門を通す（設計§5-4）。
+   *
+   * **「全て復旧」もまとめて復旧も、同じ門を通る。** 通さないと、「全て復旧」では
+   * 止められる枚数が、選んで押すと止められないことになる——**同じ結果になる操作に、
+   * 片方だけ保護が付いている状態を作らない**。
+   */
   const 押した = async (対象: ReviveTarget[] = targets) => {
     if (対象.length === 0) {
       return
     }
+    const 自分の世代 = ++世代.current
     setAsking(true)
     try {
-      const hosts = [...new Set(対象.map((target) => target.host))]
-      const answers = await Promise.all(
-        hosts.map(
-          async (host) =>
-            [host, await fetchHostResources(host)] as [
-              string,
-              HostResourcesAnswer,
-            ],
-        ),
-      )
-      // **入館証が切れていたら1枚も送らない**（コードレビュー対応13）。
-      // `null`（聞けなかった）は歯止め無しで進む側だが、こちらは進んではいけない
-      // ——ログイン画面へ落ちずに26枚流すことになる。`markSignedOut()` は
-      // `fetchHostResources` が呼んでいるので、ここは送らずに返るだけでよい
-      if (answers.some(([, answer]) => answer === SIGNED_OUT)) {
+      const 立てた = await 計画する(対象, 自分の世代)
+      if (立てた === 'cancelled' || 立てた === SIGNED_OUT) {
         return
       }
-      // `planRevive` の契約は変えない。`SIGNED_OUT` は上で弾いてある
-      const 数えた = new Map(
-        answers.map(([host, answer]) => [host, answer as HostResources | null]),
-      )
-      const 立てた = planRevive(対象, 数えた)
       if (!立てた.over) {
         // 全部入る。**いままでどおり黙って進む**
         送る(立てた.all)
         return
       }
-      setPlan(立てた)
+      setPlan({ plan: 立てた, 対象 })
     } finally {
-      setAsking(false)
+      if (世代.current === 自分の世代) {
+        setAsking(false)
+      }
     }
+  }
+
+  /** ダイアログの「もう一度確かめる」。**開けたまま**聞き直し、答えで計画を立て直す */
+  const 確かめ直す = async () => {
+    if (plan === null) {
+      return
+    }
+    const 自分の世代 = ++世代.current
+    setRechecking(true)
+    try {
+      const 立てた = await 計画する(plan.対象, 自分の世代)
+      if (立てた === 'cancelled') {
+        return
+      }
+      if (立てた === SIGNED_OUT) {
+        setPlan(null)
+        return
+      }
+      if (!立てた.over) {
+        送る(立てた.all)
+        setPlan(null)
+        return
+      }
+      setPlan({ plan: 立てた, 対象: plan.対象 })
+    } finally {
+      if (世代.current === 自分の世代) {
+        setRechecking(false)
+      }
+    }
+  }
+
+  /** ダイアログを閉じる。**聞き直しの途中なら、遅れた答えを捨てる** */
+  const 閉じる = () => {
+    世代.current += 1
+    setRechecking(false)
+    setPlan(null)
   }
 
   return (
@@ -398,16 +497,20 @@ export function TileGrid() {
       */}
       {plan !== null && (
         <ReviveBudgetDialog
-          plan={plan}
+          plan={plan.plan}
+          rechecking={rechecking}
           onFitting={() => {
-            送る(plan.fitting)
-            setPlan(null)
+            送る(plan.plan.fitting)
+            閉じる()
           }}
           onAll={() => {
-            送る(plan.all)
-            setPlan(null)
+            送る(plan.plan.all)
+            閉じる()
           }}
-          onCancel={() => setPlan(null)}
+          onRecheck={() => {
+            void 確かめ直す()
+          }}
+          onCancel={閉じる}
         />
       )}
 

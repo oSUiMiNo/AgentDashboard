@@ -39,25 +39,40 @@ export interface HostResources {
    */
   fits_now: number | null
   /**
-   * **WSL の外側（Windows）の空き**（MB）。
+   * **WSL の外側（Windows）の空き**（MB）。**最後に聞けた値があれば、古くても入る。**
    *
-   * **WSL でないなら `null`**（外側という概念が無い）。**WSL でもまだ聞けていない
-   * なら `null`**——外側を聞くのに 6〜27 秒かかるので、押した瞬間には待たずに答える。
+   * **WSL でないなら `null`**（外側という概念が無い）。**WSL でも一度も聞けていない
+   * なら `null`**。古いかどうかは [`host_free_state`] と [`host_free_age_sec`] で読む
+   * （寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§5）。
    */
   host_free_mb: number | null
   /**
    * **数えるのに実際に使った空き**（MB）。**`available_mb` をそのまま使ったなら `null`。**
    *
-   * [`host_free_mb`] と組にすると3つの状態が読み分けられる。
-   *
-   * | `host_free_mb` | `counted_mb` | 意味 |
-   * |---|---|---|
-   * | `null` | `null` | **WSL でない**（いまと同じ見た目） |
-   * | 数 | 数 | 外側のほうが少なかったので、そちらで抑えた |
-   * | `null` | 数 | **外側をまだ聞けていない**（もう一度押すと反映される） |
+   * 読み分けは Rust 側 `protocol::HostResources::counted_mb` の表が正（状態の欄と組で読む）。
+   * **`fresh` 以外の状態の数で「何枚戻すか」を決めない**——`checking`・`failed` は
+   * `MemFree` の床で数えた参考値で、確かめられていない。
    */
   counted_mb: number | null
+  /**
+   * 外側の値が何秒前のものか。値が無ければ `null`（寝ているカードばかりなのに、
+   * メモリ不足でセッションを起こせない 設計§5）。**古い PC は送ってこない**
+   */
+  host_free_age_sec: number | null
+  /** 外側の値の様子。**WSL でない・期限 0 なら `null`** */
+  host_free_state: HostFreeState | null
+  /** 最後に外側を聞けなかった理由（`failed` のとき） */
+  host_free_error: string | null
+  /** 予約を引いた後の、判定に使う空き（MB） */
+  effective_mb: number | null
 }
+
+/**
+ * 外側（Windows）の空きの様子。Rust 側の `protocol::HostFreeState` と同じ綴り。
+ *
+ * **`fresh` 以外の数で「何枚戻すか」を決めない**（設計§6-3）。
+ */
+export type HostFreeState = 'fresh' | 'stale' | 'checking' | 'failed'
 
 /** 起こし直す相手1枚ぶん。 */
 export interface ReviveTarget {
@@ -68,13 +83,27 @@ export interface ReviveTarget {
   lastActivityAt: number
 }
 
+/**
+ * その PC の Windows 側の空きを、確かめられなかったわけ（設計§6-3）。
+ *
+ * - `gave_up`：聞き直しの上限（[`RECHECK_LIMIT_MS`]）に達しても新しい値が来なかった
+ * - `failed`：PC が「聞けなかった」と答えた（理由は `host_free_error`）
+ */
+export type Unconfirmed = 'gave_up' | 'failed'
+
 /** PC 1台ぶんの内訳。 */
 export interface HostBudget {
   host: string
   /** その PC に居る対象の枚数 */
   targets: number
-  /** その PC がいま受け入れられる枚数。**聞けなかったら `null`** */
+  /**
+   * その PC がいま受け入れられる枚数。**聞けなかったら `null`**。
+   *
+   * **確かめられていない PC は `0`**——床で数えた参考値で戻す枚数を決めない（設計§6-3）
+   */
   fits: number | null
+  /** 確かめられていないなら、そのわけ。確かめられた（または確かめる必要が無い）なら `null` */
+  unconfirmed: Unconfirmed | null
   resources: HostResources | null
 }
 
@@ -95,11 +124,67 @@ export function hostOf(agentId: string | null | undefined): string {
 }
 
 /**
+ * 聞き直してから計画するべき答えか（設計§6-3）。
+ *
+ * **見積もり0（`fits_now === null`）は待たない**——数えないのだから、確かめる値が要らない
+ * （§12-6 の順1）。`failed` も聞き直さない（PC が次の取得まで空けている）。
+ */
+export function needsRecheck(resources: HostResources | null): boolean {
+  if (resources === null || resources.fits_now == null) {
+    return false
+  }
+  const state = resources.host_free_state
+  return state === 'checking' || state === 'stale'
+}
+
+/**
+ * その PC の答えを、どの規則で読むか（設計§12-6）。
+ *
+ * **`== null` で比べる。** 古い PC は状態の欄そのものを送ってこないので、実行時には
+ * `null` ではなく `undefined` が来る。
+ *
+ * **数えてよいのは `fresh` だけ**（許可の側を名指しする）。`stale`・`checking`・
+ * `failed`、それに**知らない綴り**は、どれも確かめられていない側へ倒す——綴りが
+ * 1字ずれても、黙って全部送る側には落ちない。
+ */
+function 確かめ(found: HostResources | null): Unconfirmed | null {
+  if (found === null || found.fits_now == null) {
+    // 聞けなかった・見積もり0（歯止めを外している）：制限なし（いまどおり）
+    return null
+  }
+  const state = found.host_free_state
+  if (state == null) {
+    // WSL でない・期限0・古い PC：いまの規則のまま
+    return null
+  }
+  if (state === 'fresh') {
+    return null
+  }
+  if (state === 'failed') {
+    return 'failed'
+  }
+  if (state === 'stale' || state === 'checking') {
+    // **門が聞き直したうえで、まだこの答え**＝聞き直しの上限に達した
+    return 'gave_up'
+  }
+  // 知らない綴り。確かめられていない側へ倒す
+  return 'failed'
+}
+
+/**
  * 押したときの計画を立てる。
  *
  * **聞けなかった PC は数えない**（`fits` が `null`）。読めない機械（Linux 以外）や
  * 版の古い PC がここに当たる——**分からないことを理由に止めない**ので、その PC の
  * 対象は「入る」側として扱う。
+ *
+ * **Windows 側の空きを確かめられていない PC は 0 枚**として `over` を立てる
+ * （設計§6-3）。PC が「聞けなかった」と言っているのに床で「全部入る」と数えて
+ * 黙って全部送る道を塞ぐ。**「入るぶんだけ戻す」は PC ごと**——確かめられた PC の
+ * ぶんまで巻き添えにしない。
+ *
+ * **`stale`・`checking` は、門が聞き直した後の答えとして読む**（[`fetchSettledHostResources`]）。
+ * ここへ残っているなら、聞き直しの上限に達したということである。
  */
 export function planRevive(
   targets: ReviveTarget[],
@@ -121,11 +206,12 @@ export function planRevive(
 
   for (const [host, list] of byHost) {
     const found = resources.get(host) ?? null
+    const unconfirmed = 確かめ(found)
     // **「聞けなかった」と「数えない」を同じ `null` に畳むのは正しい。** どちらも
     // 歯止め無しで進む側で、画面のふるまいは同じでよい（**CLI は言い分ける**——
     // あちらは人が読む答えなので、外しているのか聞けなかったのかは別の話）
-    const fits = found?.fits_now ?? null
-    hosts.push({ host, targets: list.length, fits, resources: found })
+    const fits = unconfirmed !== null ? 0 : (found?.fits_now ?? null)
+    hosts.push({ host, targets: list.length, fits, unconfirmed, resources: found })
 
     if (fits === null || list.length <= fits) {
       // 聞けなかった、または全部入る。**間引かない**
@@ -203,4 +289,71 @@ export async function fetchHostResources(
   } catch {
     return null
   }
+}
+
+/** 聞き直す間隔（設計§6-3） */
+export const RECHECK_INTERVAL_MS = 1_000
+
+/**
+ * 聞き直しの上限。**PC 側の判定の確認段階と同じ 65 秒**（`2 × HOST_FREE_TIMEOUT + 5 秒`。
+ * 設計§3・§6-3）——正常な取得を、画面のほうが先に諦めないため
+ */
+export const RECHECK_LIMIT_MS = 65_000
+
+/**
+ * 聞き直しを済ませた答え。`'cancelled'` は途中で閉じられた・画面を離れた。
+ */
+export type SettledAnswer = HostResourcesAnswer | 'cancelled'
+
+/**
+ * その PC の資源を、**新しい値（または `failed`）が返るまで聞き直す**（設計§6-3）。
+ *
+ * **確かめられていない数で「何枚戻すか」を決めない。** `checking`・`stale` の答えは
+ * `MemFree` の床や前回の値で数えた参考で、そのまま計画へ渡すと、床が「全部入る」と
+ * 言った PC へ黙って全部送ることになる。
+ *
+ * - 締切（`deadline`。`Date.now()` の値）は**押した時点で1回だけ作り**、PC 全台で共有する
+ * - 上限に達したら、最後の答え（`checking`・`stale` のまま）を返す。[`planRevive`] が
+ *   それを「確かめられていない」として 0 枚に数える
+ * - **聞き直しの途中で `null`（聞けなかった）が返っても、歯止め無しへ格下げしない。**
+ *   格下げすると、塞ぎたい道（黙って全部送る）が開く。直前の答えを持ったまま締切まで回す
+ * - `SIGNED_OUT` は、その場で打ち切って返す（1枚も送らない側）
+ * - `isCancelled()` が真になったら `'cancelled'` を返す。**遅れた答えで送らないため**
+ */
+export async function fetchSettledHostResources(
+  host: string,
+  deadline: number,
+  isCancelled: () => boolean,
+): Promise<SettledAnswer> {
+  let last = await fetchHostResources(host)
+  for (;;) {
+    if (isCancelled()) {
+      return 'cancelled'
+    }
+    if (last === SIGNED_OUT || !needsRecheck(last)) {
+      return last
+    }
+    if (Date.now() >= deadline) {
+      return last
+    }
+    await new Promise((resolve) => setTimeout(resolve, RECHECK_INTERVAL_MS))
+    if (isCancelled()) {
+      return 'cancelled'
+    }
+    const next = await fetchHostResources(host)
+    if (next !== null) {
+      last = next
+    }
+  }
+}
+
+/** 何秒前かを、人が読む形にする（「12 秒前」「4 分前」「2 時間前」） */
+export function ago(sec: number): string {
+  if (sec < 60) {
+    return `${sec} 秒前`
+  }
+  if (sec < 3_600) {
+    return `${Math.floor(sec / 60)} 分前`
+  }
+  return `${Math.floor(sec / 3_600)} 時間前`
 }

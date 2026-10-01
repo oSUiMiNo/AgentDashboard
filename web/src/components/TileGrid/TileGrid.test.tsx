@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { ANNOUNCE_DEBOUNCE_MS, TileGrid, 移動の文言 } from './TileGrid'
 import type { SessionMeta } from '@/lib/protocol'
+import type { HostResources } from '@/lib/reviveBudget'
 import {
   applySessionSnapshot,
   clearSessions,
@@ -332,7 +333,7 @@ describe('全て復旧のメモリの歯止め', () => {
    */
   function 資源を答える(
     fits: number | null | 'エラー' | '入館証切れ',
-    外側: { host_free_mb: number | null; counted_mb: number | null } = {
+    外側: Partial<HostResources> = {
       host_free_mb: null,
       counted_mb: null,
     },
@@ -401,22 +402,30 @@ describe('全て復旧のメモリの歯止め', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('WSL で外側を聞けたら、何で抑えたのかが画面に出る', async () => {
+  it('WSL で外側を確かめられたら、何で抑えたのかが画面に出る', async () => {
     useWsStore.setState({ revive: vi.fn() })
-    資源を答える(1, { host_free_mb: 1_792, counted_mb: 1_792 })
+    資源を答える(1, {
+      host_free_mb: 1_792,
+      counted_mb: 1_792,
+      host_free_state: 'fresh',
+      host_free_age_sec: 12,
+      effective_mb: 1_792,
+    })
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
     await 選んで起こす()
 
     const 行 = screen.getByTestId('revive-budget-outside')
-    expect(行).toHaveTextContent('WSL の外側（Windows）の空き')
-    expect(行).toHaveTextContent('1.8 GB')
+    expect(行).toHaveTextContent('Windows 側の空き 1.8 GB（12 秒前に確認）／使える空き 1.8 GB')
+    // **WSL のときは「WSL の中の空き」と呼び分ける**（設計§6-3）
+    expect(screen.getByTestId('revive-budget-available')).toHaveTextContent('WSL の中の空き')
+    expect(screen.queryByTestId('revive-budget-reserved')).not.toBeInTheDocument()
   })
 
-  it('外側をまだ聞けていないときは、もう一度押せばよいと書く', async () => {
-    // **これを書かないと故障に見える。** 外側を聞くのに 6〜27 秒かかるので押した
-    // 瞬間は待たない設計で、**1回目だけ少なく出ることがある**
+  it('古い PC が外側をまだ聞けていないと答えても、「もう一度押すと反映されます」とは書かない', async () => {
+    // 押し直す必要は無くなった（判定が確かめ直す）ので、残すと嘘になる（設計§6-3）。
+    // 古い PC は状態の欄を送ってこないので、いまの規則で数える（設計§12-6）
     useWsStore.setState({ revive: vi.fn() })
     資源を答える(1, { host_free_mb: null, counted_mb: 3_000 })
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
@@ -426,7 +435,8 @@ describe('全て復旧のメモリの歯止め', () => {
 
     const 行 = screen.getByTestId('revive-budget-outside')
     expect(行).toHaveTextContent('まだ聞けていません')
-    expect(行).toHaveTextContent('もう一度押すと反映されます')
+    expect(screen.getByTestId('revive-budget-dialog')).not.toHaveTextContent('もう一度押す')
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('1枚')
   })
 
   it('入りきらないとダイアログが出て、押すまで1枚も送らない', async () => {
@@ -630,6 +640,350 @@ describe('全て復旧のメモリの歯止め', () => {
     const 文 = 行.map((row) => row.textContent ?? '').join('\n')
     expect(文).toContain('OMEN')
     expect(文).not.toContain('11111111-2222-3333-4444-555555555555')
+  })
+})
+
+/**
+ * Windows 側の空きを確かめてから計画する（寝ているカードばかりなのに、メモリ不足で
+ * セッションを起こせない 設計§6-3・§8-5・§12-6）。
+ *
+ * **確かめられていない数で「何枚戻すか」を決めない。** `checking`・`stale` は聞き直し、
+ * 確かめられなかった PC は 0 枚として必ずダイアログを出す。
+ */
+describe('まとめて復旧は、Windows 側の空きを確かめてから数える', () => {
+  const PC = '11111111-2222-3333-4444-555555555555'
+
+  function stale(cardId: string, lastActivityAt: number, agentId: string | null = null) {
+    return meta(cardId, {
+      agent_connected: false,
+      claude_session_id: `2222${cardId}`,
+      last_activity_at: lastActivityAt,
+      agent_id: agentId,
+    })
+  }
+
+  function 答え(
+    fits: number | null,
+    state: 'fresh' | 'stale' | 'checking' | 'failed',
+    overrides: Partial<HostResources> = {},
+  ): HostResources {
+    return {
+      total_mb: 24_000,
+      available_mb: 19_072,
+      swap_free_mb: 6_144,
+      estimate_mb: 780,
+      headroom_mb: 2_048,
+      fits_now: fits,
+      host_free_mb: state === 'checking' ? null : 5_408,
+      counted_mb: 5_408,
+      host_free_age_sec: state === 'checking' ? null : state === 'stale' ? 240 : 12,
+      host_free_state: state,
+      host_free_error: state === 'failed' ? 'powershell.exe を起動できません' : null,
+      effective_mb: 5_408,
+      ...overrides,
+    }
+  }
+
+  /** PC ごとに答えを順に返す。尽きたら最後のものを返し続ける */
+  function 順に答える(列: Record<string, HostResources[]>) {
+    const 回数: Record<string, number> = {}
+    const fetch = vi.fn(async (url: string) => {
+      const host = decodeURIComponent(url.split('/')[3])
+      const answers = 列[host]
+      const at = 回数[host] ?? 0
+      回数[host] = at + 1
+      const answer = answers[Math.min(at, answers.length - 1)]
+      return { ok: true, status: 200, json: async () => answer } as unknown as Response
+    })
+    vi.stubGlobal('fetch', fetch)
+    return fetch
+  }
+
+  /** 偽の時計の下で押す。`userEvent` は偽の時計で止まるので `fireEvent` を使う */
+  async function 押す(...cardIds: string[]) {
+    act(() => {
+      clearSelection()
+      for (const id of cardIds) {
+        toggleSelect('card', id)
+      }
+    })
+    fireEvent.click(screen.getByTestId('bulk-revive'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+  }
+
+  async function 進める(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    clearSelection()
+    useSettingsStore.setState({
+      settings: settingsFixture(remoteAgent(PC, 'OMEN')),
+      loading: false,
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('checking なら聞き直し、新しい値で全部入るならダイアログを出さずに送る', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const fetch = 順に答える({ local: [答え(0, 'checking'), 答え(0, 'checking'), 答え(5, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    // **床が 0 枚と言っていても、それで決めない。** まだ1枚も送らず、ボタンは忙しい
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.getByTestId('bulk-revive')).toBeDisabled()
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+
+    await 進める(1_000)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    await 進める(1_000)
+
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a', 'b'])
+  })
+
+  it('stale も聞き直してから数える', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(9, 'stale'), 答え(1, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    // **前回の値が「全部入る」と言っても送らない**
+    expect(revive).not.toHaveBeenCalled()
+    await 進める(1_000)
+
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('1枚')
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('上限 65 秒まで確かめられなければ、0 枚としてダイアログを必ず出す', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    // **床は「全部入る」と答えている。** それで黙って全部送る道を塞ぐ（設計§8-5）
+    順に答える({ local: [答え(99, 'stale')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    await 進める(64_000)
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    await 進める(2_000)
+
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveAttribute('aria-label', 'Windows 側の空きを確かめられていません')
+    expect(screen.getByTestId('revive-budget-title')).toHaveTextContent(
+      'Windows 側の空きを確かめられていません',
+    )
+    expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
+      'Windows 側の空き 5.3 GB（4 分前の値・確かめ直しています）',
+    )
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
+    expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
+    expect(screen.getByTestId('revive-budget-recheck')).toBeEnabled()
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('failed なら聞き直さず、理由を添えてダイアログを出す', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const fetch = 順に答える({ local: [答え(99, 'failed')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveAttribute('aria-label', 'Windows 側の空きを確かめられませんでした')
+    expect(screen.getByTestId('revive-budget-title')).toHaveTextContent(
+      'Windows 側の空きを確かめられませんでした',
+    )
+    expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
+      'Windows 側の空きを確かめられませんでした（powershell.exe を起動できません）',
+    )
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
+    // 「それでも全部戻す」は残す（判定が確かめ直す）が、そう添える
+    expect(screen.getByTestId('revive-budget-all')).toBeEnabled()
+    expect(dialog).toHaveTextContent('起こすときに PC 側が確かめ直し')
+    // 確かめられた PC が無いので「空きを超え」とは言わない
+    expect(dialog).not.toHaveTextContent('空きを超え')
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('checking のまま上限に達したら「確かめています」と出す', async () => {
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: [答え(99, 'checking')] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+    await 進める(66_000)
+
+    expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
+      'Windows 側の空きを確かめています',
+    )
+  })
+
+  it('見積もり0なら、checking でも待たずに全部送る', async () => {
+    // 数えないのだから、確かめる値が要らない（設計§12-6 の順1）
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const fetch = 順に答える({ local: [答え(null, 'checking')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(revive).toHaveBeenCalledTimes(2)
+  })
+
+  it('PC が2台で片方だけ確かめられないとき、入るぶんには確かめられた PC のぶんだけが入る', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(99, 'failed')], [PC]: [答え(5, 'fresh')] })
+    applySessionSnapshot([
+      stale('a1', 1),
+      stale('a2', 2),
+      stale('b1', 1, PC),
+      stale('b2', 2, PC),
+    ])
+    renderGrid()
+
+    await 押す('a1', 'a2', 'b1', 'b2')
+
+    expect(screen.getByTestId('revive-budget-fitting')).toHaveTextContent('2枚')
+    fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['b1', 'b2'])
+  })
+
+  it('起こしている途中のぶんが制約なら、差し引いた空きを添える', async () => {
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: [答え(0, 'fresh', { effective_mb: 2_400 })] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+
+    expect(screen.getByTestId('revive-budget-reserved')).toHaveTextContent(
+      'うち起こしている途中のぶんを差し引いて 2.3 GB',
+    )
+    expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+      'aria-label',
+      '起こし直せますが、メモリが足りません',
+    )
+  })
+
+  it('聞き直しの途中で画面を離れたら、遅れて届いた答えで送らない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(0, 'checking'), 答え(9, 'fresh')] })
+    applySessionSnapshot([stale('a', 1)])
+    const view = renderGrid()
+
+    await 押す('a')
+    view.unmount()
+    await 進める(5_000)
+
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('聞き直しの間に戻ったカードには送らず、増えたカードも足さない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(0, 'checking'), 答え(9, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    act(() => {
+      // b が別の画面から戻り、d が新しく抜け殻になった
+      applySessionSnapshot([
+        stale('a', 1),
+        meta('b', { claude_session_id: '2222b', status: { kind: 'waiting_input' } }),
+        stale('c', 3),
+        stale('d', 4),
+      ])
+    })
+    await 進める(1_000)
+
+    expect(revive.mock.calls.map((call) => call[0])).toEqual(['a'])
+  })
+
+  it('もう一度確かめて新しい値で全部入るなら、送って閉じる', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const fetch = 順に答える({ local: [答え(99, 'failed'), 答え(0, 'checking'), 答え(5, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+    await 進める(0)
+    // 確かめている間は忙しさを出し、「やめる」以外は押せない
+    expect(screen.getByTestId('revive-budget-recheck')).toBeDisabled()
+    expect(screen.getByTestId('revive-budget-recheck')).toHaveTextContent('確かめています')
+    expect(screen.getByTestId('revive-budget-all')).toBeDisabled()
+    expect(screen.getByTestId('revive-budget-cancel')).toBeEnabled()
+    await 進める(1_000)
+
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a', 'b'])
+  })
+
+  it('確かめ直している途中でやめたら、遅れた答えで送らず、開き直さない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(99, 'failed'), 答え(0, 'checking'), 答え(5, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+    await 進める(0)
+    fireEvent.click(screen.getByTestId('revive-budget-cancel'))
+    await 進める(5_000)
+
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+  })
+
+  it('確かめ直しても確かめられなければ、ダイアログが新しい答えで残る', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(99, 'failed'), 答え(2, 'fresh', { effective_mb: 3_000 })] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await 押す('a', 'b', 'c')
+    fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+    await 進める(0)
+
+    // 確かめられたが足りない → いつもの見出しへ戻り、「もう一度確かめる」は消える
+    expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+      'aria-label',
+      '起こし直せますが、メモリが足りません',
+    )
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('2枚')
+    expect(screen.queryByTestId('revive-budget-recheck')).not.toBeInTheDocument()
+    expect(revive).not.toHaveBeenCalled()
   })
 })
 
