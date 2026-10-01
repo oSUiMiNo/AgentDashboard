@@ -198,9 +198,27 @@ impl SessionHost for LocalSessionHost {
     }
 
     /// **宛先は見ない**（[`LocalSessionHost::spawn`] と同じ理由）。持ち主はこの機械しか無い。
-    async fn forget(&self, _account_id: uuid::Uuid, card_id: CardId) -> Result<(), String> {
+    async fn forget(
+        &self,
+        _account_id: uuid::Uuid,
+        card_id: CardId,
+        _owner: Option<protocol::AgentId>,
+    ) -> Result<(), String> {
         if self.manager.forget(card_id) {
             tracing::info!(%card_id, "記録の側で外したカードを、セッションの側でも片付けました");
+        }
+        Ok(())
+    }
+
+    /// **宛先は見ない**（`forget` と同じ）。印は立てない——記録を外せたら `forget` が続く。
+    async fn stop_for_removal(
+        &self,
+        _account_id: uuid::Uuid,
+        card_id: CardId,
+        _owner: Option<protocol::AgentId>,
+    ) -> Result<(), String> {
+        if self.manager.stop_for_removal(card_id) {
+            tracing::info!(%card_id, "記録の側で外し始めたカードの起こし直しを止めました");
         }
         Ok(())
     }

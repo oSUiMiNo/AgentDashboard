@@ -3305,6 +3305,118 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
         "★外したカードの実体が PC に起きている（外したことが PC に届かず、確かめの後に起こしている）"
     );
     assert!(a2s.registry.get(card_id).is_none(), "記録から外れていない");
+
+    // **外せた後は、遅れて届いた頼みも PC が外したと断る**（実装レビュー第2回 Astra 1）。外した
+    // 印は、記録を外せた後の `Forget` が立てる（第3回 Astra 1）。宛先は外す前に引いてある
+    let in_flight = a2s
+        .manager
+        .begin_revive(card_id)
+        .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
+    let 断り = a2s
+        .manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            protocol::ClaudeSessionId::new(),
+        )
+        .await
+        .expect_err(
+            "★外せた後に遅れて届いた頼みで、PC が実体を起こしている（外した印が立っていない）",
+        )
+        .to_string();
+    assert!(断り.contains("一覧から外された"), "{断り}");
+}
+
+#[tokio::test]
+async fn 接続断のカードの記録を外せなければ_PC_は取り下げた起こし直しを戻さず新しい頼みは通す() {
+    // 実装レビュー第3回 Astra 1（セルフホスト）。以前は記録を外す**前に** `Forget` を送って
+    // 外した印を立てさせていたので、記録を外す書き込みが DB の失敗で落ちると、カードは一覧に
+    // 残るのに、その PC では以後の起こし直しが「一覧から外された」で断られ続けた。いまは外す前に
+    // `StopForRemoval`（印なしで止める）、外せてから `Forget` を送る
+    let a2s = A2s::start("archive-db-failed").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    a2s.manager.実体だけを畳む(card_id);
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a2s.registry.set_agent_live(agent_id, false);
+    let (外, host_free, _門) = common::確かめで止める(&a2s.manager);
+
+    let mut events = a2s.registry.subscribe_events();
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    外.聞かれるまで待つ(0).await;
+    assert!(
+        !a2s.browser.exists(card_id),
+        "サーバから見て実体があるなら、記録だけを外す側を通らない"
+    );
+
+    // 記録を外す書き込みだけを DB の側で落とす
+    let db = server_core::db::connect(&format!(
+        "sqlite://{}",
+        a2s.dir.join("dashboard.db").display()
+    ))
+    .await
+    .expect("同じ DB へ繋げること");
+    sea_orm::ConnectionTrait::execute_unprepared(
+        &db,
+        "CREATE TRIGGER refuse_archive BEFORE UPDATE OF archived ON sessions \
+         WHEN NEW.archived BEGIN SELECT RAISE(ABORT, 'test: archive refused'); END",
+    )
+    .await
+    .expect("トリガを張れること");
+    let target = agentdashboard_core::client::Target::from_url(&format!("http://{}", a2s.addr))
+        .expect("接続先を読めること");
+    let 断り = agentdashboard_core::client::archive(&target, &card_id.to_string())
+        .await
+        .expect_err("記録を外せなかったことを返すこと")
+        .to_string();
+    assert!(断り.contains("記録を外せませんでした"), "{断り}");
+    assert!(
+        a2s.registry.get(card_id).is_some(),
+        "記録を外せなかったカードは一覧に残っていること"
+    );
+    // PC が外し始めの知らせを受けて、起こし直しを取り下げる
+    assert_eq!(
+        起こし直しの知らせを待つ(&mut events, card_id).await,
+        Some(false),
+        "取り下げた起こし直しを、終わった断りとして返すこと"
+    );
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        a2s.manager.get(card_id).is_none(),
+        "★外し始めて取り下げた起こし直しを、確かめが済んだ後に PC が起こしている"
+    );
+
+    // **新しい頼みは PC で通る**（外した印が立っていない）
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    let 期限 = tokio::time::Instant::now() + TIMEOUT;
+    while a2s.manager.get(card_id).is_none() {
+        assert!(
+            tokio::time::Instant::now() < 期限,
+            "★記録を外せなかった（一覧に残った）カードを、PC が外したものとして断っている"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -3339,7 +3451,7 @@ async fn 外した知らせが起こし直しの頼みより先に_PC_へ届い�
     let mut events = a2s.registry.subscribe_events();
 
     a2s.browser
-        .forget(a2s.account_id, card_id)
+        .forget(a2s.account_id, card_id, Some(agent_id))
         .await
         .expect("外した知らせを PC へ送れること");
     a2s.browser

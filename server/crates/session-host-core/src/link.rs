@@ -1510,6 +1510,13 @@ fn apply_command(
                 tracing::info!(%card_id, "記録の側で外されたカードを、この PC からも片付けました");
             }
         }
+        // 記録の側で外し始めたカード（実装レビュー第3回 Astra 1）。**印は立てない**——記録を
+        // 外せたら `Forget` が続く。何も無くても断らない
+        ServerToAgent::StopForRemoval { card_id } => {
+            if manager.stop_for_removal(card_id) {
+                tracing::info!(%card_id, "記録の側で外し始めたカードの起こし直しを、この PC で止めました");
+            }
+        }
         ServerToAgent::Resize {
             card_id,
             cols,

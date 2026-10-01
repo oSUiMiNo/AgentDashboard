@@ -515,6 +515,25 @@ async fn 確かめ中に外す(server: &common::TestServer, card_id: protocol::C
         "記録から外れていない"
     );
     起こし直し.abort();
+
+    // **外せた後は、遅れて届いた頼みも外したと断る**（実装レビュー第2回 Astra 1）。記録だけを
+    // 外す側では、外した印は記録を外せた後の知らせ（`forget`）が立てる（第3回 Astra 1）
+    let in_flight = server
+        .manager
+        .begin_revive(card_id)
+        .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
+    let 断り = server
+        .manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            protocol::ClaudeSessionId::new(),
+        )
+        .await
+        .expect_err("★外せた後に遅れて届いた頼みで、実体を起こしている（外した印が立っていない）")
+        .to_string();
+    assert!(断り.contains("一覧から外された"), "{断り}");
 }
 
 #[tokio::test]
@@ -609,6 +628,7 @@ async fn 外した知らせが起こし直しの頼みより先に届いても�
         &host,
         server_core::db::LOCAL_ACCOUNT_ID,
         card_id,
+        None,
     )
     .await
     .expect("外した知らせを渡せること");
@@ -662,4 +682,298 @@ async fn 外した知らせが起こし直しの頼みより先に届いても�
         0,
         "外したカードのために Windows 側を聞きに行かないこと"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 記録を外せなかったカードは、一覧に残り後から起こし直せる（実装レビュー第3回 Astra 1）。
+//
+// 記録だけを外す側は、以前は外す**前に**外した印を PC へ立てさせていた。記録を外す書き込みが
+// DB の失敗で落ちると、カードは一覧に残るのに、その PC では以後の起こし直しが「一覧から
+// 外された」で断られ続けた（プロセスが起き直すまで）。
+// ---------------------------------------------------------------------------
+
+/// 記録を外す書き込み（`archived` を立てる UPDATE）だけを DB の側で落とす。**同じ DB へ別に
+/// 繋いでトリガを張る**——サーバの接続には手を入れないので、それ以外の書き込みは通る。
+async fn 記録を外せなくする(server: &common::TestServer) -> sea_orm::DatabaseConnection {
+    use sea_orm::ConnectionTrait as _;
+    let db = server_core::db::connect(&server.config.resolved_database_url())
+        .await
+        .expect("同じ DB へ繋げること");
+    db.execute_unprepared(
+        "CREATE TRIGGER refuse_archive BEFORE UPDATE OF archived ON sessions \
+         WHEN NEW.archived BEGIN SELECT RAISE(ABORT, 'test: archive refused'); END",
+    )
+    .await
+    .expect("トリガを張れること");
+    db
+}
+
+async fn 記録を外せるように戻す(db: &sea_orm::DatabaseConnection) {
+    use sea_orm::ConnectionTrait as _;
+    db.execute_unprepared("DROP TRIGGER refuse_archive")
+        .await
+        .expect("トリガを外せること");
+}
+
+/// 前回の起動が残した抜け殻（サーバから見て実体が無い＝外す口は記録だけを外す側へ進む）。
+async fn 前回の起動が残した抜け殻(
+    label: &str,
+) -> (common::TestServer, protocol::CardId) {
+    let config = config_for(label);
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        let card_id = session.card_id;
+        session.kill();
+        card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let server = common::TestServer::start_with(config).await;
+    server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "実体が居るなら、記録だけを外す側を通らない"
+    );
+    (server, card_id)
+}
+
+#[tokio::test]
+async fn 記録を外せなかった抜け殻は一覧に残り外す前の起こし直しは戻らず後から起こし直せる() {
+    let (server, card_id) = 前回の起動が残した抜け殻("archive-db-failed").await;
+    let (外, host_free, _門) = common::確かめで止める(&server.manager);
+    let target = target_of(&server);
+    let 先の起こし直し = tokio::spawn({
+        let target = target.clone();
+        async move { agentdashboard_core::client::revive(&target, &card_id.to_string()).await }
+    });
+    外.聞かれるまで待つ(0).await;
+
+    let db = 記録を外せなくする(&server).await;
+    let 外した = agentdashboard_core::client::archive(&target, &card_id.to_string()).await;
+    let 断り = 外した
+        .expect_err("記録を外せなかったことを返すこと")
+        .to_string();
+    assert!(断り.contains("記録を外せませんでした"), "{断り}");
+    assert!(
+        server.registry.get(card_id).is_some(),
+        "記録を外せなかったカードは一覧に残っていること"
+    );
+
+    // **外し始めたときに取り下げた起こし直しは戻らない**
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "★外し始めて取り下げた起こし直しを、確かめが済んだ後に起こしている"
+    );
+
+    // **新しい頼みは通る。** DB は落ちたままでもよい（起こし直しは記録を外さない）
+    agentdashboard_core::client::revive(&target, &card_id.to_string())
+        .await
+        .expect("★記録を外せなかった（一覧に残った）カードを、外したものとして断っている");
+    assert!(
+        server.manager.get(card_id).is_some(),
+        "起こし直した実体があること"
+    );
+    let 先の断り = 先の起こし直し
+        .await
+        .expect("落ちないこと")
+        .expect_err("取り下げた起こし直しは断りで終わること")
+        .to_string();
+    assert!(
+        先の断り.contains("一覧から外す操作が始まった"),
+        "外し終える前の取り下げを、外したと言っていない: {先の断り}"
+    );
+
+    // 戻したら外せる（外した印はここで初めて立つ）
+    記録を外せるように戻す(&db).await;
+    agentdashboard_core::client::archive(&target, &card_id.to_string())
+        .await
+        .expect("記録を外せること");
+    assert!(
+        server.registry.get(card_id).is_none(),
+        "記録から外れていない"
+    );
+}
+
+#[tokio::test]
+async fn 寝かせた抜け殻を外したとき記録を書けなくても書けるようになれば一覧から外れる() {
+    // 実体がある側（PC が外す主）。PC は実体を畳み、外した印を立ててから「外した」と報告する。
+    // **報告は1回きり**で、以前は記録を書けなければ捨てていたので、カードは一覧に残るのに
+    // その PC では起こし直しが「一覧から外された」で断られ続けた（実装レビュー第3回 Astra 1 と
+    // 同じ種類の穴）。PC の側の外す処理は取り消せないので、記録の側が書けるまで取り込み直す
+    let server = common::TestServer::start_with(config_for("archive-reported-db-failed")).await;
+    let (session, _) = 呼び戻し先つきで起こす(&server).await;
+    let card_id = session.card_id;
+    session.kill();
+    server
+        .wait_for_listed("寝る", |listed| {
+            listed.iter().any(|meta| {
+                meta.card_id == card_id && matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    assert!(
+        server.manager.get(card_id).is_some(),
+        "抜け殻が居ないなら、PC が外す側を通らない"
+    );
+    // 取り込み直しは急かす口でだけ進める（時計に頼らない）
+    server
+        .registry
+        .外した報告の取り込み直しの間隔(Duration::from_secs(3_600));
+    let mut events = server.registry.subscribe_events();
+
+    let db = 記録を外せなくする(&server).await;
+    let target = target_of(&server);
+    // **画面と CLI が受け取るのは「保存できませんでした」**（記録層の知らせ）。外れたという
+    // 知らせは、記録を書けるまで出さない
+    let 外した = agentdashboard_core::client::archive(&target, &card_id.to_string()).await;
+    let 断り = 外した
+        .expect_err("記録を書けないうちは、外れたと言わないこと")
+        .to_string();
+    assert!(断り.contains("記録を保存できませんでした"), "{断り}");
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "PC の側は外し終えている"
+    );
+    assert!(
+        server.registry.get(card_id).is_some(),
+        "記録を書けないうちは、一覧に残っていること"
+    );
+
+    記録を外せるように戻す(&db).await;
+    let 外れた = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            server.registry.外した報告の取り込み直しを急かす();
+            match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
+                Ok(Ok(event)) => {
+                    if matches!(
+                        event.message,
+                        protocol::ws::ServerMessage::SessionRemoved { card_id: id } if id == card_id
+                    ) {
+                        return;
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    panic!("配信が閉じた")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        外れた.is_ok(),
+        "★PC が外したと報告したカードを、記録を書けるようになっても一覧から外していない"
+    );
+    assert!(
+        server.registry.get(card_id).is_none(),
+        "記録から外れていない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 確かめ中の起こし直しは、終了の頼みでも止まる（実装レビュー第3回 Astra 2）。
+//
+// **画面と CLI が通る「終了」の口（ws の `Kill`）から当てる。** 以前の終了は古い実体
+// （もう止まっている）だけを止め、確かめが済むと新しいプロセスを起こしていた。
+// ---------------------------------------------------------------------------
+
+/// 起こし直しを確かめで止めてから CLI で終了を頼み、**CLI が成功で返ること**・**取り下げた
+/// 起こし直しが断りで終わること**・**確かめが済んだ後も新しい実体が起きないこと**を見る。
+async fn 確かめ中に終了を頼む(server: &common::TestServer, card_id: protocol::CardId) {
+    let 前の実体 = server.manager.get(card_id);
+    let (外, host_free, _門) = common::確かめで止める(&server.manager);
+    let target = target_of(server);
+    let 起こし直し = tokio::spawn({
+        let target = target.clone();
+        async move { agentdashboard_core::client::revive(&target, &card_id.to_string()).await }
+    });
+    外.聞かれるまで待つ(0).await;
+
+    let 終了 = tokio::time::timeout(
+        Duration::from_secs(10),
+        agentdashboard_core::client::kill(&target, &card_id.to_string()),
+    )
+    .await
+    .expect("★終了の頼みが、起こし直しを止めた後も上限まで待ち続けている");
+    終了.expect("★起こし直しを止めたのに、終了できなかったと返している");
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let いまの実体 = server.manager.get(card_id);
+    assert_eq!(
+        いまの実体.as_ref().map(std::sync::Arc::as_ptr),
+        前の実体.as_ref().map(std::sync::Arc::as_ptr),
+        "★終了を頼んだ後に、確かめが済んだ起こし直しが新しいプロセスを起こしている"
+    );
+    let 断り = 起こし直し
+        .await
+        .expect("落ちないこと")
+        .expect_err("取り下げた起こし直しは断りで終わること")
+        .to_string();
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+    assert!(
+        server.registry.get(card_id).is_some(),
+        "終了しただけのカードは一覧に残ること"
+    );
+}
+
+#[tokio::test]
+async fn 寝かせた抜け殻を確かめ中に終了させると確かめが済んでも起こさない() {
+    // 報告の場面そのもの（終了済みの実体が残るカード）
+    let server = common::TestServer::start_with(config_for("revive-killed-asleep")).await;
+    let (session, _) = 呼び戻し先つきで起こす(&server).await;
+    let card_id = session.card_id;
+    session.kill();
+    server
+        .wait_for_listed("寝る", |listed| {
+            listed.iter().any(|meta| {
+                meta.card_id == card_id && matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    assert!(
+        server.manager.get(card_id).is_some(),
+        "終了済みの実体が残っていること"
+    );
+
+    確かめ中に終了を頼む(&server, card_id).await;
+}
+
+#[tokio::test]
+async fn 作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる() {
+    // 実体が無いカード（ローカルでは終了の頼みが PC へ届く）で、**最後の既知状態が `Ended`
+    // でない**もの（サーバだけが落ちた形）。`Ended` は来ないので、CLI は取り下げた起こし直しの
+    // 断りで満ちなければ、断りで「終了できなかった」と落ちるか上限まで待ち切る
+    let config = config_for("revive-killed-working");
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        server
+            .post_hook(session.token(), "UserPromptSubmit", "{}")
+            .await;
+        common::wait_for_status(&session, SessionStatus::Working).await;
+        server
+            .wait_for_listed("作業中", |listed| {
+                listed.len() == 1 && listed[0].status == SessionStatus::Working
+            })
+            .await;
+        session.card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let server = common::TestServer::start_with(config).await;
+    let listed = server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    assert!(listed[0].revivable(), "戻せる状態として見えていない");
+    // **ここが `Ended` だと、CLI は接続直後の写しで満ちてしまい、断りの道を通らない**
+    assert_eq!(listed[0].status, SessionStatus::Working, "最後の既知状態");
+    assert!(server.manager.get(card_id).is_none(), "実体が無いこと");
+
+    確かめ中に終了を頼む(&server, card_id).await;
 }

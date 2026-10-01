@@ -2235,3 +2235,233 @@ async fn 外す前の起こし直しの札が残っている間に届いた頼�
         "外したカードの実体が無いこと"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 実装レビュー第3回（Astra 1・2）
+// ---------------------------------------------------------------------------
+
+/// 終了済みの実体が残るカードを、Windows 側の確かめで止めて起こし直させる。返すのは
+/// 寝かせた古い実体と、切り離した起こし直しと、落ちたとき門を開ける札。
+async fn 寝かせて確かめ中にする(
+    manager: &Arc<SessionManager>,
+    card_id: CardId,
+) -> (
+    Arc<common::止める外側>,
+    Arc<session_host_core::resources::HostFree>,
+    Arc<Session>,
+    tokio::task::JoinHandle<Result<(), String>>,
+    common::門を開けて去る,
+) {
+    let 外 = common::止める外側::開いたまま();
+    let host_free = 外側を差す(
+        manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    頼む(manager, card_id).await.expect("1回目は起こせること");
+    manager.kill(card_id).expect("寝かせられること");
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+    let 古い実体 = manager.get(card_id).expect("抜け殻が残っていること");
+    wait_until("寝る", || {
+        matches!(古い実体.status(), SessionStatus::Ended { .. })
+    })
+    .await;
+
+    // 2回目は取り直させて、確かめの途中で止める
+    外.閉める();
+    let 門 = common::門を開けて去る(Arc::clone(&外));
+    host_free.覚えさせる(
+        6_000,
+        std::time::Instant::now() - Duration::from_secs(3_600),
+    );
+    let 聞く前 = 外.聞かれた();
+    let 起こし直し = 切り離して頼む(manager, card_id);
+    外.聞かれるまで待つ(聞く前).await;
+    (外, host_free, 古い実体, 起こし直し, 門)
+}
+
+#[tokio::test]
+async fn 確かめを待っている間に終了を頼むと確かめが済んでも起こさず後から起こし直せる() {
+    // 実装レビュー第3回 Astra 2。「確かめ待ち → 終了の頼み → 取得成功」の順。以前の `kill` は
+    // 古い実体（もう止まっている）だけを止めて札を下ろさなかったので、**確かめが済むと新しい
+    // プロセスが起きた**——終了を頼んだ後に起動していた
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let card_id = CardId::new();
+    let (外, host_free, 古い実体, 起こし直し, _門) =
+        寝かせて確かめ中にする(&manager, card_id).await;
+
+    manager
+        .kill(card_id)
+        .expect("寝ている実体があるので、終了の頼みは通ること");
+    let 結果 = timeout(Duration::from_secs(10), 起こし直し)
+        .await
+        .expect("★終了を頼まれたのに、確かめが済むまで席を握って待っている")
+        .expect("落ちないこと");
+    let 断り = 結果.expect_err("★終了を頼まれたのに、起こし直しを続けている");
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+
+    外.開ける();
+    wait_until("取得が済む", || host_free.聞き終えた回数() >= 1).await;
+    tokio::time::sleep(QUIET).await;
+    let いまの実体 = manager.get(card_id).expect("カードの実体は残っていること");
+    assert!(
+        Arc::ptr_eq(&いまの実体, &古い実体),
+        "★終了を頼んだ後に、新しいプロセスを起こしている"
+    );
+    assert!(
+        matches!(いまの実体.status(), SessionStatus::Ended { .. }),
+        "寝たままであること"
+    );
+    assert_eq!(manager.reserved_revives(), 0, "予約を残していない");
+
+    // **外したときと違い、印は残さない。** 後から頼めば起こし直せる
+    頼む(&manager, card_id)
+        .await
+        .expect("★終了を頼んだだけのカードを、外したカードのように断っている");
+}
+
+#[tokio::test]
+async fn 起こしている最中に終了を頼むと断らずに起こした実体を止めてカードは残る() {
+    // 起こしている最中は、古い実体を畳み終え、新しい実体はまだ表に無い。**実体だけを見ると
+    // 「見つかりません」と断り**、起こし終えた実体が動き続けていた
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    let 頼んだ結果: Arc<std::sync::Mutex<Option<Result<(), String>>>> = Arc::default();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 頼んだ結果 = Arc::clone(&頼んだ結果);
+        // **1回目の起こし直しにだけ差し込む。** 後で起こし直せることを確かめる2回目まで止める
+        let 済んだ = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.起こす直前に差し込む(Arc::new(move || {
+            if 済んだ.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let Some(manager) = manager_weak.upgrade() else {
+                return;
+            };
+            let (送る, 受ける) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = 送る.send(manager.kill(card_id).map_err(|err| err.to_string()));
+            });
+            let 結果 = 受ける
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| Err("時間切れ".to_string()));
+            *頼んだ結果.lock().expect("ロックが壊れていない") = Some(結果);
+        }));
+    }
+
+    let 結果 = 頼む(&manager, card_id).await;
+    assert_eq!(
+        頼んだ結果.lock().expect("ロックが壊れていない").clone(),
+        Some(Ok(())),
+        "★起こしている最中の終了の頼みを、見つからないと断っている"
+    );
+    let 断り = 結果.expect_err("終了を頼まれたのだから断ること");
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+    let 実体 = manager
+        .get(card_id)
+        .expect("★起こした実体を畳んでいる（止めるだけでカードは残す）");
+    wait_until("起こした実体が止まる", || {
+        matches!(実体.status(), SessionStatus::Ended { .. })
+    })
+    .await;
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+    頼む(&manager, card_id)
+        .await
+        .expect("★終了を頼んだだけのカードを、後から起こし直せない");
+}
+
+#[tokio::test]
+async fn 終了の頼みの後に外されたら外した側の断りになり逆には戻らない() {
+    // 2つの理由で札が下ろされたら、強いほう（外した）を残す
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let card_id = CardId::new();
+    let (_外, _host_free, _古い実体, 起こし直し, _門) =
+        寝かせて確かめ中にする(&manager, card_id).await;
+
+    // 起こす側がまだ断りを返していないうちに、両方を下ろす
+    manager.kill(card_id).expect("終了の頼みは通ること");
+    assert!(manager.forget(card_id), "片付けたものがあること");
+    manager.stop_for_removal(card_id);
+    let 断り = timeout(Duration::from_secs(10), 起こし直し)
+        .await
+        .expect("待たずにやめること")
+        .expect("落ちないこと")
+        .expect_err("起こさずに断ること");
+    assert!(
+        断り.contains("一覧から外された"),
+        "★外した後に届いた弱い理由（終了・外し始め）で、外した断りを上書きしている: {断り}"
+    );
+}
+
+#[tokio::test]
+async fn 外し始めの取り下げは印を残さず記録を外せなければ後から起こし直せる() {
+    // 実装レビュー第3回 Astra 1。記録の側で外し始めたら、まず起こし直しを止める。**印は
+    // 記録を外せた後（`forget`）にしか立てない**——記録を外せなければカードは一覧に残るので、
+    // ここで印を立てると二度と起こせなくなる
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = Arc::new(common::止める外側::default());
+    let _門 = common::門を開けて去る(Arc::clone(&外));
+    let host_free = 外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    let 起こし直し = 切り離して頼む(&manager, card_id);
+    外.聞かれるまで待つ(0).await;
+
+    assert!(
+        manager.stop_for_removal(card_id),
+        "進んでいた起こし直しを止めたこと"
+    );
+    let 断り = timeout(Duration::from_secs(10), 起こし直し)
+        .await
+        .expect("確かめが済むのを待たずにやめること")
+        .expect("落ちないこと")
+        .expect_err("起こさずに断ること");
+    外.開ける();
+    wait_until("取得が済む", || host_free.聞き終えた回数() >= 1).await;
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        manager.get(card_id).is_none(),
+        "★止めた起こし直しを、確かめが済んだ後に起こしている"
+    );
+
+    // 記録を外せなかった（`forget` が来ない）。**取り下げた古い頼みは戻らないが、新しい頼みは通る**
+    頼む(&manager, card_id)
+        .await
+        .expect("★外し始めただけのカードを、外したカードとして断っている");
+    assert!(
+        断り.contains("一覧から外す操作が始まった"),
+        "外し終える前の取り下げを、外したと言っていない: {断り}"
+    );
+    // 外し終えたら（`forget`）、以後の頼みは断る
+    manager.forget(card_id);
+    let 断り = 頼む(&manager, card_id)
+        .await
+        .expect_err("外し終えたカードへの頼みは断ること");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+}
+
+#[tokio::test]
+async fn 何も持っていないカードを外し始めても断らない() {
+    let manager = common::manager_with(実機の設定());
+    assert!(
+        !manager.stop_for_removal(CardId::new()),
+        "何もしていないのに止めたと答えている"
+    );
+    assert!(
+        matches!(
+            manager.kill(CardId::new()),
+            Err(session_host_core::session::SessionError::NotFound(_))
+        ),
+        "終了の頼みは従来どおり、何も無ければ見つからないと断る"
+    );
+}

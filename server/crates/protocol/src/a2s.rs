@@ -568,6 +568,19 @@ pub enum ServerToAgent {
     Forget {
         card_id: CardId,
     },
+    /// **記録の側だけで外し始めた**カードの起こし直しを止めよ（実装レビュー第3回 Astra 1）。
+    /// 記録を外す**前に**送る。
+    ///
+    /// [`ServerToAgent::Forget`] と違い、**外した印は立てない**。印を立てるのは、記録を外せた
+    /// 後に続く `Forget` の仕事である——外す前に印を立てると、記録を外せなかったとき
+    /// 一覧に残ったカードが、その PC では二度と起こし直せなくなる。止め方は `Kill` と同じで、
+    /// 起こし直しが進んでいれば取り下げ、実体があれば止める（畳まない）。**何も無ければ黙る。**
+    ///
+    /// 古い PC はこの種別を無視する。そのときは、外せた後の `Forget` が届くまで起こし直しは
+    /// 止まらない（外せなかったときは止まらない）。
+    StopForRemoval {
+        card_id: CardId,
+    },
     /// Composer からの指示。PTY へ届くまでの作法（初期実装§18）はセッションホスト側の責任（§5-5）
     SendInput {
         card_id: CardId,
@@ -1024,6 +1037,7 @@ mod tests {
             ServerToAgent::Kill { card_id },
             ServerToAgent::Archive { card_id },
             ServerToAgent::Forget { card_id },
+            ServerToAgent::StopForRemoval { card_id },
             ServerToAgent::SendInput {
                 card_id,
                 text: "/rewind".to_string(),

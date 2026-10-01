@@ -1203,6 +1203,39 @@ impl RemoteSessionHost {
     ///
     /// **自分の接続表に無くても諦めない**（設計§9-2）。記録が「繋がっている」と
     /// 言うなら、その PC は別のインスタンスに繋がっている——連絡係へ回せば届く。
+    /// 記録が名乗る PC へ、カードを外す段取りの知らせを送る（実装レビュー Astra 1・第3回）。
+    ///
+    /// **`relay` を使えない**のは [`RemoteSessionHost::revive`] と同じ理由——対象は定義上
+    /// `agent_connected == false` で、`relay` は必ず「繋がっていません」で断る。宛先は記録が
+    /// 名乗る PC で、[`RemoteSessionHost::route`] で引く。
+    ///
+    /// **起こし直しを名乗る PC にだけ送る**（`Need::Revive`）。名乗らない PC は起こし直しを
+    /// していないし、知らない種別は黙って捨てるだけである。`owner` が `None`（ローカルの
+    /// 記録）なら、知らせる PC が無い。
+    async fn tell_owner(
+        &self,
+        account_id: Uuid,
+        owner: Option<AgentId>,
+        message: ServerToAgent,
+    ) -> Result<(), String> {
+        let Some(target) = owner else {
+            return Ok(());
+        };
+        let route = self
+            .route(account_id, target, Need::Revive)
+            .await
+            .map_err(|err| err.message())?;
+        match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
+        }
+    }
+
     fn relay(&self, card_id: CardId, message: ServerToAgent) -> Result<(), String> {
         if let Some(conn) = self.hub.conn_for_card(card_id) {
             conn.send(&message);
@@ -1468,39 +1501,29 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         self.relay(card_id, ServerToAgent::Archive { card_id })
     }
 
-    /// 記録の側だけで外すカードを、持ち主の PC へ知らせる（実装レビュー Astra 1）。
-    ///
-    /// **`relay` を使えない**のは [`RemoteSessionHost::revive`] と同じ理由——対象は定義上
-    /// `agent_connected == false` で、`relay` は必ず「繋がっていません」で断る。宛先は記録が
-    /// 名乗る PC で、[`RemoteSessionHost::route`] で引く。
-    ///
-    /// **起こし直しを名乗る PC にだけ送る**（`Need::Revive`）。名乗らない PC は起こし直しを
-    /// していないし、知らない種別は黙って捨てるだけである。
-    async fn forget(&self, account_id: Uuid, card_id: CardId) -> Result<(), String> {
-        let meta = self
-            .hub
-            .registry
-            .owned(account_id, card_id)
-            .map(|record| record.meta())
-            .ok_or_else(|| NOT_FOUND.to_string())?;
-        // 名乗らないのはローカルの記録だけ。知らせる PC が無い
-        let Some(target) = meta.agent_id else {
-            return Ok(());
-        };
-        let route = self
-            .route(account_id, target, Need::Revive)
+    /// 記録の側だけで外したカードを、持ち主の PC へ知らせる（実装レビュー Astra 1）。
+    /// **記録を外せた後に呼ばれる**（実装レビュー第3回 Astra 1）ので、宛先は記録を外す前に
+    /// 引いたもの（`owner`）を使う。
+    async fn forget(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+        owner: Option<AgentId>,
+    ) -> Result<(), String> {
+        self.tell_owner(account_id, owner, ServerToAgent::Forget { card_id })
             .await
-            .map_err(|err| err.message())?;
-        let message = ServerToAgent::Forget { card_id };
-        match route {
-            Route::Here(conn) => {
-                conn.send(&message);
-                Ok(())
-            }
-            Route::Across => self
-                .hub
-                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
-        }
+    }
+
+    /// 記録の側だけで外し始めたカードの起こし直しを、持ち主の PC で止める（実装レビュー
+    /// 第3回 Astra 1）。記録を外す前に呼ばれる。
+    async fn stop_for_removal(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+        owner: Option<AgentId>,
+    ) -> Result<(), String> {
+        self.tell_owner(account_id, owner, ServerToAgent::StopForRemoval { card_id })
+            .await
     }
 
     /// 画面の配信を始める（設計§7-4）。

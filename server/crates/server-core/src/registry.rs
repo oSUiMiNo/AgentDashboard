@@ -41,11 +41,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 /// 一覧の更新通知の待ち行列（メッセージ数）。
@@ -53,6 +54,11 @@ use uuid::Uuid;
 /// 取りこぼした購読者は `GET /api/sessions` で取り直せる（[`crate::ws`]）ので、
 /// ここで待たない。一覧の更新がセッションの実行を遅らせてはいけない。
 const EVENT_QUEUE_MESSAGES: usize = 256;
+
+/// 書けなかった「外した」の報告を取り込み直す間隔の、初めと上限（[`SessionRegistry::retry_removal`]）。
+/// 失敗するたびに倍にする。DB が止まっている間、1分に1回より多くは叩かない。
+const REMOVAL_RETRY_FIRST: Duration = Duration::from_secs(1);
+const REMOVAL_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// 在席の印がこれだけ古くなったら死んだものとみなす（ミリ秒。設計§9-4）。
 ///
@@ -358,6 +364,13 @@ pub struct SessionRegistry {
     /// 待つ側は始める前の値を控え（[`Self::revive_refusal_mark`]）、それより後に残った
     /// 断りだけを拾う。時刻にしないのは、同じ時刻に並ぶと前後を決められないため。
     refusal_seq: AtomicU64,
+    /// 自分への弱い参照。`apply` は `&self` で呼ばれるので、書けなかった「外した」の報告を
+    /// 切り離して取り込み直す（[`Self::retry_removal`]）ための `Arc` を自分で引く
+    me: Weak<Self>,
+    /// 取り込み直しの間隔の初め。**テストだけが延ばす**（急かす口で1回ずつ進めるため）
+    removal_retry_first: Mutex<Duration>,
+    /// 取り込み直しを急かす口（**テスト用**）。値は回数で、変わったら待たずに次を試す
+    removal_retry_kick: watch::Sender<u64>,
 }
 
 /// 保管している使用上限と、**それが誰のものか**。
@@ -470,7 +483,7 @@ impl SessionRegistry {
         // 残っていた**。容量のぶんは同意が要るので、ここで掃くのは期間ぶんだけである
         db::memo_blobs::start_sweeper(db.clone(), db::settings::DEFAULT_MEMO_RETENTION_DAYS);
 
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|me| Self {
             db,
             records: Mutex::new(records),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
@@ -483,6 +496,9 @@ impl SessionRegistry {
             branches: Mutex::new(branches),
             rate_limits: Mutex::new(HashMap::new()),
             refusal_seq: AtomicU64::new(0),
+            me: me.clone(),
+            removal_retry_first: Mutex::new(REMOVAL_RETRY_FIRST),
+            removal_retry_kick: watch::channel(0).0,
         }))
     }
 
@@ -1973,7 +1989,13 @@ impl SessionRegistry {
     pub async fn apply(&self, origin: &ReportOrigin, message: ServerMessage) -> bool {
         let outcome = match message {
             ServerMessage::SessionUpsert { session } => self.upsert(origin, *session).await,
-            ServerMessage::SessionRemoved { card_id } => self.archive(origin, card_id).await,
+            ServerMessage::SessionRemoved { card_id } => {
+                let outcome = self.archive(origin, card_id).await;
+                if outcome.is_err() {
+                    self.retry_removal(origin, card_id);
+                }
+                outcome
+            }
             ServerMessage::Status {
                 card_id,
                 status,
@@ -2260,6 +2282,95 @@ impl SessionRegistry {
         }
         tracing::warn!(%card_id, "他のアカウントのカードへの報告を無視しました");
         true
+    }
+
+    /// セッションホストが「外した」と報告してきたのに記録を書けなかったカードを、書けるまで
+    /// 切り離して取り込み直す（実装レビュー第3回 Astra 1 と同じ種類の穴）。
+    ///
+    /// # なぜ取り込み直すのか
+    ///
+    /// **PC の側では外す処理が済んでいて、取り消せない**——実体を畳み、添付を消し、外した印を
+    /// 立てている。報告は1回きりで、以前は書けなければ捨てていた。するとカードは一覧に残るのに、
+    /// その PC では以後の起こし直しが「一覧から外された」で断られ続けた（プロセスが起き直す
+    /// まで）。報告の運び手の約束「遅れは許容し、欠落は許容しない」に、記録の側を合わせる。
+    ///
+    /// **記録だけを外す口（[`Self::archive_owned`]）は取り込み直さない。** あちらは記録の側が
+    /// 外す主なので、外せなければ利用者へ断り、PC には外した印を立てさせない（`ws.rs`）。
+    /// ここを [`Self::archive`] の中へ入れると、断ったはずの外す操作が後から効いてしまう。
+    ///
+    /// # いつやめるか
+    ///
+    /// 書けたら終わる。**手元の記録からカードが消えていても終わる**——ほかの道で外れた
+    /// （記録は書けたときにだけ手元から消える）ので、もう要らない。
+    ///
+    /// # 残り
+    ///
+    /// 取り込み直している間にこのサーバが落ちると、取り込み直しも消える。セルフホストでは
+    /// カードが一覧に戻り、PC の印は PC が起き直すまで残る。ローカルは記録と印が同じ
+    /// プロセスにあるので、起き直せば両方が揃って消える。
+    fn retry_removal(&self, origin: &ReportOrigin, card_id: CardId) {
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let origin = origin.clone();
+        // **切り離す前に購読する。** 切り離した後だと、その間に急かされても取りこぼす
+        let mut kicks = self.removal_retry_kick.subscribe();
+        let mut wait = *self
+            .removal_retry_first
+            .lock()
+            .expect("ロックが壊れていない");
+        tracing::warn!(
+            %card_id,
+            "外したと報告されたカードの記録を書けませんでした。書けるまで取り込み直します"
+        );
+        tokio::spawn(async move {
+            let mut attempt: u32 = 1;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    // 送り手は自分（`me`）が持っているので閉じない
+                    _ = kicks.changed() => {}
+                }
+                if me.get(card_id).is_none() {
+                    return;
+                }
+                attempt += 1;
+                match me.archive(&origin, card_id).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            %card_id,
+                            attempt,
+                            "外したと報告されたカードを、取り込み直して記録から外しました"
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        wait = (wait * 2).min(REMOVAL_RETRY_MAX);
+                        tracing::warn!(
+                            %card_id,
+                            attempt,
+                            "外したと報告されたカードの記録をまだ書けません。{wait:?} 後にもう一度試します: {err}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// 取り込み直しの間隔の初めを変える（**テスト専用**）。長くしておけば、急かす口
+    /// （[`Self::外した報告の取り込み直しを急かす`]）でだけ進む——時計に頼らずに確かめられる。
+    #[doc(hidden)]
+    pub fn 外した報告の取り込み直しの間隔(&self, first: Duration) {
+        *self
+            .removal_retry_first
+            .lock()
+            .expect("ロックが壊れていない") = first;
+    }
+
+    /// 待っている取り込み直しを、待たずに1回進める（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 外した報告の取り込み直しを急かす(&self) {
+        self.removal_retry_kick.send_modify(|count| *count += 1);
     }
 
     /// ブラウザからの指示でカードを外す（実体がもう居ない場合）。

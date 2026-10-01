@@ -554,20 +554,40 @@ pub enum SessionError {
     /// これを見て、上限まで待たずに終われる。
     #[error("一覧から外されたので、起こし直しをやめました")]
     Withdrawn(CardId),
+    /// 起こし直しの途中で終了を頼まれたので、起こさずにやめた（実装レビュー第3回 Astra 2）。
+    ///
+    /// **外したとき（[`SessionError::Withdrawn`]）と違い、外した印は残さない**——カードは
+    /// 一覧に残り、後から起こし直せる。終わった断りとして配るのは同じ。
+    #[error("終了を頼まれたので、起こし直しをやめました")]
+    StoppedByKill(CardId),
+    /// 起こし直しの途中で、記録の側から一覧から外し始めたので、起こさずにやめた
+    /// （実装レビュー第3回 Astra 1）。
+    ///
+    /// **外し終える前の取り下げ**なので印は残さない。記録を外せなければカードは一覧に残り、
+    /// 後から起こし直せる。外し終えたら、印は後から届く `Forget` が立てる。
+    #[error("一覧から外す操作が始まったので、起こし直しをやめました")]
+    StoppedByRemoval(CardId),
 }
 
 /// 起こし直しを取り下げたことを1行残し、断りを作る（実装レビュー Astra 1）。
 ///
 /// どの段で気づいたかを残す。席待ち・確かめの途中で気づけば、席や待ち時間を
-/// 無駄に握らずに済んだことが後から分かる。
-fn withdrawn(card_id: CardId, stage: &'static str) -> SessionError {
+/// 無駄に握らずに済んだことが後から分かる。**なぜ下ろされたか**も残す——外した・
+/// 外し始めた・終了を頼まれた、で後から起こし直せるかが違う。
+fn withdrawn(card_id: CardId, reason: WithdrawReason, stage: &'static str) -> SessionError {
+    let refusal = match reason {
+        WithdrawReason::Kill => SessionError::StoppedByKill(card_id),
+        WithdrawReason::Removing => SessionError::StoppedByRemoval(card_id),
+        WithdrawReason::Remove => SessionError::Withdrawn(card_id),
+    };
     tracing::info!(
         %card_id,
         kind = "revive_withdrawn",
+        reason = reason.as_str(),
         stage,
-        "一覧から外されたので、起こし直しをやめました"
+        "{refusal}"
     );
-    SessionError::Withdrawn(card_id)
+    refusal
 }
 
 /// メモリ不足の断りの文面（設計§6-1）。**制約ごとに、利用者がすることを言い分ける。**
@@ -2518,8 +2538,10 @@ pub struct ReviveInFlight {
 /// 確かめを待っている間（最大 65 秒）にカードを一覧から外しても、以前は取り消されず、
 /// 確かめが済んだ後に**誰にも見えないプロセスを起こしていた**（外したカードの報告は
 /// サーバが捨てるので、画面に出ないままメモリだけを食う）。外す側
-/// （[`SessionManager::forget`]・[`SessionManager::archive`]）が札を下ろし、起こす側は
-/// 起こす直前にそれを見る。
+/// （[`SessionManager::forget`]・[`SessionManager::archive`]）と、止める側
+/// （[`SessionManager::kill`]・[`SessionManager::stop_for_removal`]。実装レビュー第3回）が
+/// 札を下ろし、起こす側は起こす直前にそれを見る。**なぜ下ろしたか**（[`WithdrawReason`]）で、
+/// 起こし終えた実体を畳むか止めるかが分かれる。
 ///
 /// # 外す側を待たせない（実装レビュー第2回 Fable 5）
 ///
@@ -2538,9 +2560,35 @@ struct ReviveTicket {
 
 #[derive(Default)]
 struct TicketState {
-    /// 下ろされたか
-    withdrawn: bool,
+    /// 下ろされたか、なぜ下ろされたか
+    withdrawn: Option<WithdrawReason>,
     stage: ReviveStage,
+}
+
+/// 札を下ろした理由（実装レビュー第3回）。**起こしている最中に下ろされたとき、起こし終えた
+/// 実体をどうするか**がこれで決まる。
+///
+/// 並びは強さの順。2つの理由で下ろされたら強いほうを残す——終了を頼んだ後に外されたら
+/// 外したことになり、逆には戻らない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WithdrawReason {
+    /// 終了の頼み。起こし終えた実体は**止める**（畳まない）——カードは `Ended` で残る
+    Kill,
+    /// 記録の側で外し始めた（まだ外れていない）。止め方は終了と同じ。外せなかったら
+    /// カードが一覧に残るので、畳むと抜け殻すら無いカードになる
+    Removing,
+    /// 一覧から外した。起こし終えた実体は**畳む**
+    Remove,
+}
+
+impl WithdrawReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Kill => "kill",
+            Self::Removing => "removing",
+            Self::Remove => "remove",
+        }
+    }
 }
 
 /// 起こし直しがどこまで進んだか。**外す側が、畳むのは誰かを決めるのに読む。**
@@ -2556,11 +2604,12 @@ enum ReviveStage {
 }
 
 impl ReviveTicket {
-    /// 札を下ろし、**下ろした時点の段**を返す。待たない。
-    fn withdraw(&self) -> ReviveStage {
+    /// 札を下ろし、**下ろした時点の段**を返す。待たない。既に下ろされていれば、理由は
+    /// 強いほうを残す（[`WithdrawReason`]）。
+    fn withdraw(&self, reason: WithdrawReason) -> ReviveStage {
         let stage = {
             let mut state = self.state.lock().expect("ロックが壊れていない");
-            state.withdrawn = true;
+            state.withdrawn = state.withdrawn.max(Some(reason));
             state.stage
         };
         // **待っている者が居なくても知らせを1つ残す**（`notify_one`）。見てから待ち始める
@@ -2569,16 +2618,18 @@ impl ReviveTicket {
         stage
     }
 
-    fn is_withdrawn(&self) -> bool {
+    fn withdrawn_reason(&self) -> Option<WithdrawReason> {
         self.state.lock().expect("ロックが壊れていない").withdrawn
     }
 
-    /// 下ろされるまで待つ。
-    async fn withdrawn(&self) {
-        if self.is_withdrawn() {
-            return;
+    /// 下ろされるまで待ち、理由を返す。
+    async fn withdrawn(&self) -> WithdrawReason {
+        loop {
+            if let Some(reason) = self.withdrawn_reason() {
+                return reason;
+            }
+            self.woken.notified().await;
         }
-        self.woken.notified().await;
     }
 }
 
@@ -3568,10 +3619,68 @@ impl SessionManager {
     }
 
     /// セッションを終了させる。カードは Ended 表示で残る（設計§6）。
+    ///
+    /// **進んでいる起こし直しも取り下げる**（実装レビュー第3回 Astra 2）。終了済みの実体が
+    /// 残るカードを起こし直している間（確かめは最大 65 秒）に終了を頼むと、以前は古い実体
+    /// だけを止め、確かめが済んだ後に新しいプロセスを起こしていた。**外したときと違い、
+    /// 外した印は残さない**——後から起こし直せる。
+    ///
+    /// 実体が無くても、取り下げた起こし直しがあれば断らない。起こしている最中は古い実体を
+    /// 畳み終え、新しい実体がまだ表に無いので、実体だけを見ると止めたのに見つからないと言う。
     pub fn kill(&self, card_id: CardId) -> Result<(), SessionError> {
-        let session = self.get(card_id).ok_or(SessionError::NotFound(card_id))?;
-        session.kill();
-        Ok(())
+        if self.halt(card_id, WithdrawReason::Kill) {
+            Ok(())
+        } else {
+            Err(SessionError::NotFound(card_id))
+        }
+    }
+
+    /// 記録の側から一覧から外し始めたカードを、この PC で止める（実装レビュー第3回 Astra 1）。
+    /// **記録を外す前に**届く。止め方は終了（[`SessionManager::kill`]）と同じで、外した印は
+    /// 残さない。何も無くても断らない（サーバはこの PC が持っているかを知らずに送る）。
+    ///
+    /// 印を立てるのは、記録を外せた後に届く [`SessionManager::forget`] の仕事である。ここで
+    /// 立てると、記録を外せなかったとき一覧に残ったカードを二度と起こせなくなる。
+    pub fn stop_for_removal(&self, card_id: CardId) -> bool {
+        self.halt(card_id, WithdrawReason::Removing)
+    }
+
+    /// 進んでいる起こし直しを取り下げ、実体があれば止める。**印は残さない。** 止めたもの
+    /// （札か実体）があったかを返す。
+    ///
+    /// 札を下ろしてから実体を止める。逆にすると、止めた直後に確かめを終えた起こし直しが
+    /// 新しい実体を作る。
+    fn halt(&self, card_id: CardId, reason: WithdrawReason) -> bool {
+        let ticket = self
+            .reviving
+            .lock()
+            .expect("ロックが壊れていない")
+            .tickets
+            .get(&card_id)
+            .cloned();
+        // 下ろすのは表のロックを離してから（[`SessionManager::retire`] と同じ）
+        if let Some(ticket) = &ticket {
+            let what = match reason {
+                WithdrawReason::Kill => "終了を頼まれたので",
+                _ => "一覧から外し始めたので",
+            };
+            match ticket.withdraw(reason) {
+                ReviveStage::Waiting => {
+                    tracing::info!(%card_id, "{what}、進んでいた起こし直しを取り下げます");
+                }
+                ReviveStage::Spawning => tracing::info!(
+                    %card_id,
+                    "起こしている最中に{what}、起こし終えたところで止めさせます"
+                ),
+                // 起こし終えていれば、下の実体を止めるだけ（いつもの終了と同じ）
+                ReviveStage::Spawned => {}
+            }
+        }
+        let session = self.get(card_id);
+        if let Some(session) = &session {
+            session.kill();
+        }
+        ticket.is_some() || session.is_some()
     }
 
     /// 実体を畳む。**カードが消えたことは配らない。**
@@ -3682,7 +3791,8 @@ impl SessionManager {
         let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
         if reviving.removed.contains(&card_id) {
             let ticket = ReviveTicket::default();
-            ticket.state.lock().expect("ロックが壊れていない").withdrawn = true;
+            ticket.state.lock().expect("ロックが壊れていない").withdrawn =
+                Some(WithdrawReason::Remove);
             return Some(ReviveInFlight {
                 manager: Arc::clone(self),
                 card_id,
@@ -3730,7 +3840,7 @@ impl SessionManager {
             return Some(None);
         };
         // 下ろすのは表のロックを離してから（札のロックは短いが、入れ子にしない）
-        let stage = ticket.withdraw();
+        let stage = ticket.withdraw(WithdrawReason::Remove);
         // **段で言い分ける**（実装レビュー第2回 Fable 3）。止まったかどうかの本人の言い分は、
         // 起こす側の `revive_withdrawn`（段付き）が残す
         match stage {
@@ -3819,8 +3929,8 @@ impl SessionManager {
         // 下の席待ちの `select!` に任せると、席が空いているときは席の腕が選ばれうる
         // （準備のできた腕は無作為に選ばれる）。外側の取得より前に見るのは、外したカードの
         // ために `powershell.exe` を起こさないため
-        if ticket.is_withdrawn() {
-            return Err(withdrawn(card_id, "受け付けた時点"));
+        if let Some(reason) = ticket.withdrawn_reason() {
+            return Err(withdrawn(card_id, reason, "受け付けた時点"));
         }
         // **受付の時点で外側を取りに行かせる**（寝ているカードばかりなのに、メモリ不足で
         // セッションを起こせない 設計§2-6）。取得と席待ちが重なるので、席が空くころには
@@ -3841,7 +3951,9 @@ impl SessionManager {
             seat = Arc::clone(&self.revive_slots).acquire_owned() => {
                 seat.expect("席の口を閉じていない")
             }
-            () = ticket.withdrawn() => return Err(withdrawn(card_id, "席を待っている間")),
+            reason = ticket.withdrawn() => {
+                return Err(withdrawn(card_id, reason, "席を待っている間"));
+            }
         };
 
         // **床は席を取った直後に見る**（設計§18-3）。順序はコンパイラが見張っている
@@ -3857,8 +3969,8 @@ impl SessionManager {
         // 確かめの途中で手放しても、予約はまだ取っていない（取るのは確かめた後の同期の段）
         let reservation = tokio::select! {
             judged = self.judge_memory(card_id, &seat, &物差し) => judged?,
-            () = ticket.withdrawn() => {
-                return Err(withdrawn(card_id, "Windows 側の空きを確かめている間"));
+            reason = ticket.withdrawn() => {
+                return Err(withdrawn(card_id, reason, "Windows 側の空きを確かめている間"));
             }
         };
 
@@ -3868,8 +3980,8 @@ impl SessionManager {
         // 作っている間は握らない。握ると、外す側が実行時のワーカーごと止まって待つ
         {
             let mut state = ticket.state.lock().expect("ロックが壊れていない");
-            if state.withdrawn {
-                return Err(withdrawn(card_id, "確かめた後"));
+            if let Some(reason) = state.withdrawn {
+                return Err(withdrawn(card_id, reason, "確かめた後"));
             }
             state.stage = ReviveStage::Spawning;
         }
@@ -3897,21 +4009,42 @@ impl SessionManager {
             // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
             Some(claude_session_id),
         );
-        // **作り終えた印を立てるのと、作っている間に外されたかを見るのは一度に行う。**
-        // この後に外されたら、畳むのは外す側になる
-        let 作っている間に外された = {
+        // **作り終えた印を立てるのと、作っている間に下ろされたかを見るのは一度に行う。**
+        // この後に下ろされたら、片付けるのは下ろした側になる
+        let 作っている間に下ろされた = {
             let mut state = ticket.state.lock().expect("ロックが壊れていない");
             state.stage = ReviveStage::Spawned;
             state.withdrawn
         };
-        if 作っている間に外された {
-            // 外す側は畳まずに戻っている。**ここで畳まないと、誰にも見えない実体が残る。**
-            // 作るのに失敗していれば畳むものは無く、断りは外されたことのほうを返す
-            // （作れなかった理由は、外したカードの利用者には意味が無い）
-            if self.fold(card_id).is_some() {
-                tracing::info!(%card_id, "起こしている最中に外されたので、起こした実体を畳みました");
+        if let Some(reason) = 作っている間に下ろされた {
+            // 下ろした側は片付けずに戻っている。**ここで片付けないと、頼まれていない実体が残る。**
+            // 作るのに失敗していれば片付けるものは無く、断りは下ろされたことのほうを返す
+            // （作れなかった理由は、もう起こさないと決めた利用者には意味が無い）
+            match reason {
+                // 外したカードは畳む（報告は記録層に捨てられ、画面に出ないまま残る）
+                WithdrawReason::Remove => {
+                    if self.fold(card_id).is_some() {
+                        tracing::info!(
+                            %card_id,
+                            "起こしている最中に外されたので、起こした実体を畳みました"
+                        );
+                    }
+                }
+                // 終了の頼み・外し始めは**止めるだけ**（実装レビュー第3回）。カードは
+                // `Ended` で残り、後から起こし直せる。畳むと、外せなかったときに抜け殻すら
+                // 無いカードが一覧に残る
+                WithdrawReason::Kill | WithdrawReason::Removing => {
+                    if let Ok(session) = &spawned {
+                        session.kill();
+                        tracing::info!(
+                            %card_id,
+                            reason = reason.as_str(),
+                            "起こしている最中に止めるよう頼まれたので、起こした実体を止めました"
+                        );
+                    }
+                }
             }
-            return Err(withdrawn(card_id, "起こしている間"));
+            return Err(withdrawn(card_id, reason, "起こしている間"));
         }
         let session = spawned?;
 

@@ -188,6 +188,18 @@ impl Goal {
         {
             return Step::Note(format!("（外す前に進んでいた起こし直しの知らせ）{message}"));
         }
+        // **終了の待ちは、そのカードの起こし直しが終わった断りでも満ちる**（実装レビュー第3回
+        // Astra 2）。終了の頼みは進んでいた起こし直しを取り下げ、その断り（種別 `revive`）が届く。
+        // 下の規則のまま読むと、止まったのに「終了できませんでした」と言う。聞き流すだけにすると、
+        // 実体の無いカード（起こし直しの途中だった）では `Ended` が来ないので上限まで待ち切る。
+        //
+        // 競合（`busy: Some(true)`）は満たさない——先に起こしている側が居て、止まっていない
+        if let Self::Ended { card } = &*self
+            && let Some((errored, refusal)) = server_core::registry::revive_refusal_of(message)
+            && errored == *card
+        {
+            return done(format!("起こし直しは止まりました（{refusal}）"), message);
+        }
         // **枝分かれの待ちは、元のセッションの起こし直しの知らせでは落ちない**（実装
         // レビュー第2回 Astra 2）。寝ている元はサーバの段取りが起こすので、その知らせが元の
         // 席宛てに届く。競合（人が先に起こしていた）なら待てば起きるし、終わった断りなら
@@ -740,6 +752,61 @@ mod tests {
                 card_id: None,
                 message: "起こせませんでした".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
+            }),
+            Step::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn 終了待ちは起こし直しが終わった断りで止まったと満ち競合では待ち続ける() {
+        // 実装レビュー第3回 Astra 2。終了の頼みは進んでいた起こし直しを取り下げ、その断りが
+        // 届く。**止まったのに「終了できませんでした」と言わない**し、実体の無いカード
+        // （`Ended` が来ない）で上限まで待ち切らない
+        let card = CardId::new();
+        let mut goal = Goal::Ended { card };
+        assert!(
+            matches!(
+                goal.observe(&ServerMessage::Error {
+                    card_id: Some(card),
+                    message: "既に起こし直している最中です".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(true),
+                }),
+                Step::Fail(_) | Step::Continue
+            ),
+            "競合で満ちないこと"
+        );
+        match goal.observe(&ServerMessage::Error {
+            card_id: Some(card),
+            message: "終了を頼まれたので、起こし直しをやめました".to_string(),
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+        }) {
+            Step::Done(outcome) => assert!(
+                outcome.human.contains("起こし直しは止まりました"),
+                "{}",
+                outcome.human
+            ),
+            _ => panic!("★取り下げた起こし直しの断りで、終了の待ちが満ちていない"),
+        }
+        // 別のカードの断りでは満ちない
+        let mut goal = Goal::Ended { card };
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(CardId::new()),
+                message: "終了を頼まれたので、起こし直しをやめました".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
+            }),
+            Step::Note(_)
+        ));
+        // 終了そのものの断りは従来どおり落ちる
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(card),
+                message: "セッションが見つかりません".to_string(),
+                kind: ErrorKind::Kill,
                 busy: None,
             }),
             Step::Fail(_)

@@ -862,12 +862,26 @@ async fn handle_request(
             }
             // **記録だけを外すときも、持ち主の PC には知らせる**（実装レビュー Astra 1）。
             // 実体が無く見えても、PC がそのカードを起こし直している途中でありうる——知らせないと、
-            // 確かめが済んだ後に起きたプロセスが画面に出ないまま残る。**記録を外す前に**送る
-            // （外すと宛先を引けない）。届かなくても記録は外す
-            if let Err(reason) = state.agent.forget(identity.account_id, card_id).await {
+            // 確かめが済んだ後に起きたプロセスが画面に出ないまま残る。
+            //
+            // **知らせは2段に分ける**（実装レビュー第3回 Astra 1）。外す前に起こし直しを止め
+            // （印は立てない）、記録を外せてから外した印を立てさせる。1段で印まで立てていた頃は、
+            // 記録を外せなかったときカードが一覧に残るのに、その PC では以後の起こし直しが
+            // 「一覧から外された」で断られ続けた。印は取り消せないので、外せた後にしか立てない。
+            //
+            // 宛先は**記録を外す前に**引いておく（外すと記録から引けない）。届かなくても記録は外す
+            let owner = state
+                .registry
+                .owned(identity.account_id, card_id)
+                .and_then(|record| record.meta().agent_id);
+            if let Err(reason) = state
+                .agent
+                .stop_for_removal(identity.account_id, card_id, owner)
+                .await
+            {
                 tracing::info!(
                     %card_id,
-                    "外したことを PC へ知らせられませんでした（起こし直しの途中なら止まりません）: {reason}"
+                    "外し始めたことを PC へ知らせられませんでした（起こし直しの途中なら、外せた後の知らせまで止まりません）: {reason}"
                 );
             }
             if let Err(err) = state
@@ -883,6 +897,17 @@ async fn handle_request(
                     ErrorKind::Archive,
                 )
                 .await;
+                return;
+            }
+            if let Err(reason) = state
+                .agent
+                .forget(identity.account_id, card_id, owner)
+                .await
+            {
+                tracing::info!(
+                    %card_id,
+                    "外したことを PC へ知らせられませんでした（起こし直しの途中なら止まりません）: {reason}"
+                );
             }
         }
 
