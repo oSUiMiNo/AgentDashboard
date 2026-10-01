@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 152
+min_entries = 163
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1589,6 +1589,18 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "PC が知らない外側の様子の綴りを送ってきたときでも、サーバは資源の答えを捨てずに Unknown として読み、CLI は「確かめられていない」側で言う"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/protocol/src/lib.rs", name = "外側の様子の知らない綴りはUnknownで解け資源の答えは捨てない" },
+  { file = "server/crates/protocol/src/a2s.rs", name = "新しいpcが足した外側の様子も資源の答えとして読める" },
+  { file = "server/crates/core/src/client/output.rs", name = "知らない状態は確かめられていない側で言う" },
+]
+breaks_when = "HostFreeState の #[serde(other)] を外す（protocol の2本が★）。CLI で Unknown を Fresh の側へ移す（CLI の1本が★）。いずれも直した担当が実測した。自分でも #[serde(other)] を外し、protocol の2本が★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "WSL で外側の値で抑えて数えるとき、まとめて起こし直しても通したぶんが引かれ、外側で数えた枚数を超えて通さない（画面へ答える枚数にも予約が乗る）"
 gate        = "unit"
 tests       = [
@@ -1635,6 +1647,20 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧で Windows 側の空きの問い合わせが 501・409 以外で失敗したとき（初回でも確かめ直しでも）、その PC を歯止め無しと読まず「答えが来なかった」として 0 枚に数え、全部送らない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "それ以外の失敗は、答えが来なかったとして言い分ける" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "最初から答えが来なければ、null にせず締切まで聞き直して「答え無し」で返す" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "確かめ直しで1周目から答えが来なくても、前回の答えを持ったまま確かめられていない側に留まる" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめ直しの1周目で通信が失敗しても、全部送らずにダイアログを残す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "最初から答えが来なければ、全部送らずに聞き直し、締切でダイアログを出す" },
+]
+breaks_when = "reviveBudget.ts で通信の失敗を null に戻す＝catch を return null にする（10本が「答えが来なかった」の期待・見出し・送られていないことの検査で落ちた）。答えの無い PC をダイアログから消す（1本）。いずれも直した担当が実測した。自分でも catch を return null にし、名指しの5本が「答えが来なかった」の期待・送られていないこと・ダイアログが出ることの検査で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "まとめて復旧で Windows 側の空きを確かめられない PC（failed・聞き直しの上限到達）があるとき、その PC を 0 枚として必ずダイアログを出し、床が「全部入る」と言っても黙って全部送らない"
 gate        = "unit"
 tests       = [
@@ -1645,6 +1671,64 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "聞き直した後も checking・stale のままなら、上限到達として 0 枚" },
 ]
 breaks_when = "reviveBudget.ts の planRevive で、確かめられていない PC を 0 枚にする分岐を外し fits = found?.fits_now ?? null にする（2ファイルで12本落ち、名指しの5本はダイアログが出ない・over が立たない検査で落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧でもう一度確かめた結果、全部入ると分かったときでも、黙って送らずダイアログで押させる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "もう一度確かめて新しい値で全部入ると分かっても、黙って送らず、押させる" },
+]
+breaks_when = "確かめ直しの後、全部入るなら黙って送る形へ戻す（1本が送られていないことの検査で落ちた）。直した担当が実測した。自分でも、確かめ直しの後に全部入るなら送って閉じる1行を足し、名指しの1本が送られていないことの検査で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧で空きを聞き直している間でも、帯に何を待っているかと「やめる」を出し、選択を外しても隠さず、やめたら打ち切って送らない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "聞き直している間は帯に何を待っているかと「やめる」を出し、やめたら打ち切って送らない" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "1周目の答えが遅いときも、少し待ってから「やめる」を出し、押せば止まった問い合わせを切る" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "待っている間に選択を外しても、帯と「やめる」は隠れない" },
+]
+breaks_when = "待ち表示を帯へつながない（3本）。待っている間に帯を隠す（1本）。400ms の合図を外す（1本）。いずれも直した担当が実測した。自分でも、待っている間も選択が外れたら帯を隠す形へ戻し、選択を外しても隠れないの1本が invisible の検査で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧で答える時間の違う PC が複数あるとき、毎周すべての PC に聞き直し、前の周の答えを使い回さない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "答える時間の違う2台では、毎周すべての PC を聞き、最後の周の答えで返す" },
+]
+breaks_when = "落ち着いた PC の前の周の答えを持ち越す形へ戻す（2台のテストが、期待 fits_now 1 に対し 5 で落ちた）。直した担当が実測した。自分でも、落ち着いた PC へは聞き直さず前の周の答えを持ち越す形にし、名指しの1本が PC ごとの問い合わせ回数の検査で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧のダイアログで、起こしている途中のぶんが制約のとき、使える空きは差し引いた値（effective_mb）で出し、何から引いたかを言う（確かめられていない PC には出さない）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "起こしている途中のぶんが制約なら、使える空きは差し引いた値で、引いたぶんを言う" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "WSL でない機械で起こしている途中のぶんが制約なら、使える空きを値ごと出す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめられていない PC には、起こしている途中のぶんの行を出さない" },
+]
+breaks_when = "使える空きを counted_mb に戻す（1本）。予約の行の WSL でない分岐を戻す（1本）。確かめられていない PC の除外を戻す（1本）。いずれも直した担当が実測した。自分でも使える空きを counted_mb に戻し、差し引いた値の1本が文面の検査で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧の空きの問い合わせが止まったときでも、1回ごとの上限と締切で切り、止まった1台に合わせて待ち続けない（画面を離れたときも進行中の問い合わせを切る）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "1回の問い合わせが止まっても、上限で切って次の周へ進む" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "PC が2台で片方が止まっても、締切で返す（先に答えた PC は毎周聞き直す）" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "問い合わせが止まっても、締切でダイアログを出し、止まった問い合わせを切る" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "PC が2台で片方が止まっても、締切で、答えた PC のぶんだけを「入るぶん」に入れる" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "画面を離れたら、進行中の問い合わせを切る" },
+]
+breaks_when = "1回の問い合わせの上限を外す（4本が、打ち切られたか・締切後のダイアログの検査で落ちた）。画面を離れたときの打ち切りを外す（1本）。やめる・閉じるの打ち切りを外す（2本）。いずれも直した担当が実測した。自分でも1回の上限を外し、名指しのうち3本（reviveBudget の2本と、TileGrid の「問い合わせが止まっても」）が打ち切られたか・聞き直した回数の検査で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1672,6 +1756,18 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "予約を引いても起こせる枚数が変わらないとき、制約を予約と言わず 1 分待てとも言わない（Windows 側が制約で予約を引いているときは両方の数を出す）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/resources.rs", name = "assessの総当たり" },
+  { file = "server/crates/session-host-core/src/session/mod.rs", name = "メモリ不足の断りは制約ごとに利用者がすることを言い分ける" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "予約を引いても枚数が変わらなければwindows側の空きで断り両方の数を出す" },
+]
+breaks_when = "assess の判定を effective < base へ戻す（assessの総当たりと結合の1本が★）。文面の、Windows 側が制約で effective < base の腕を外す（文面の単体が★）。いずれも直した担当が実測した。自分でも assess の判定を effective < base へ戻し、assessの総当たりが★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "寝ている元から枝分かれするとき、元の起こし直しが断られたら 180 秒待たずにその理由で失敗し、競合や判別できない知らせ・他カード宛て・ターンの終わりを待つ段では失敗せずに待ち続ける"
 gate        = "unit"
 tests       = [
@@ -1684,6 +1780,32 @@ tests       = [
   { file = "server/crates/server-core/src/branch.rs", name = "拾うのはそのカードの起こし直しの終わった断りだけ" },
 ]
 breaks_when = "branch.rs の wait_for から断りの腕を外す（本物の断りの1本と差し込みの対照1本が狙った検査で落ちることを実測した）。起こし直しの断りの busy の照合を外す（競合・判別できないの2本）、宛先の照合を外す（他カードの1本）、ターン待ちの段にも断りを拾わせる（ターン待ちの1本）もそれぞれ実測した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "寝ている元から枝分かれするとき、配信を取りこぼしても記録に残った終わった断りを引き直してその理由で断り（競合では断らない）、起きる待ちの間に元が外されたら上限を待たずに断る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで元の断りを取りこぼしても記録から引いてその理由で枝分かれを断る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで取りこぼしても競合の知らせでは待ち続けて枝を作る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちの間に元が一覧から外されたら上限を待たずに枝分かれを断る" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "起こし直しの終わった断りは配った後も記録から引ける" },
+]
+breaks_when = "branch.rs で記録から断りを引くのをやめる＝目印を u64::MAX にする（取りこぼしの1本が★。配信を溢れさせる便を 400 件流し、取りこぼしが実際に起きていることも確かめた）。publish_local で断りを残すのをやめる（registry の1本が★）。owned().is_none() の照合を外す（外されたの1本が★）。いずれも直した担当が実測した。自分でも publish_local で断りを残すのをやめ、registry の1本が★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "画面と CLI の「外す」口で記録だけを外すカードでも、持ち主の PC に知らせ、起こし直しの途中なら起こさない（ローカルモード・セルフホストとも）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/restart.rs", name = "前回の起動が残した抜け殻を確かめ中に外すと確かめが済んでも起こさない" },
+  { file = "server/crates/core/tests/restart.rs", name = "寝かせた抜け殻を確かめ中に外すと確かめが済んでも起こさない" },
+  { file = "server/crates/core/tests/a2s.rs", name = "接続断のカードを起こし直しの確かめ中に外すと_PC_は確かめが済んでも起こさない" },
+  { file = "server/crates/core/src/client/wait.rs", name = "外す待ちは取り下げた起こし直しの断りでは落ちず外れた知らせで終わる" },
+]
+breaks_when = "ws.rs の forget 呼び出しを外す（ローカルの1本・セルフホストの1本が★）。link.rs の Forget の処理を外す（セルフホストの1本が★）。archive() の取り下げを外す（寝かせた抜け殻の1本が★）。wait.rs の外す待ちの例外を外す（単体が★。ローカルの1本は「外せること: Refused」で落ちた）。いずれも直した担当が実測した。自分でも wait.rs の外す待ちの例外を外し、単体の1本が★で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1706,6 +1828,19 @@ tests       = [
   { file = "server/crates/session-host-core/src/resources.rs", name = "表示も境界より前の観測をfreshと言わず取得を起こす" },
 ]
 breaks_when = "HostFree::outside の新しさの判定で usable へ境界の代わりに None を渡す（表示の2本が★で落ち、判定の「予約が0件になった後それより前に始めた観測で次を通さない」は緑のままだった＝表示に固有の壊しであることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こし直しが Windows 側の確かめを待っている間、または確かめた直後にカードを外したとき、起こさずにやめて席と予約を返す（何も持っていないカードを忘れさせても断らない）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確かめを待っている間に外したカードは確かめが済んでも起こさない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確かめた直後に外したカードは起こさない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "抜け殻を確かめの途中で外すと抜け殻も畳み起こし直しも取り下げる" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "何も持っていないカードを忘れても断らず外すときだけ見つからないと言う" },
+]
+breaks_when = "session/mod.rs で起こす直前の札の照合を外す（確かめた直後の1本が★）。確かめ待ちの select! から取り下げで抜ける側を外す（確かめ待ちの1本が★）。withdraw() を外す（3本が★）。archive の NotFound の条件を「畳めなかったら」へ戻す（1本が★）。いずれも直した担当が実測した。自分でも、起こす直前の札の照合を外し、確かめた直後の1本が★で落ちることを当て直した"
 verified    = true
 
 [[entry]]
