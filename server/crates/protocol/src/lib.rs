@@ -404,6 +404,18 @@ pub struct HostResources {
     /// より小さければ、起こしている途中のぶんが制約になっている
     #[serde(default)]
     pub effective_mb: Option<u64>,
+    /// 外側の値が、**この答えを作った時点から**あと何秒「新しい」ままか
+    /// （`host_free_state` が `fresh` のときだけ。実装レビュー第2回 Astra 5）。
+    ///
+    /// **受け取った側は、受け取ってから経った時間を自分で差し引く。** 画面は1つの周で
+    /// 全 PC に聞き、全台が落ち着いたら「何枚戻すか」を決める。先に答えた PC の `fresh` は、
+    /// 遅い PC を待つ間に期限を越えうるので、決める時点でまだ新しいかをこれで確かめる。
+    ///
+    /// 数え方は PC 側の判定と同じ規則（`usable`）の残り。秒は切り捨てる（0 は「もう新しく
+    /// ない」と読む）。予約が0件になって観測が失効すると、残りがあってもその場で使えなく
+    /// なる——そこまでは先回りして数えられない
+    #[serde(default)]
+    pub host_free_fresh_for_sec: Option<u64>,
 }
 
 /// 外側（Windows）の空きの様子（寝ているカードばかりなのに、メモリ不足でセッションを
@@ -1270,6 +1282,8 @@ mod tests {
         assert_eq!(resources.host_free_age_sec, None);
         assert_eq!(resources.host_free_error, None);
         assert_eq!(resources.effective_mb, None);
+        // あと何秒新しいか（実装レビュー第2回 Astra 5）も、送ってこない PC では欠ける
+        assert_eq!(resources.host_free_fresh_for_sec, None);
     }
 
     /// 外側の様子の綴りは4つ（画面と CLI が読む）。

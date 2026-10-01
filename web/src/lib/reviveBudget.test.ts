@@ -34,6 +34,7 @@ function resources(fits: number | null): HostResources {
     counted_mb: null,
     host_free_age_sec: null,
     host_free_state: null,
+    host_free_fresh_for_sec: null,
     host_free_error: null,
     effective_mb: 13_000,
   }
@@ -666,6 +667,128 @@ describe('settleHostResources', () => {
     )
     expect(plan.over).toBe(true)
     expect(plan.fitting.toSorted()).toEqual(['a2', 'b1'])
+  })
+
+  it('締切の直前に始めた周が締切で切られても、直前の周で確かめられていた PC を「答え無し」にしない', async () => {
+    // 1周は 500ms ＋ 1秒。3周目は締切の 300ms 前に始まり、答えが来る前に締切で切られる
+    vi.useFakeTimers()
+    const 一周の長さ = 500 + RECHECK_INTERVAL_MS
+    偽の口({
+      a: [{ 遅れて: 500, 答え: wsl(2, 'fresh') }],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 300 })
+    await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
+
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 2 })
+    const plan = planRevive(
+      [target('a1', 'a', 1), target('b1', 'b', 1)],
+      箱.answer as Map<string, HostAnswer>,
+    )
+    expect(plan.fitting).toEqual(['a1'])
+    expect(plan.hosts.find((host) => host.host === 'a')).toMatchObject({
+      fits: 2,
+      unconfirmed: null,
+    })
+    // b は前の周でも checking だった。**答えが来なかったのではなく、待っても確かめられなかった**
+    expect(plan.hosts.find((host) => host.host === 'b')).toMatchObject({
+      fits: 0,
+      unconfirmed: 'gave_up',
+    })
+  })
+
+  it('締切で切った周でも、切る前に答えが来なかった PC は「答え無し」のまま', async () => {
+    // 3周目、a は締切より前に 503 で答えた。**切られたのではないので前の周へ戻さない**
+    vi.useFakeTimers()
+    const 一周の長さ = 500 + RECHECK_INTERVAL_MS
+    const 前 = wsl(2, 'fresh')
+    偽の口({
+      a: [{ 遅れて: 500, 答え: 前 }, { 遅れて: 500, 答え: 前 }, { status: 503 }],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 300 })
+    await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
+
+    expect(台(箱, 'a')).toEqual(noAnswer(前))
+  })
+
+  it('先に答えた PC の fresh が、同じ周の中で新しさの残りを使い切ったら、聞き直してから返す', async () => {
+    // a は即答するが、あと 2 秒しか新しくない。b は答えるのに 3 秒かかる
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({
+      a: [
+        wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 }),
+        wsl(1, 'fresh', { host_free_age_sec: 0, host_free_fresh_for_sec: 60 }),
+      ],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(3_000)
+    // 全台が答えたが、a の値はもう新しくない。**ここで返さない**
+    expect(箱.answer).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + 3_000)
+
+    expect(回数).toEqual({ a: 2, b: 2 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
+    expect(台(箱, 'b')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
+  })
+
+  it('締切までに新しい値で確かめ直せなければ、その PC は確かめられていない（0 枚）', async () => {
+    // 1周は 3 秒＋1秒。a は毎回あと 2 秒しか新しくないので、b を待つ間に毎周期限を越える
+    vi.useFakeTimers()
+    const 一周の長さ = 3_000 + RECHECK_INTERVAL_MS
+    const { 回数 } = 偽の口({
+      a: [wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 })],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2 * 一周の長さ + 3_500 })
+    await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
+
+    expect(回数).toEqual({ a: 3, b: 3 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
+    const plan = planRevive(
+      [target('a1', 'a', 1), target('b1', 'b', 1)],
+      箱.answer as Map<string, HostAnswer>,
+    )
+    expect(plan.hosts.find((host) => host.host === 'a')).toMatchObject({
+      fits: 0,
+      unconfirmed: 'gave_up',
+    })
+    expect(plan.hosts.find((host) => host.host === 'b')).toMatchObject({
+      fits: 5,
+      unconfirmed: null,
+    })
+    expect(plan.fitting).toEqual(['b1'])
+  })
+
+  it('最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる', async () => {
+    // 2周目の終わり（2秒）では a はまだ新しい（あと 1 秒・0.5 秒経過）。眠って締切（2.8 秒）を
+    // 越えてから返すので、そのときにはもう新しくない
+    vi.useFakeTimers()
+    偽の口({
+      a: [{ 遅れて: 500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 1 }) }],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'], { deadline: Date.now() + 2_800 })
+    await vi.advanceTimersByTimeAsync(4_000)
+
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
+  })
+
+  it('新しさの残りを送ってこない古い PC は、いまどおり1つの周の答えで返す', async () => {
+    vi.useFakeTimers()
+    // 古い PC は欄そのものを送ってこない（`null` ではなく、読むと `undefined`）
+    const 古い = { ...wsl(5, 'fresh', { host_free_age_sec: 58 }) } as Partial<HostResources>
+    delete 古い.host_free_fresh_for_sec
+    const { 回数 } = 偽の口({
+      a: [古い as HostResources],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh') }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    expect(回数).toEqual({ a: 1, b: 1 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
   })
 
   it('入館証が切れたら、その場で打ち切り、同じ周の他の問い合わせも切る', async () => {

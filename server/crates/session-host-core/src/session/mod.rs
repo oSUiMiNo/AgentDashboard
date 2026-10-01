@@ -614,6 +614,13 @@ fn out_of_memory_text(
              起こしている途中のセッションのメモリが載りきるまで、1分ほど待ってから、\
              もう一度押してください"
         ),
+        // **予約を引いた値を「空き」と呼ばない**（実装レビュー第2回 Fable 4）。引いていれば
+        // 両方の数を出す——画面の「空き」は引く前の値なので、片方だけだと数が合わない
+        Limit::Wsl | Limit::Floor if effective_mb < base_mb => format!(
+            "メモリが足りないので起こし直せません（使える空き {effective_mb} MB＝\
+             空き {base_mb} MB から、起こしている途中の {reserved} 枚ぶんを差し引いた値／\
+             {per}）。動いているセッションを終了させてから、もう一度押してください"
+        ),
         Limit::Wsl | Limit::Floor => format!(
             "メモリが足りないので起こし直せません（空き {effective_mb} MB／{per}）。\
              動いているセッションを終了させてから、もう一度押してください"
@@ -2371,8 +2378,10 @@ pub struct SessionManager {
     /// 「居ないから作ってよい」を通ってしまう。
     ///
     /// 値は、その起こし直しを**まだ続けてよいか**の札（[`ReviveTicket`]）。外す側が
-    /// ここから札を引いて下ろす。
-    reviving: Mutex<HashMap<CardId, Arc<ReviveTicket>>>,
+    /// ここから札を引いて下ろす。**一覧から外したカードの印も同じ表に持つ**
+    /// （[`ReviveTable`]）——印を立てるのと札を引くのが別のロックだと、その間に受け付けた
+    /// 起こし直しが印にも札にも引っかからない。
+    reviving: Mutex<ReviveTable>,
     /// 同時に起こし直す本数の上限（設計§8-1）。
     ///
     /// **ここだけは「その場で断る」ではなく「待たせる」**。このリポジトリの作法は
@@ -2406,6 +2415,10 @@ pub struct SessionManager {
     /// 「確かめた観測が、ロックを取るまでに使えなくなる」を決定的に作るための口。
     /// 時間でずらすと不安定になり、確かめる口の中から台帳へ触ると同じロックで詰まる。
     after_confirm: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// 起こし直しで、起こし始めの印を立てた後・実体を作る前に1回呼ぶ（**テスト専用**）。
+    ///
+    /// 「起こしている最中に外される」を決定的に作るための口。
+    before_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// 判定の結果（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§6-6）。
@@ -2507,40 +2520,135 @@ pub struct ReviveInFlight {
 /// サーバが捨てるので、画面に出ないままメモリだけを食う）。外す側
 /// （[`SessionManager::forget`]・[`SessionManager::archive`]）が札を下ろし、起こす側は
 /// 起こす直前にそれを見る。
+///
+/// # 外す側を待たせない（実装レビュー第2回 Fable 5）
+///
+/// 以前は起こす側が札のロックを握ったまま畳んで起こし、外す側はそれが済むまで std の
+/// `Mutex` で**実行時のワーカーごと止まって**待っていた。いまは段（[`ReviveStage`]）を
+/// 札に書いてロックをすぐ離す。起こしている最中に下ろされたら、外す側は畳まずに戻り、
+/// **起こす側が起こし終えた直後に自分で畳む**。どちらの順で来ても、段の読み書きが同じ
+/// ロックの中なので、畳む役はちょうど1人に決まる。
 #[derive(Default)]
 struct ReviveTicket {
-    /// 下ろされたか。**起こす側はこれを握ったまま畳んで起こす**——見てから起こすまでの
-    /// 間に外されると、外す側の畳みが空振りした直後にプロセスが起き、残る。
-    withdrawn: Mutex<bool>,
+    state: Mutex<TicketState>,
     /// 下ろされたことを、席や確かめを待っている起こす側へ知らせる。外したカードのために
     /// 席を握ったまま待ち続けると、ほかのカードの起こし直しまで止まる
     woken: tokio::sync::Notify,
 }
 
+#[derive(Default)]
+struct TicketState {
+    /// 下ろされたか
+    withdrawn: bool,
+    stage: ReviveStage,
+}
+
+/// 起こし直しがどこまで進んだか。**外す側が、畳むのは誰かを決めるのに読む。**
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ReviveStage {
+    /// 席待ち・確かめ待ち。**実体はまだ無い**——下ろせば起こす側が起こさずにやめる
+    #[default]
+    Waiting,
+    /// 古い実体を畳んで新しい実体を作っている最中。**畳むのは起こす側**（作り終えた直後）
+    Spawning,
+    /// 実体を作り終えた（立ち上がりきるまで札は表に残る）。**畳むのは外す側**
+    Spawned,
+}
+
 impl ReviveTicket {
-    fn withdraw(&self) {
-        *self.withdrawn.lock().expect("ロックが壊れていない") = true;
+    /// 札を下ろし、**下ろした時点の段**を返す。待たない。
+    fn withdraw(&self) -> ReviveStage {
+        let stage = {
+            let mut state = self.state.lock().expect("ロックが壊れていない");
+            state.withdrawn = true;
+            state.stage
+        };
         // **待っている者が居なくても知らせを1つ残す**（`notify_one`）。見てから待ち始める
         // までの間に下ろされても、取りこぼさない
         self.woken.notify_one();
+        stage
+    }
+
+    fn is_withdrawn(&self) -> bool {
+        self.state.lock().expect("ロックが壊れていない").withdrawn
     }
 
     /// 下ろされるまで待つ。
     async fn withdrawn(&self) {
-        if *self.withdrawn.lock().expect("ロックが壊れていない") {
+        if self.is_withdrawn() {
             return;
         }
         self.woken.notified().await;
     }
 }
 
+/// いま起こし直している最中のカードの札と、一覧から外したカードの印（実装レビュー第2回
+/// Astra 1）。**1つのロックで持つ。**
+///
+/// # なぜ外した印が要るのか
+///
+/// 札を下ろせるのは、外したときに札が表に居る場合だけである。サーバが起こし直しの材料を
+/// 記録から引いた後、外した知らせ（`Forget`／`Archive`）が起こし直しの頼みより**先に**
+/// 届くと、外す側には下ろす札が無く、後から来た頼みが新しい札を作って起こしていた。
+/// 外したカードの印を残し、後から来た頼みも終わった断り（[`SessionError::Withdrawn`]）で
+/// 返す。
+///
+/// # 印の寿命と量
+///
+/// **プロセスが生きている間ずっと持つ。** カード ID は UUIDv4 で使い回されず、一覧から
+/// 外す操作に取り消しは無い（記録層は `archived` を立てるだけで、報告がそれを戻すことも
+/// ない）。外したカードを後から起こしてよい場面は存在しないので、時間で失効させる理由が
+/// 無い。プロセスが起き直せば印は消えるが、そのとき届きかけていた頼みも接続ごと消える。
+///
+/// 量の上限（[`REMOVED_CARDS_KEPT`]）は**メモリを守るためだけ**に置く。溢れたら古い順に
+/// 忘れる——数千枚前に外したカードへの頼みが、まだ届きかけていることはない。
+#[derive(Default)]
+struct ReviveTable {
+    tickets: HashMap<CardId, Arc<ReviveTicket>>,
+    removed: HashSet<CardId>,
+    /// 外した順（溢れたときに古いものから忘れるため）
+    removed_order: std::collections::VecDeque<CardId>,
+}
+
+/// 外した印を、どんなときに残すか（[`SessionManager::retire`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retire {
+    /// 札か実体が在るときだけ（`archive`。無ければ断り、記録は一覧に残る）
+    IfPresent,
+    /// 何も無くても（`forget`。記録の側は既に外れている）
+    Always,
+}
+
+/// 外したカードの印を覚えておく枚数（[`ReviveTable`]）。1枚 16 バイトの ID を2か所に
+/// 持つだけなので、上限まで溜まっても数十 KB に収まる。
+const REMOVED_CARDS_KEPT: usize = 1024;
+
+impl ReviveTable {
+    fn mark_removed(&mut self, card_id: CardId) {
+        if !self.removed.insert(card_id) {
+            return;
+        }
+        self.removed_order.push_back(card_id);
+        while self.removed_order.len() > REMOVED_CARDS_KEPT {
+            if let Some(oldest) = self.removed_order.pop_front() {
+                self.removed.remove(&oldest);
+            }
+        }
+    }
+}
+
 impl Drop for ReviveInFlight {
     fn drop(&mut self) {
-        self.manager
-            .reviving
-            .lock()
-            .expect("ロックが壊れていない")
-            .remove(&self.card_id);
+        // **自分の札の行だけを消す。** 外したカードへの頼みには表に入れない札を渡すので、
+        // カードだけで消すと、同じカードで先に進んでいる起こし直しの行を消してしまう
+        let mut reviving = self.manager.reviving.lock().expect("ロックが壊れていない");
+        if reviving
+            .tickets
+            .get(&self.card_id)
+            .is_some_and(|ticket| Arc::ptr_eq(ticket, &self.ticket))
+        {
+            reviving.tickets.remove(&self.card_id);
+        }
     }
 }
 
@@ -2684,6 +2792,12 @@ impl SessionManager {
     #[doc(hidden)]
     pub fn 確認の後に差し込む(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.after_confirm.lock().expect("ロックが壊れていない") = Some(hook);
+    }
+
+    /// 起こし直しで、起こし始めの印を立てた後・実体を作る前に呼ぶ口を差し込む（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 起こす直前に差し込む(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.before_spawn.lock().expect("ロックが壊れていない") = Some(hook);
     }
 
     /// 予約が0件になったときと同じく、いまより前に始めた外側の観測を失効させる（**テスト専用**）。
@@ -2978,12 +3092,13 @@ impl SessionManager {
             claude_settings,
             aliases,
             screen_settings: Mutex::new(screen::ScreenSettings::default()),
-            reviving: Mutex::new(HashMap::new()),
+            reviving: Mutex::new(ReviveTable::default()),
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
             host_free: Mutex::new(host_free),
             budget: Mutex::new(ReviveBudget::default()),
             after_confirm: Mutex::new(None),
+            before_spawn: Mutex::new(None),
         })
     }
 
@@ -3529,13 +3644,13 @@ impl SessionManager {
         // **進んでいる起こし直しも取り下げる**（実装レビュー Astra 1）。畳むだけだと、
         // 確かめを待っている起こし直しが後から実体を作り、誰にも見えないまま残る。
         // 畳むより先に下ろす——後にすると、畳んだ直後に起きた実体を取り逃がす
-        let withdrew = self.withdraw_revive(card_id);
-        let folded = self.fold(card_id).is_some();
-        // 起こし直しを止めただけ（実体はまだ無い）でも外せたことにする。断ると、正しく
-        // 取り下げたのに画面へ「見つかりません」が出る
-        if !withdrew && !folded {
+        //
+        // **外せたときだけ外した印を残す**（実装レビュー第2回 Astra 1）。札も実体も無ければ
+        // 断り、記録は一覧に残る。そこで印を立てると、残ったカードを二度と起こせなくなる
+        let Some(withdrew) = self.retire(card_id, Retire::IfPresent) else {
             return Err(SessionError::NotFound(card_id));
-        }
+        };
+        self.fold_unless_spawning(card_id, withdrew);
         // **配るのはこちらだけ。** 復旧は同じ本体を通るが、ここを配ると
         // 起こし直すつもりのカードが画面から消えてしまう（設計§7-1）
         self.events.emit(ServerMessage::SessionRemoved { card_id });
@@ -3554,9 +3669,28 @@ impl SessionManager {
     ///
     /// 既に起こし直している最中なら `None`。**待ち行列に並ばせない**——同じカードが
     /// 2つ並ぶと、席が空いたときに両方とも通る（設計§8-1）。
+    ///
+    /// **一覧から外したカードでも `None` にはしない**（実装レビュー第2回 Astra 1）。`None` は
+    /// 「先に起こしている側が居る＝待てば起きる」の意味で配られる（`busy: Some(true)`）。
+    /// 外したカードには**下ろした札**を渡し、[`SessionManager::revive`] が冒頭で終わった
+    /// 断りを返す——ローカルとセルフホストで同じ道から断りが出る。
+    ///
+    /// **外した印は、表に札が居るかより先に見る。** 外す前の起こし直しの札は立ち上がりきるまで
+    /// 表に残るので、後に見ると、その間に届いた頼みが競合に化ける。下ろした札は表に入れない
+    /// （表の行は、その行の札を持つ者だけが消す。[`ReviveInFlight`] の `Drop`）。
     pub fn begin_revive(self: &Arc<Self>, card_id: CardId) -> Option<ReviveInFlight> {
         let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
-        let std::collections::hash_map::Entry::Vacant(slot) = reviving.entry(card_id) else {
+        if reviving.removed.contains(&card_id) {
+            let ticket = ReviveTicket::default();
+            ticket.state.lock().expect("ロックが壊れていない").withdrawn = true;
+            return Some(ReviveInFlight {
+                manager: Arc::clone(self),
+                card_id,
+                ticket: Arc::new(ticket),
+            });
+        }
+        let std::collections::hash_map::Entry::Vacant(slot) = reviving.tickets.entry(card_id)
+        else {
             return None;
         };
         let ticket = Arc::clone(slot.insert(Arc::new(ReviveTicket::default())));
@@ -3567,25 +3701,63 @@ impl SessionManager {
         })
     }
 
-    /// そのカードの起こし直しが進んでいれば、札を下ろす（実装レビュー Astra 1）。
+    /// カードを一覧から外したことを、起こし直しの側へ伝える（実装レビュー Astra 1・第2回
+    /// Astra 1）。外した印を残し、進んでいる起こし直しがあれば札を下ろす。**待たない。**
     ///
-    /// **起こす側が起こしている最中なら、起こし終わるまで待つ**（札のロックを起こす側が
-    /// 握っている）。その後に畳めば、起きたばかりの実体も畳める。
-    fn withdraw_revive(&self, card_id: CardId) -> bool {
-        let ticket = self
-            .reviving
-            .lock()
-            .expect("ロックが壊れていない")
-            .get(&card_id)
-            .cloned();
-        // 表のロックは先に離す。札のロックを待つ間に表を握っていると、ほかのカードの
-        // 起こし直しの受付（`begin_revive`）まで止まる
-        let Some(ticket) = ticket else {
-            return false;
+    /// 返り値は「外せたか」。外せたなら、下ろした札の段（札が無ければ `None`）を包んで返す。
+    /// [`Retire::IfPresent`] で札も実体も無ければ外せていない（`None`）——印も残さない。
+    ///
+    /// **印を立てるのと、札・実体の有無を見るのは、表のロックの中で一度に行う。** 分けると、
+    /// その間に受け付けた起こし直しが印にも札にも引っかからずに起きる。実体の表
+    /// （`sessions`）を内側で取るのは、ここだけが両方を握る場所だから（逆の順に握る道は無い）。
+    fn retire(&self, card_id: CardId, when: Retire) -> Option<Option<ReviveStage>> {
+        let ticket = {
+            let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
+            let ticket = reviving.tickets.get(&card_id).cloned();
+            let present = ticket.is_some()
+                || self
+                    .sessions
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .contains_key(&card_id);
+            if when == Retire::IfPresent && !present {
+                return None;
+            }
+            reviving.mark_removed(card_id);
+            ticket
         };
-        ticket.withdraw();
-        tracing::info!(%card_id, "一覧から外されたので、進んでいた起こし直しを取り下げます");
-        true
+        let Some(ticket) = ticket else {
+            return Some(None);
+        };
+        // 下ろすのは表のロックを離してから（札のロックは短いが、入れ子にしない）
+        let stage = ticket.withdraw();
+        // **段で言い分ける**（実装レビュー第2回 Fable 3）。止まったかどうかの本人の言い分は、
+        // 起こす側の `revive_withdrawn`（段付き）が残す
+        match stage {
+            ReviveStage::Waiting => tracing::info!(
+                %card_id,
+                "一覧から外されたので、進んでいた起こし直しを取り下げます"
+            ),
+            ReviveStage::Spawning => tracing::info!(
+                %card_id,
+                "起こしている最中に一覧から外されたので、起こし終えたところで畳ませます"
+            ),
+            ReviveStage::Spawned => tracing::info!(
+                %card_id,
+                "起こし直しは済んでいたので、起こした実体を畳んで片付けます"
+            ),
+        }
+        Some(Some(stage))
+    }
+
+    /// 外したカードの実体を畳む。**起こしている最中なら畳まない**——作り終えた直後に起こす側が
+    /// 畳む（[`ReviveTicket`]）。ここで畳むと、作りかけの実体を表に入る前に取り逃がし、
+    /// 誰も畳まないまま残る。
+    fn fold_unless_spawning(&self, card_id: CardId, stage: Option<ReviveStage>) -> bool {
+        if stage == Some(ReviveStage::Spawning) {
+            return false;
+        }
+        self.fold(card_id).is_some()
     }
 
     /// 一覧から外されたカードを、この PC からも片付ける（実装レビュー Astra 1）。
@@ -3600,11 +3772,22 @@ impl SessionManager {
     /// 外されると、記録は外れているのに実体は動き続け、報告は捨てられて画面に出ない。
     ///
     /// `SessionRemoved` は配らない。記録はサーバが既に外している。
+    ///
+    /// **何も無くても外した印は残す**（実装レビュー第2回 Astra 1）。サーバは起こし直しの
+    /// 材料を引いた後にこれを送ることがあり、そのとき頼みはまだ届いていない。
     pub fn forget(&self, card_id: CardId) -> bool {
-        let withdrew = self.withdraw_revive(card_id);
+        let withdrew = self.retire(card_id, Retire::Always).flatten();
         crate::attachments::forget(&self.config().resolved_state_dir(), card_id);
-        let folded = self.fold(card_id).is_some();
-        withdrew || folded
+        let folded = self.fold_unless_spawning(card_id, withdrew);
+        withdrew.is_some() || folded
+    }
+
+    /// 印を立てずに実体だけを畳む（**テスト専用**）。PC が起き直して実体を失った形を作る。
+    ///
+    /// [`SessionManager::forget`] は外した印を残すので、その後の起こし直しは断られる。
+    #[doc(hidden)]
+    pub fn 実体だけを畳む(&self, card_id: CardId) -> bool {
+        self.fold(card_id).is_some()
     }
 
     /// 抜け殻のカードを、元の CLI セッションで起こし直す（設計§7・§8）。
@@ -3631,6 +3814,14 @@ impl SessionManager {
     ) -> Result<Arc<Session>, SessionError> {
         let card_id = in_flight.card_id;
         let ticket = Arc::clone(&in_flight.ticket);
+        // **一覧から外したカードへの頼みは、何も始めずに断る**（実装レビュー第2回 Astra 1）。
+        // 外した知らせが頼みより先に届いた場合がこれで、札は下ろされた状態で渡ってくる。
+        // 下の席待ちの `select!` に任せると、席が空いているときは席の腕が選ばれうる
+        // （準備のできた腕は無作為に選ばれる）。外側の取得より前に見るのは、外したカードの
+        // ために `powershell.exe` を起こさないため
+        if ticket.is_withdrawn() {
+            return Err(withdrawn(card_id, "受け付けた時点"));
+        }
         // **受付の時点で外側を取りに行かせる**（寝ているカードばかりなのに、メモリ不足で
         // セッションを起こせない 設計§2-6）。取得と席待ちが重なるので、席が空くころには
         // 答えが出ていることが多い。待たない
@@ -3671,32 +3862,58 @@ impl SessionManager {
             }
         };
 
-        // **まだ起こしてよいかを、起こし終えるまで握ったまま見る**（実装レビュー Astra 1）。
-        // 見てから起こすまでの間に外されると、外す側の畳みが空振りした直後に実体が起き、
-        // 誰にも見えないまま残る。外す側は札を下ろすところで、起こし終わるのを待つ
-        let session = {
-            let 取り下げられた = ticket.withdrawn.lock().expect("ロックが壊れていない");
-            if *取り下げられた {
+        // **まだ起こしてよいかを見て、起こし始めの印を立てる**（実装レビュー Astra 1・第2回
+        // Fable 5）。見るのと印を立てるのは札のロックの中で一度に行う——この後に外されたら、
+        // 外す側は畳まずに戻り、作り終えた直後にこちらが畳む（[`ReviveTicket`]）。ロックは
+        // 作っている間は握らない。握ると、外す側が実行時のワーカーごと止まって待つ
+        {
+            let mut state = ticket.state.lock().expect("ロックが壊れていない");
+            if state.withdrawn {
                 return Err(withdrawn(card_id, "確かめた後"));
             }
+            state.stage = ReviveStage::Spawning;
+        }
+        let hook = self
+            .before_spawn
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
 
-            // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
-            if self.fold(card_id).is_some() {
-                tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
-            }
-
-            let args = lifecycle::permission_mode_args(mode.as_ref());
-            self.spawn_as(
-                card_id,
-                cwd,
-                lifecycle::SessionStart::Resume(claude_session_id),
-                &args,
-                mode,
-                // **こちらがどのセッションを指定したかを知っている**ので、先に入れておく
-                // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
-                Some(claude_session_id),
-            )?
+        // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
+        if self.fold(card_id).is_some() {
+            tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
+        }
+        let args = lifecycle::permission_mode_args(mode.as_ref());
+        let spawned = self.spawn_as(
+            card_id,
+            cwd,
+            lifecycle::SessionStart::Resume(claude_session_id),
+            &args,
+            mode,
+            // **こちらがどのセッションを指定したかを知っている**ので、先に入れておく
+            // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
+            Some(claude_session_id),
+        );
+        // **作り終えた印を立てるのと、作っている間に外されたかを見るのは一度に行う。**
+        // この後に外されたら、畳むのは外す側になる
+        let 作っている間に外された = {
+            let mut state = ticket.state.lock().expect("ロックが壊れていない");
+            state.stage = ReviveStage::Spawned;
+            state.withdrawn
         };
+        if 作っている間に外された {
+            // 外す側は畳まずに戻っている。**ここで畳まないと、誰にも見えない実体が残る。**
+            // 作るのに失敗していれば畳むものは無く、断りは外されたことのほうを返す
+            // （作れなかった理由は、外したカードの利用者には意味が無い）
+            if self.fold(card_id).is_some() {
+                tracing::info!(%card_id, "起こしている最中に外されたので、起こした実体を畳みました");
+            }
+            return Err(withdrawn(card_id, "起こしている間"));
+        }
+        let session = spawned?;
 
         // 立ち上がりきるまで席と印を持つ見張りを、**切り離してから**返す。
         //

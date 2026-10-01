@@ -564,3 +564,102 @@ async fn 寝かせた抜け殻を確かめ中に外すと確かめが済んで�
 
     確かめ中に外す(&server, card_id).await;
 }
+
+#[tokio::test]
+async fn 外した知らせが起こし直しの頼みより先に届いても起こさない() {
+    // 実装レビュー第2回 Astra 1（ローカルモード）。起こし直しの口が材料を記録から引いた後、
+    // 別の画面で外すと、外した知らせ（`forget`）が起こし直しの受付（`begin_revive`）より先に
+    // 実体の側へ届く。**外す側には下ろす札がまだ無く**、後から受け付けた起こし直しが誰にも
+    // 見えない実体を作っていた。
+    //
+    // 順は「知らせ → 材料を引いて受け付ける → 記録を外す」で固定する（材料は記録を外す前なら
+    // 引けるので、実体の側に届く順は同じ）。外す口（ws の `Archive`）を通す試験は上の2本
+    let config = config_for("forget-before-revive");
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        let card_id = session.card_id;
+        session.kill();
+        card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let server = common::TestServer::start_with(config).await;
+    server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    let 外 = common::止める外側::開いたまま();
+    server
+        .manager
+        .set_host_free(session_host_core::resources::HostFree::new(
+            true,
+            std::sync::Arc::clone(&外)
+                as std::sync::Arc<dyn session_host_core::resources::HostFreeProbe>,
+            Duration::from_secs(60),
+        ));
+    server
+        .manager
+        .set_memory_probe(std::sync::Arc::new(common::十分なメモリ));
+    let host =
+        agentdashboard_core::local::LocalSessionHost::new(std::sync::Arc::clone(&server.manager))
+            .with_registry(std::sync::Arc::clone(&server.registry));
+    let mut events = server.manager.subscribe_events();
+
+    server_core::session_host::SessionHost::forget(
+        &host,
+        server_core::db::LOCAL_ACCOUNT_ID,
+        card_id,
+    )
+    .await
+    .expect("外した知らせを渡せること");
+    server_core::session_host::SessionHost::revive(
+        &host,
+        server_core::session_host::ReviveRequest {
+            account_id: server_core::db::LOCAL_ACCOUNT_ID,
+            card_id,
+        },
+    )
+    .await
+    .expect("受付は通ること（断りは配信で届く）");
+    server
+        .registry
+        .archive_owned(server_core::db::LOCAL_ACCOUNT_ID, card_id)
+        .await
+        .expect("記録を外せること");
+
+    let 断り = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match events.recv().await {
+                Ok(protocol::ws::ServerMessage::Error {
+                    card_id: Some(id),
+                    kind: protocol::ws::ErrorKind::Revive,
+                    busy,
+                    message,
+                }) if id == card_id => return (busy, message),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("配信が閉じた")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("★外したカードへの起こし直しの断りが届かない");
+    assert_eq!(
+        断り.0,
+        Some(false),
+        "終わった断りとして配ること: {}",
+        断り.1
+    );
+    assert!(断り.1.contains("一覧から外された"), "{}", 断り.1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        server.manager.get(card_id).is_none(),
+        "★外したカードの実体を、後から受け付けた起こし直しで起こしている"
+    );
+    assert_eq!(
+        外.聞かれた(),
+        0,
+        "外したカードのために Windows 側を聞きに行かないこと"
+    );
+}

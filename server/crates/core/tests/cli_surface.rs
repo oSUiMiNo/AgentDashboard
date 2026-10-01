@@ -827,6 +827,38 @@ fn 資源の欄はブラウザ側の型にも全部ある() {
     }
 }
 
+/// ブラウザの聞き直しの上限（`RECHECK_LIMIT_MS`）が、PC 側の判定の確かめの上限
+/// （`CONFIRM_WAIT`）と同じ長さであること（実装レビュー第2回 Fable 6）。
+///
+/// 片方だけ直すと、ブラウザが PC の判定より先に諦めてダイアログを出す（短くずれた場合）か、
+/// 判定がとうに断った後も聞き直し続ける（長くずれた場合）。CLI の待ち（`REVIVE_CAP`）は
+/// 定数を参照しているが、TypeScript は Rust の定数を読めないので、本文の綴りで見張る。
+#[test]
+fn ブラウザの聞き直しの上限は判定の確かめの上限と同じ長さ() {
+    let path = repo_root().join("web/src/lib/reviveBudget.ts");
+    let ts = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} を読めること: {e}", path.display()));
+    const 綴り: &str = "export const RECHECK_LIMIT_MS = ";
+    let rest = &ts[ts
+        .find(綴り)
+        .unwrap_or_else(|| panic!("{} に `{綴り}` が見当たらない", path.display()))
+        + 綴り.len()..];
+    let 数: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect();
+    let ms: u128 = 数
+        .parse()
+        .unwrap_or_else(|e| panic!("RECHECK_LIMIT_MS を数として読めること（{数:?}）: {e}"));
+    assert_eq!(
+        ms,
+        session_host_core::resources::CONFIRM_WAIT.as_millis(),
+        "★web/src/lib/reviveBudget.ts の RECHECK_LIMIT_MS が、PC 側の判定の確かめの上限\
+         （session_host_core::resources::CONFIRM_WAIT）とずれている"
+    );
+}
+
 /// `pub struct <名前> { … }` の塊から `pub <欄名>:` を拾う。
 ///
 /// コメントを潰してから走査する——**説明文の中の `pub` を拾わない**ため。

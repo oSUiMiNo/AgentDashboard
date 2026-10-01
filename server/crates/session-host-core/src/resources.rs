@@ -128,8 +128,13 @@ pub fn is_wsl(sense: &WslSense) -> bool {
 pub enum Outside {
     /// WSL ではない（または期限 0 の設定）。**外側という概念が無い**ので、いまと1ビットも変わらない
     NotWsl,
-    /// 期限内に聞けた値（MB）と、その古さ
-    Fresh { mb: u64, age: Duration },
+    /// 期限内に聞けた値（MB）と、その古さ。`fresh_for` は**この答えを作った時点から**
+    /// あと何秒「新しい」ままか（[`fresh_for`]。実装レビュー第2回 Astra 5）
+    Fresh {
+        mb: u64,
+        age: Duration,
+        fresh_for: Duration,
+    },
     /// 期限を過ぎた値と、その古さ。**取り直しは起こしてある**（か、走っている）
     Stale { mb: u64, age: Duration },
     /// 一度も聞けていないので、いま聞いている
@@ -469,10 +474,31 @@ impl Reading {
 /// **表示（[`HostFree::outside`]）もこれで「新しい」を決める**（設計§12-1）。表示だけ別の
 /// 条件にすると、判定が使わない値を表示が `fresh` と言う。
 pub fn usable(reading: &Reading, required_after: Option<Instant>, ttl: Duration, now: Now) -> bool {
+    fresh_for(reading, required_after, ttl, now).is_some()
+}
+
+/// この観測が、`now` から**あと何秒「新しい」ままか**（実装レビュー第2回 Astra 5）。
+/// [`usable`] を満たさなければ `None`。
+///
+/// **[`usable`] はこれの有無で決まる。** 残りを別の規則で数えると、表示が「あと N 秒」と
+/// 言う値を判定が使わない（あるいは逆）ことが起こる。
+///
+/// 2つの道（始めた時点からの期限・終えた時点からの例外）のうち、成り立っているほうの
+/// 残りの**長いほう**を返す。失効の境界（`required_after`）が新しく立つと、残りがあっても
+/// その場で使えなくなる——境界は予約が0件になった瞬間に立つので、先回りしては数えられない。
+/// 答えるのは「ほかに何も起きなければ」の残りである。
+pub fn fresh_for(
+    reading: &Reading,
+    required_after: Option<Instant>,
+    ttl: Duration,
+    now: Now,
+) -> Option<Duration> {
     if required_after.is_some_and(|boundary| reading.started.mono < boundary) {
-        return false;
+        return None;
     }
-    let fresh_from_start = age_since(reading.started, now).is_some_and(|age| age < ttl);
+    let from_start = age_since(reading.started, now)
+        .and_then(|age| ttl.checked_sub(age))
+        .filter(|left| !left.is_zero());
     let span_mono = reading
         .finished
         .mono
@@ -482,9 +508,12 @@ pub fn usable(reading: &Reading, required_after: Option<Instant>, ttl: Duration,
         .wall
         .duration_since(reading.started.wall)
         .is_ok_and(|span_wall| span_wall <= MAX_FETCH_SPAN && span_mono <= MAX_FETCH_SPAN);
-    let fresh_from_finish =
-        span_ok && age_since(reading.finished, now).is_some_and(|age| age < FRESH_AFTER_FINISH);
-    fresh_from_start || fresh_from_finish
+    let from_finish = span_ok
+        .then(|| age_since(reading.finished, now))
+        .flatten()
+        .and_then(|age| FRESH_AFTER_FINISH.checked_sub(age))
+        .filter(|left| !left.is_zero());
+    from_start.max(from_finish)
 }
 
 /// 判定が受け取る、確かめた結果（設計§2-3）。**作れるのは [`HostFree::confirm`] だけ。**
@@ -650,11 +679,12 @@ impl HostFree {
         let now = Now::current();
         let heard = self.heard.borrow().clone();
         if let Some(reading) = &heard.last_ok
-            && usable(reading, required_after, self.ttl, now)
+            && let Some(left) = fresh_for(reading, required_after, self.ttl, now)
         {
             return Outside::Fresh {
                 mb: reading.mb,
                 age: reading.age(now),
+                fresh_for: left,
             };
         }
         let last = heard.last_ok.map(|reading| (reading.mb, reading.age(now)));
@@ -1076,9 +1106,16 @@ pub fn snapshot(
         gauge.estimate_mb,
         gauge.headroom_mb,
     );
+    // **あと何秒新しいかは `fresh` のときだけ添える**（実装レビュー第2回 Astra 5）。画面は
+    // 1つの周で全 PC に聞くので、先に答えた PC の値が、遅い PC を待つ間に期限を越えうる。
+    // 秒は切り捨てる（0 秒＝もう新しくない、の側へ倒れる）
+    let host_free_fresh_for_sec = match &outside {
+        Outside::Fresh { fresh_for, .. } => Some(fresh_for.as_secs()),
+        _ => None,
+    };
     let (host_free_mb, host_free_age_sec, host_free_state, host_free_error) = match &outside {
         Outside::NotWsl => (None, None, None, None),
-        Outside::Fresh { mb, age } => (
+        Outside::Fresh { mb, age, .. } => (
             Some(*mb),
             Some(age.as_secs()),
             Some(protocol::HostFreeState::Fresh),
@@ -1114,6 +1151,7 @@ pub fn snapshot(
         host_free_state,
         host_free_error,
         effective_mb: Some(assessment.effective_mb),
+        host_free_fresh_for_sec,
     })
 }
 
@@ -1825,6 +1863,111 @@ mod tests {
             !usable(&読み(at(0.0), at(0.5)), None, ttl, rewound),
             "壁時計が巻き戻っていたら期限切れとして扱う"
         );
+    }
+
+    /// あと何秒「新しい」ままかは、[`usable`] と同じ規則の残り（実装レビュー第2回 Astra 5）。
+    /// 別の規則で数えると、画面が「まだ新しい」と言う値を PC の判定は使わない。
+    #[test]
+    fn あと何秒新しいかはusableと同じ規則の残り() {
+        let ttl = Duration::from_secs(60);
+        let t0 = Now::current();
+        let at = |secs: f64| Now {
+            mono: t0.mono + Duration::from_secs_f64(secs),
+            wall: t0.wall + Duration::from_secs_f64(secs),
+        };
+        let 読み = |started: Now, finished: Now| Reading {
+            mb: 5_000,
+            started,
+            finished,
+        };
+
+        // 始めた時点からの道：残り＝期限−古さ。期限ちょうどで尽きる（`usable` と同じく未満）
+        let reading = 読み(at(0.0), at(1.0));
+        assert_eq!(
+            fresh_for(&reading, None, ttl, at(10.0)),
+            Some(Duration::from_secs(50))
+        );
+        assert_eq!(fresh_for(&reading, None, ttl, at(60.0)), None);
+
+        // 終えた時点からの道（期限 10 秒より長くかかった 30 秒の取得）：残り＝5 秒−終えてからの古さ
+        let short_ttl = Duration::from_secs(10);
+        let reading = 読み(at(0.0), at(30.0));
+        assert_eq!(
+            fresh_for(&reading, None, short_ttl, at(32.0)),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(fresh_for(&reading, None, short_ttl, at(35.0)), None);
+
+        // 両方の道が成り立つなら長いほう（始めてから 6 秒＝残り 4 秒、終えてから 2 秒＝残り 3 秒）
+        let reading = 読み(at(0.0), at(4.0));
+        assert_eq!(
+            fresh_for(&reading, None, short_ttl, at(6.0)),
+            Some(Duration::from_secs(4))
+        );
+
+        // 境界より前に始めた観測・壁時計の巻き戻しは、残りを持たない
+        let reading = 読み(at(0.0), at(0.5));
+        assert_eq!(
+            fresh_for(&reading, Some(at(0.001).mono), ttl, at(2.0)),
+            None
+        );
+        let rewound = Now {
+            mono: at(1.0).mono,
+            wall: t0.wall - Duration::from_secs(10),
+        };
+        assert_eq!(fresh_for(&reading, None, ttl, rewound), None);
+
+        // **有無は `usable` と必ず一致する**（上の総当たりの点を全部通す）
+        for (started, finished, now, ttl) in [
+            (0.0, 1.0, 59.9, 60.0),
+            (0.0, 0.0, 60.0, 60.0),
+            (0.0, 30.0, 34.9, 10.0),
+            (0.0, 30.0, 35.0, 10.0),
+            (0.0, 70.0, 70.1, 60.0),
+        ] {
+            let reading = 読み(at(started), at(finished));
+            let ttl = Duration::from_secs_f64(ttl);
+            assert_eq!(
+                fresh_for(&reading, None, ttl, at(now)).is_some(),
+                usable(&reading, None, ttl, at(now)),
+                "始め {started}・終え {finished}・今 {now}"
+            );
+        }
+    }
+
+    /// 画面は1つの周で全 PC に聞き、全台が落ち着いてから「何枚戻すか」を決める（実装レビュー
+    /// 第2回 Astra 5）。**先に答えた PC の `fresh` が、遅い PC を待つ間に期限を越えたかを
+    /// 画面が判断できる**よう、`fresh` の答えには残りの秒数を添える。
+    #[test]
+    fn freshの答えにはあと何秒新しいかを添える() {
+        let host_free = HostFree::new(true, Arc::new(外側(Some(5_000))), Duration::from_secs(60));
+        host_free.覚えさせる(5_000, Instant::now() - Duration::from_secs(20));
+        let resources = snapshot(&物差しで外側が(12_000, 1_000, 2_000, host_free), None, None)
+            .expect("読めること");
+        assert_eq!(
+            resources.host_free_state,
+            Some(protocol::HostFreeState::Fresh)
+        );
+        let left = resources
+            .host_free_fresh_for_sec
+            .expect("★fresh の答えに、あと何秒新しいかを添えていない");
+        assert!(
+            (39..=40).contains(&left),
+            "期限 60 秒で 20 秒前に始めた値なら、残りは 40 秒（切り捨て）: {left}"
+        );
+
+        // 期限を過ぎた値・WSL でない機械には添えない（`fresh` でないものに残りは無い）
+        let host_free = HostFree::new(true, Arc::new(外側(Some(5_000))), Duration::from_secs(60));
+        host_free.覚えさせる(5_000, Instant::now() - Duration::from_secs(120));
+        let resources = snapshot(&物差しで外側が(12_000, 1_000, 2_000, host_free), None, None)
+            .expect("読めること");
+        assert_eq!(
+            resources.host_free_state,
+            Some(protocol::HostFreeState::Stale)
+        );
+        assert_eq!(resources.host_free_fresh_for_sec, None);
+        let resources = snapshot(&物差し(12_000, 1_000, 2_000), None, None).expect("読めること");
+        assert_eq!(resources.host_free_fresh_for_sec, None);
     }
 
     #[tokio::test]

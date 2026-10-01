@@ -3251,7 +3251,10 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
     // **PC が実体を失ったカードにする**（PC が起き直したときの形）。`抜け殻にする` は実体を
     // 生かしたまま鮮度だけを落とすので、実体の報告が届くと「繋がっている」に戻り、外す口が
     // 記録だけを外す側を通らなくなる（負荷が高いときに実際に揺れた）
-    a2s.manager.forget(card_id);
+    //
+    // **`forget` は使わない。** あちらは外した印を残すので、その後の起こし直しが確かめに
+    // 入る前に断られ、ここで作りたい「確かめ中」に届かない（実装レビュー第2回 Astra 1）
+    a2s.manager.実体だけを畳む(card_id);
     session.kill();
     tokio::time::sleep(Duration::from_millis(300)).await;
     a2s.registry.set_agent_live(agent_id, false);
@@ -3302,4 +3305,69 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
         "★外したカードの実体が PC に起きている（外したことが PC に届かず、確かめの後に起こしている）"
     );
     assert!(a2s.registry.get(card_id).is_none(), "記録から外れていない");
+}
+
+#[tokio::test]
+async fn 外した知らせが起こし直しの頼みより先に_PC_へ届いても起こさない() {
+    // 実装レビュー第2回 Astra 1。**サーバが起こし直しの材料を記録から引いた後**、別の画面で
+    // 外すと、外した知らせ（`Forget`）が頼み（`ReviveSession`）より先に PC へ届く。外す側には
+    // 下ろす札がまだ無く、後から届いた頼みが誰にも見えない実体を起こしていた。
+    //
+    // 順は「知らせを送る → 材料を引いて頼みを送る → 記録を外す」で固定する。材料を引くのが
+    // 知らせの前でも後でも、**記録を外す前なら引ける**ので、PC へ届く順（知らせ → 頼み）は
+    // 同じになる。同じ接続で送るので、届く順は送った順である
+    let a2s = A2s::start("forget-before-revive").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    // PC が実体を失ったカードにする（サーバから見て実体が無い＝記録だけを外す側）
+    a2s.manager.実体だけを畳む(card_id);
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a2s.registry.set_agent_live(agent_id, false);
+    let 外 = common::止める外側::開いたまま();
+    let host_free = session_host_core::resources::HostFree::new(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+    );
+    a2s.manager.set_host_free(host_free);
+    a2s.manager.set_memory_probe(Arc::new(common::十分なメモリ));
+    let mut events = a2s.registry.subscribe_events();
+
+    a2s.browser
+        .forget(a2s.account_id, card_id)
+        .await
+        .expect("外した知らせを PC へ送れること");
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    a2s.registry
+        .archive_owned(a2s.account_id, card_id)
+        .await
+        .expect("記録を外せること");
+
+    assert_eq!(
+        起こし直しの知らせを待つ(&mut events, card_id).await,
+        Some(false),
+        "★外したカードへの頼みを、終わった断りとして返していない"
+    );
+    // 起こすなら、ここで既に起きている
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        a2s.manager.get(card_id).is_none(),
+        "★外したカードの実体を、後から届いた頼みで PC に起こしている"
+    );
+    assert_eq!(
+        外.聞かれた(),
+        0,
+        "外したカードのために Windows 側を聞きに行かないこと"
+    );
 }

@@ -1819,10 +1819,22 @@ async fn 確かめを待っている間に外したカードは確かめが済�
         "★外したカードの実体を起こしている（画面に出ないままメモリを食う）"
     );
     assert_eq!(manager.reserved_revives(), 0, "予約を残していない");
-    assert!(
-        manager.begin_revive(card_id).is_some(),
-        "印が下りていること"
-    );
+    // 外したカードへ後から届いた頼みは、「復旧中」（競合）ではなく外したと断る（実装レビュー
+    // 第2回 Astra 1）。外していないカードの印が下りることは `終わったら印は外れる` が見ている
+    let in_flight = manager
+        .begin_revive(card_id)
+        .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
+    let 断り = manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect_err("起こさずに断ること")
+        .to_string();
+    assert!(断り.contains("一覧から外された"), "{断り}");
 }
 
 #[tokio::test]
@@ -1919,5 +1931,307 @@ async fn 何も持っていないカードを忘れても断らず外すとき�
             Err(session_host_core::session::SessionError::NotFound(_))
         ),
         "無いカードを外せたことにしている"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 実装レビュー第2回（Astra 1・Fable 3〜5）
+// ---------------------------------------------------------------------------
+
+/// 外す知らせが、起こし直しの頼みより**先に**届く順（実装レビュー第2回 Astra 1）。
+///
+/// サーバは起こし直しの材料を記録から引いてから頼みを送る。その間に別の画面でカードを
+/// 外すと、外した知らせ（`Forget`）が先に PC へ届く。**外す側には下ろす札がまだ無く**、
+/// 後から届いた頼みが新しい札を作って、誰にも見えない実体を起こしていた。
+#[tokio::test]
+async fn 外した知らせが起こし直しの頼みより先に届いても起こさない() {
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = common::止める外側::開いたまま();
+    外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+
+    assert!(
+        !manager.forget(card_id),
+        "まだ何も持っていないので、片付けたものは無い"
+    );
+    let 断り = 頼む(&manager, card_id)
+        .await
+        .expect_err("★外したカードへ後から届いた頼みで、実体を起こしている");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+    assert!(
+        manager.get(card_id).is_none(),
+        "外したカードの実体が無いこと"
+    );
+    assert_eq!(
+        外.聞かれた(),
+        0,
+        "外したカードのために Windows 側を聞きに行かないこと"
+    );
+    assert_eq!(manager.reserved_revives(), 0, "予約を取っていないこと");
+
+    // **印は1回で消えない。** 同じ頼みが遅れてもう1通届いても起こさない
+    let 断り = 頼む(&manager, card_id).await.expect_err("2通目も断ること");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+}
+
+#[tokio::test]
+async fn 抜け殻を外した後に遅れて届いた起こし直しの頼みも起こさない() {
+    // `archive` の側（サーバから見て実体があるカード）。外した後に届く頼みを断る
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("1回目は起こせること");
+    manager.kill(card_id).expect("寝かせられること");
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+
+    manager.archive(card_id).expect("外せること");
+    let 断り = 頼む(&manager, card_id)
+        .await
+        .expect_err("★外したカードへ遅れて届いた頼みで、実体を起こしている");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+    assert!(
+        manager.get(card_id).is_none(),
+        "外したカードの実体が無いこと"
+    );
+}
+
+#[tokio::test]
+async fn 外せなかったカードには印を残さず後から起こせる() {
+    // `archive` が札も実体も見つけられなければ断り、記録は一覧に残る。**そこで印を立てると、
+    // 残ったカードを二度と起こせなくなる**
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    assert!(
+        matches!(
+            manager.archive(card_id),
+            Err(session_host_core::session::SessionError::NotFound(_))
+        ),
+        "何も無いカードは外せないと断ること"
+    );
+    頼む(&manager, card_id)
+        .await
+        .expect("★外せなかった（一覧に残った）カードを、外したものとして断っている");
+}
+
+/// 起こしている最中に外す（実装レビュー第2回 Fable 5）。
+///
+/// 以前は起こす側が札のロックを握ったまま実体を作り、外す側はそれが済むまで std の
+/// `Mutex` で**実行時のワーカーごと止まって**待っていた。いまは外す側は待たずに戻り、
+/// 作り終えた直後に起こす側が自分で畳む。
+#[tokio::test]
+async fn 起こしている最中に外しても外す側は待たされず起こした実体は畳まれる() {
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    let mut events = manager.subscribe_events();
+    // 起こす直前（起こし始めの印を立てた後）に、**別のスレッドで**外す。同じスレッドで外すと、
+    // 札のロックを握ったまま作る形では二重に取って固まり、赤ではなく止まって見える
+    let 外した結果: Arc<std::sync::Mutex<Option<Result<(), String>>>> = Arc::default();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 外した結果 = Arc::clone(&外した結果);
+        manager.起こす直前に差し込む(Arc::new(move || {
+            let Some(manager) = manager_weak.upgrade() else {
+                return;
+            };
+            let (送る, 受ける) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = 送る.send(manager.archive(card_id).map_err(|err| err.to_string()));
+            });
+            // 外す側が戻るのを待つ。**起こし終わるまで待たされていれば、ここで時間切れになる**
+            let 結果 = 受ける
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| Err("時間切れ".to_string()));
+            *外した結果.lock().expect("ロックが壊れていない") = Some(結果);
+        }));
+    }
+
+    let 結果 = 頼む(&manager, card_id).await;
+    assert_eq!(
+        外した結果.lock().expect("ロックが壊れていない").clone(),
+        Some(Ok(())),
+        "★外す側が、起こし終わるまで待たされている（または外せなかった）"
+    );
+    let 断り = 結果.expect_err("外されたのだから断ること");
+    assert!(断り.contains("一覧から外された"), "{断り}");
+    assert!(
+        manager.get(card_id).is_none(),
+        "★起こしている最中に外したカードの実体が残っている（誰にも見えないままメモリを食う）"
+    );
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+    let mut 消えたと配った = 0;
+    while let Ok(message) = events.try_recv() {
+        if matches!(message, ServerMessage::SessionRemoved { card_id: id } if id == card_id) {
+            消えたと配った += 1;
+        }
+    }
+    assert_eq!(消えたと配った, 1, "外したことを1回だけ配ること");
+}
+
+/// ログを集める（`tracing` の出力先を差し替える。**同じスレッドで走ったぶんだけ**拾う）。
+#[derive(Clone, Default)]
+struct 行の溜め(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for 行の溜め {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("ロックが壊れていない")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for 行の溜め {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn ログを集める<T>(body: impl FnOnce() -> T) -> (T, String) {
+    let 溜め = 行の溜め::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(溜め.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8_lossy(&溜め.0.lock().expect("ロックが壊れていない")).into_owned();
+    (out, text)
+}
+
+#[tokio::test]
+async fn 起こし終えた後に外すと取り下げたとは記録しない() {
+    // 実装レビュー第2回 Fable 3。札は立ち上がりきるまで表に残るので、起こし終えた後に外しても
+    // 札は下ろせる。それを「進んでいた起こし直しを取り下げます」と書くと、取り下げの行
+    // （`revive_withdrawn`）が続かないのに取り下げたと読める。**ログから原因を追う PJT なので、
+    // 起きたことと違う行を残さない**
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    // 擬似 claude はフックを送らないので、起こした後も立ち上がりきらない（札が表に残る）
+    頼む(&manager, card_id).await.expect("起こせること");
+
+    let (外した, 行) = ログを集める(|| manager.archive(card_id));
+    外した.expect("外せること");
+    assert!(
+        !行.contains("取り下げます"),
+        "★起こし終えていたのに、起こし直しを取り下げたと記録している: {行}"
+    );
+    assert!(行.contains("起こし直しは済んでいた"), "{行}");
+    assert!(
+        manager.get(card_id).is_none(),
+        "起こした実体を畳んでいること"
+    );
+}
+
+#[tokio::test]
+async fn wslでない機械で予約を引いても枚数が変わらなければ両方の数を出す() {
+    // 実装レビュー第2回 Fable 4。1枚目を 3,500 で通すと見込みは 2,500 になる。2枚目のときの
+    // 空きは 2,600——予約が無くても (2,600 − 2,000) ÷ 1,000 = 0 枚なので、決めたのは WSL の中の
+    // 空きである。**予約を引いた 2,500 を「空き」と呼ぶと、画面の「空き」と数が合わない**
+    let manager = common::manager_with(床の設定());
+    manager.set_host_free(session_host_core::resources::HostFree::new(
+        false,
+        common::止める外側::開いたまま(),
+        Duration::from_secs(60),
+    ));
+    manager.set_memory_probe(名乗るメモリ::順に(&[3_500], 2_600));
+    頼む(&manager, CardId::new())
+        .await
+        .expect("1枚目は通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+
+    let 断り = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("2枚目は断られること");
+    assert!(
+        断り.contains(
+            "使える空き 2500 MB＝空き 2600 MB から、起こしている途中の 1 枚ぶんを差し引いた値"
+        ),
+        "★予約を引いた値を、引く前の空きと区別せずに「空き」と呼んでいる: {断り}"
+    );
+    assert!(
+        !断り.contains("1分ほど待って"),
+        "予約が枚数を変えていないのに、待てば通ると言っている: {断り}"
+    );
+
+    // **予約が無いときの文面と数は以前のまま**
+    let manager = common::manager_with(床の設定());
+    manager.set_host_free(session_host_core::resources::HostFree::new(
+        false,
+        common::止める外側::開いたまま(),
+        Duration::from_secs(60),
+    ));
+    manager.set_memory_probe(名乗るメモリ::一定(2_600));
+    let 断り = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("断られること");
+    assert!(
+        断り.contains("（空き 2600 MB／1枚あたり 1000 MB ＋ 残す余白 2000 MB）"),
+        "{断り}"
+    );
+}
+
+#[tokio::test]
+async fn 外す前の起こし直しの札が残っている間に届いた頼みも競合ではなく外したと断る() {
+    // 実装レビュー第2回 Astra 1。外す前の起こし直しの札は、立ち上がりきるまで表に残る。
+    // **外した印を札より後に見ると、その間に届いた頼みが競合（「復旧中」）に化け**、
+    // 待てば起きると読まれる（`busy: Some(true)`）
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    // 擬似 claude はフックを送らないので、起こした後も札が表に残る
+    頼む(&manager, card_id).await.expect("起こせること");
+    manager.archive(card_id).expect("外せること");
+
+    let in_flight = manager
+        .begin_revive(card_id)
+        .expect("★外したカードへの頼みを、競合（復旧中）として断っている");
+    let 断り = manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect_err("起こさずに断ること")
+        .to_string();
+    assert!(断り.contains("一覧から外された"), "{断り}");
+    assert!(
+        manager.get(card_id).is_none(),
+        "外したカードの実体が無いこと"
     );
 }

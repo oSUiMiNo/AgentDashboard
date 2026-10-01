@@ -698,6 +698,7 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
       counted_mb: 5_408,
       host_free_age_sec: state === 'checking' ? null : state === 'stale' ? 240 : 12,
       host_free_state: state,
+      host_free_fresh_for_sec: null,
       host_free_error: state === 'failed' ? 'powershell.exe を起動できません' : null,
       effective_mb: 5_408,
       ...overrides,

@@ -908,9 +908,12 @@ pub async fn branch(target: &Target, prefix: &str) -> Result<Outcome, ClientErro
             origin: Some(card),
         },
         "枝分かれ",
-        wait::SPAWN_CAP,
+        // **寝ている元の起こし直しを含めた枠**（実装レビュー第2回 Astra 3）。時間切れは
+        // 取り消しではないので、裏で続いていることを添える（`revive` と同じ）
+        wait::BRANCH_CAP,
     )
-    .await;
+    .await
+    .map_err(wait::note_revive_timeout);
     ws.close().await;
     outcome
 }

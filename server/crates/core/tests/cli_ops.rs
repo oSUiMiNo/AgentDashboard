@@ -222,6 +222,43 @@ async fn rmは外れたの知らせまで待つ() {
     );
 }
 
+#[tokio::test]
+async fn rmは解決した後に外されていたら持ち主の門の断りでその場で落ちる() {
+    // 実装レビュー第2回 Astra 4。ID を解決した後に別の画面でカードが外されると、外す頼みは
+    // 持ち主の門で `NotFound` を返される。**外す待ちがそれまで聞き流すと、もう届かない
+    // 外れた知らせを上限まで待ち、「確かめられなかった」（3）で終わる**
+    let server = TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    let target = target_of(&server);
+    let card = listed_card(&server, &session).await;
+    let card_id = session.meta().card_id;
+    // 別の画面が先に外す
+    client::archive(&target, &card[..8])
+        .await
+        .expect("外せること");
+
+    // 解決済みの ID で外す頼みを直に送る。`client::archive` は一覧から ID を引き直すので、
+    // 解決の段で断られて門まで届かない
+    let mut ws = Ws::connect(&target).await.expect("繋がること");
+    ws.send(&ClientMessage::Archive { card_id })
+        .await
+        .expect("送れること");
+    let err = wait::run(
+        &mut ws,
+        wait::Goal::Removed { card: card_id },
+        "カードの取り外し",
+        Duration::from_secs(10),
+    )
+    .await
+    .expect_err("断られること");
+    assert_eq!(
+        err.exit_code(),
+        1,
+        "★持ち主の門の断りを聞き流し、時間切れまで待っている: {err}"
+    );
+    assert!(err.to_string().contains("見つかりません"), "{err}");
+}
+
 /// モデル切替のテストで使う擬似のグローバル設定（`model.rs` と同じ形）。
 const GLOBAL: &str = r#"{
   "permissions": { "defaultMode": "auto" },

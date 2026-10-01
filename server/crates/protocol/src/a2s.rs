@@ -1190,6 +1190,9 @@ mod tests {
                 host_free_state: Some(crate::HostFreeState::Failed),
                 host_free_error: Some("起動できません: 見つかりません".to_string()),
                 effective_mb: Some(5_000),
+                // あと何秒新しいか（実装レビュー第2回 Astra 5）。**`None` にすると線を通る
+                // ことを確かめたことにならない**
+                host_free_fresh_for_sec: Some(56),
             }),
             // 実在する CLI セッション（名前付け設計§8-3）。**足したら必ずここへ足す**
             HostReply::Sessions {
@@ -1229,6 +1232,7 @@ mod tests {
                 host_free_state: Some(crate::HostFreeState::Fresh),
                 host_free_error: None,
                 effective_mb: Some(6_000),
+                host_free_fresh_for_sec: Some(56),
             }),
         })
         .expect("書けること");

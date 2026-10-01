@@ -825,6 +825,7 @@ mod tests {
             host_free_state: None,
             host_free_error: None,
             effective_mb: None,
+            host_free_fresh_for_sec: None,
         }
     }
 
@@ -852,6 +853,7 @@ mod tests {
             host_free_error: (state == protocol::HostFreeState::Failed)
                 .then(|| "起動できません: No such file or directory".to_string()),
             effective_mb: Some(effective_mb),
+            host_free_fresh_for_sec: None,
         }
     }
 

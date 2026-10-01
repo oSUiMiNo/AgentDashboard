@@ -61,6 +61,13 @@ export interface HostResources {
   host_free_age_sec: number | null
   /** 外側の値の様子。**WSL でない・期限 0 なら `null`** */
   host_free_state: HostFreeState | null
+  /**
+   * `fresh` の値が、答えた時点から**あと何秒新しいか**。**古い PC は送ってこない**（`null`）。
+   *
+   * 遅い PC を待つ間に、先に答えた PC の `fresh` が期限を越えることがある。これが無いと
+   * 画面はそれを見分けられない（[`settleHostResources`]）
+   */
+  host_free_fresh_for_sec: number | null
   /** 最後に外側を聞けなかった理由（`failed` のとき） */
   host_free_error: string | null
   /** 予約を引いた後の、判定に使う空き（MB） */
@@ -220,7 +227,7 @@ function isNoAnswer(answer: HostAnswer): answer is NoAnswer {
  * 黙って全部送る道を塞ぐ。**「入るぶんだけ戻す」は PC ごと**——確かめられた PC の
  * ぶんまで巻き添えにしない。
  *
- * **`stale`・`checking` は、門が聞き直した後の答えとして読む**（[`fetchSettledHostResources`]）。
+ * **`stale`・`checking` は、門が聞き直した後の答えとして読む**（[`settleHostResources`]）。
  * ここへ残っているなら、聞き直しの上限に達したということである。
  */
 export function planRevive(
@@ -384,6 +391,61 @@ export type WaitingFor = 'windows' | 'answer'
 /** 1周ぶんの答え（入館証切れは周の外で扱う） */
 type RoundAnswer = HostResources | null | typeof NO_ANSWER
 
+/** PC 1台ぶんの答えと、それを聞いた時刻 */
+interface 受け取り {
+  answer: RoundAnswer
+  /**
+   * その周で聞き始めた時刻（`Date.now()`）。**新しさの残りはここから測る。**
+   *
+   * PC が残りを数えたのは、聞き始めてから受け取るまでのどこかである。受け取った時刻から
+   * 測ると、運ぶのにかかったぶんだけ新しく見積もる——確かめられていない側へ倒すため、早いほうを使う
+   */
+  askedAt: number
+}
+
+/** 1周で受け取ったもの。**締切で切られたか**を添える */
+interface 周の答え extends 受け取り {
+  /**
+   * **締切で打ち切ったから答えが無い。** PC が答えなかったのではなく、聞くのを途中でやめた。
+   * 503・通信の失敗・1回の上限（[`ASK_LIMIT_MS`]）で切ったものは含めない
+   */
+  切られた: boolean
+}
+
+/**
+ * いま読むとどうなる答えか。
+ *
+ * **答えた時点で `fresh` でも、新しさの残り（`host_free_fresh_for_sec`）を使い切ったら
+ * `stale` として読む。** PC がいま聞かれたら返す形に直すので、聞き直すか（[`needsRecheck`]）・
+ * 何枚戻すか（[`planRevive`]）・どう見せるかは、`stale` の答えと同じ道を通る。
+ *
+ * **残りの欄が無い（古い PC）なら、いまの扱いのまま。** 欄そのものが来ないので `== null` で比べる
+ */
+function 今の答え(got: 受け取り, now: number): RoundAnswer {
+  const answer = got.answer
+  if (
+    answer === null ||
+    answer === NO_ANSWER ||
+    answer.host_free_state !== 'fresh' ||
+    answer.host_free_fresh_for_sec == null
+  ) {
+    return answer
+  }
+  const 経過 = now - got.askedAt
+  if (経過 < answer.host_free_fresh_for_sec * 1_000) {
+    return answer
+  }
+  return {
+    ...answer,
+    host_free_state: 'stale',
+    host_free_age_sec:
+      answer.host_free_age_sec == null
+        ? null
+        : answer.host_free_age_sec + Math.floor(経過 / 1_000),
+    host_free_fresh_for_sec: 0,
+  }
+}
+
 /** この答えなら、もう1周聞く */
 function 落ち着いていない(answer: RoundAnswer): boolean {
   return answer === NO_ANSWER || needsRecheck(answer)
@@ -393,20 +455,28 @@ function 落ち着いていない(answer: RoundAnswer): boolean {
  * 全台へ1回ずつ聞く。**同じ周の問い合わせは同時に始め、同じ打ち切りを共有する。**
  *
  * - 1回の上限は [`ASK_LIMIT_MS`] と締切の近いほう。超えた PC は [`NO_ANSWER`]
+ * - **締切のほうで切ったときは、切られた PC に印を付ける**（[`周の答え`]）
  * - **1台が 401 を返したら、残りも打ち切る**——入館証が切れているなら、他の答えを待っても1枚も送らない
  */
 async function 一周(
   hosts: readonly string[],
   deadline: number,
   outer: AbortSignal,
-): Promise<Map<string, RoundAnswer> | typeof SIGNED_OUT> {
+): Promise<Map<string, 周の答え> | typeof SIGNED_OUT> {
   const 周 = new AbortController()
+  const askedAt = Date.now()
+  const 残り = deadline - askedAt
+  const 締切で切る = 残り < ASK_LIMIT_MS
+  let 締切に達した = false
   const 打ち切る = () => {
     周.abort()
   }
   const timer = setTimeout(
-    打ち切る,
-    Math.max(0, Math.min(ASK_LIMIT_MS, deadline - Date.now())),
+    () => {
+      締切に達した = 締切で切る
+      周.abort()
+    },
+    Math.max(0, Math.min(ASK_LIMIT_MS, 残り)),
   )
   outer.addEventListener('abort', 打ち切る)
   if (outer.aborted) {
@@ -419,15 +489,16 @@ async function 一周(
         if (answer === SIGNED_OUT) {
           周.abort()
         }
-        return [host, answer] as const
+        // **返ってきた時点の印で見る。** 切る前に 503 で返った PC は、切られたのではない
+        return [host, answer, answer === NO_ANSWER && 締切に達した] as const
       }),
     )
-    const 揃った = new Map<string, RoundAnswer>()
-    for (const [host, answer] of answers) {
+    const 揃った = new Map<string, 周の答え>()
+    for (const [host, answer, 切られた] of answers) {
       if (answer === SIGNED_OUT) {
         return SIGNED_OUT
       }
-      揃った.set(host, answer)
+      揃った.set(host, { answer, askedAt, 切られた })
     }
     return 揃った
   } finally {
@@ -479,12 +550,22 @@ export interface SettleOptions {
  * 聞き直すと、揃ったときには先に答えた PC の値が数十秒前のものになっている。PC 側は
  * 期限内なら即答するので、全台へ聞き直しても負荷はほぼ無い。
  *
+ * **同じ周の中でも古くなる。** 先に答えた PC の `fresh` が、遅い PC を待つ間に期限を
+ * 越えることがある。周の終わりと返す瞬間に、新しさの残りを使い切った `fresh` を `stale`
+ * として読み直す（[`今の答え`]）——落ち着いていない側へ戻るので、締切まで聞き直し、
+ * 間に合わなければ確かめられていない PC になる。
+ *
  * - 落ち着いた＝新しい値・`failed`・状態の欄が無い・「数えない」。`checking`・`stale`・
  *   答えが来なかった PC が1台でも居れば、1秒おいて**全台**をもう1周聞く
- * - 締切に達したら、**最後の周の答え**を返す。[`planRevive`] が落ち着いていない PC を
+ * - 締切に達したら、**PC ごとの最後の答え**を返す。[`planRevive`] が落ち着いていない PC を
  *   「確かめられていない」として 0 枚に数える
- * - **答えが来なかった PC は、前の周や前回の答えを持ち回しても数えない**（[`NoAnswer`]）。
- *   前の周の `fresh` を使い回すと、古い値で数えることになる
+ * - **締切で切った周では、切られた PC だけ前の周の答えを使う。** 締切の直前に始めた周は
+ *   途中で切られるが、それは PC が答えなかったのではない——「答えが来なかった」と読むと、
+ *   直前まで確かめられていた PC まで 0 枚に化け、見出しも原因を取り違える。前の周の答えは
+ *   聞いた時刻を持ったまま運ぶので、`fresh` でも期限を越えていれば `stale` として読む。
+ *   **残り時間が短い周を始めないことでは避けない**——残りより遅い PC はそれでも切られる
+ * - **答えが来なかった PC は、それより前の周や前回の答えを持ち回しても数えない**（[`NoAnswer`]）。
+ *   1回の上限で切った PC・503・通信の失敗はここに入る。前回の答えは表示にだけ使う
  * - 1台でも 401 なら [`SIGNED_OUT`]（1枚も送らない側）
  * - 打ち切られたら `'cancelled'`。**遅れた答えで送らないため**
  */
@@ -498,7 +579,7 @@ export async function settleHostResources(
       前に聞けた.set(host, found)
     }
   }
-  let 最後の周 = new Map<string, RoundAnswer>()
+  let 最後の周 = new Map<string, 受け取り>()
   for (;;) {
     const 周 = await 一周(hosts, deadline, signal)
     if (signal.aborted) {
@@ -507,14 +588,20 @@ export async function settleHostResources(
     if (周 === SIGNED_OUT) {
       return SIGNED_OUT
     }
-    最後の周 = 周
-    for (const [host, answer] of 周) {
-      if (answer !== null && answer !== NO_ANSWER) {
-        前に聞けた.set(host, answer)
+    const 前の周 = 最後の周
+    最後の周 = new Map()
+    for (const [host, got] of 周) {
+      const 前 = 前の周.get(host)
+      最後の周.set(host, got.切られた && 前 !== undefined ? 前 : got)
+      if (got.answer !== null && got.answer !== NO_ANSWER) {
+        前に聞けた.set(host, got.answer)
       }
     }
-    const 待つ = [...周.values()].filter(落ち着いていない)
-    if (待つ.length === 0 || Date.now() >= deadline) {
+    const いま = Date.now()
+    const 待つ = [...最後の周.values()]
+      .map((got) => 今の答え(got, いま))
+      .filter(落ち着いていない)
+    if (待つ.length === 0 || いま >= deadline) {
       break
     }
     onWaiting?.(待つ.every((answer) => answer === NO_ANSWER) ? 'answer' : 'windows')
@@ -522,15 +609,18 @@ export async function settleHostResources(
     if (signal.aborted) {
       return 'cancelled'
     }
-    // **眠った後にも締切を見る。** 残り0ミリ秒で次の周を始めると、全台が答え無しになる
+    // **眠った後にも締切を見る。** 残り0ミリ秒で次の周を始めても、何も聞けずに切られるだけ
     if (Date.now() >= deadline) {
       break
     }
   }
+  // **返す瞬間の時刻で読み直す。** 眠った後に締切で抜けたときは、最後の周から1秒以上経っている
+  const 返す時刻 = Date.now()
   return new Map(
     hosts.map((host): [string, HostAnswer] => {
+      const got = 最後の周.get(host)
       // **`??` で既定を当てない。** `null`（数えない）まで答え無しに化ける
-      const answer = 最後の周.has(host) ? (最後の周.get(host) as RoundAnswer) : NO_ANSWER
+      const answer = got === undefined ? NO_ANSWER : 今の答え(got, 返す時刻)
       return [
         host,
         answer === NO_ANSWER ? noAnswer(前に聞けた.get(host) ?? null) : answer,

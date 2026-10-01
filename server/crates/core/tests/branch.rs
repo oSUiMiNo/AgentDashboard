@@ -1193,3 +1193,53 @@ async fn 二枚になるまで待つ(server: &TestServer) -> bool {
     .await
     .is_ok()
 }
+
+#[tokio::test]
+async fn cliの枝分かれは元の起こし直しの競合の知らせで落ちず段取りの完了まで待つ() {
+    // 実装レビュー第2回 Astra 2。寝ている元はサーバの段取りが起こすので、起こし直しの知らせ
+    // （種別 `revive`）が元の席宛てに届く。競合（人が先に起こしていた）は待てば起きる——
+    // **CLI がこれを失敗と読むと、失敗を返した後も裏で枝分かれが進む**。段取りは正しく待つので、
+    // 記録だけを見る上の試験には映らない。ここでは CLI の `branch` の返り値を見る
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let (card, _) = 入力待ちのカード(&server, &target, &work_dir("cli-revive-busy")).await;
+    client::kill(&target, &card[..8])
+        .await
+        .expect("寝かせられること");
+    寝るまで待つ(&server, &card).await;
+    let card_id = 載っているカードID(&server, &card);
+
+    let 枝分かれ = tokio::spawn({
+        let target = target.clone();
+        let card = card.clone();
+        async move { client::branch(&target, &card[..8]).await }
+    });
+    let 目当て = card.clone();
+    server
+        .wait_for_listed("寝ていた席が起きてくる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て
+                    && !matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    起こし直しの知らせを配る(&server, card_id, Some(true));
+    // CLI が知らせを読むだけの間を置く（落ちるなら、ここで既に落ちている）
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("起きた席へ指示を送れること");
+
+    let 結果 = tokio::time::timeout(Duration::from_secs(30), 枝分かれ)
+        .await
+        .expect("CLI の待ちが終わること")
+        .expect("落ちないこと");
+    結果.expect("★元の起こし直しの競合の知らせで、CLI の枝分かれが失敗している");
+    assert!(二枚になるまで待つ(&server).await, "枝が作られていること");
+}

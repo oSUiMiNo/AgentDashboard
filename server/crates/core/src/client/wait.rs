@@ -34,11 +34,20 @@ pub const REMOVE_CAP: Duration = Duration::from_secs(30);
 /// 全部は吸収できない。**時間切れの文面（[`note_revive_timeout`]）が本体である。**
 pub const REVIVE_CAP: Duration =
     Duration::from_secs(SPAWN_CAP.as_secs() + session_host_core::resources::CONFIRM_WAIT.as_secs());
+/// `branch`：寝ている元を起こし直す長さ（[`REVIVE_CAP`]。Windows 側の空きの確かめを含む）
+/// ＋ 枝分かれ自身の長さ（[`SPAWN_CAP`]。以前はこれだけだった）（実装レビュー第2回 Astra 3）。
+///
+/// 以前は寝ている元の確かめ（最大 65 秒）だけで枠を使い切り、正常に進んでいる枝分かれでも
+/// CLI が先に時間切れになった。**作業中の元のターンの終わりを待つ段は含めない**——サーバは
+/// 最大 30 分待つので、上限をいくら上げても吸収しきれない。時間切れの文面
+/// （[`note_revive_timeout`]）で、裏で続いていることを伝える。
+pub const BRANCH_CAP: Duration = Duration::from_secs(REVIVE_CAP.as_secs() + SPAWN_CAP.as_secs());
 
 /// 起こし直しの時間切れに、**裏ではまだ続いているかもしれない**ことと確かめ方を添える。
 ///
 /// 時間切れは「断られた」ではない。添えないと、利用者もエージェントも送り直して
-/// 「このカードは復旧中です」に当たる。
+/// 「このカードは復旧中です」に当たる。**枝分かれも同じ**（段取りはサーバが持っていて、
+/// CLI が待つのをやめても止まらない。実装レビュー第2回 Astra 3）。
 pub fn note_revive_timeout(error: ClientError) -> ClientError {
     match error {
         ClientError::Timeout { what, secs, .. } => ClientError::Timeout {
@@ -158,22 +167,48 @@ pub enum Goal {
 impl Goal {
     /// 知らせを1つ観測する。
     pub fn observe(&mut self, message: &ServerMessage) -> Step {
-        // **外す待ちは、外す断りでだけ落ちる**（実装レビュー Astra 1）。外すと、そのカードで
-        // 進んでいた起こし直しが取り下げられ、その断り（種別 `revive`）が外れた知らせより
-        // 先に届くことがある。下の規則のまま読むと、外れたのに「外せませんでした」と言う
+        // **外す待ちは、取り下げた起こし直しの断りでだけ待ち続ける**（実装レビュー Astra 1・
+        // 第2回 Astra 4）。外すと、そのカードで進んでいた起こし直しが取り下げられ、その断り
+        // （種別 `revive`）が外れた知らせより先に届くことがある。下の規則のまま読むと、
+        // 外れたのに「外せませんでした」と言う。
+        //
+        // **それ以外は下の規則で落ちる。** 以前は外す種別以外を全部聞き流していたので、
+        // 解決した後に別の画面でカードが外されたとき、持ち主の門が返す `NotFound` まで
+        // 聞き流し、もう届かない外れた知らせを上限まで待っていた
         if let (
             Self::Removed { card },
             ServerMessage::Error {
                 card_id: Some(errored),
                 message,
-                kind,
+                kind: ErrorKind::Revive,
                 ..
             },
         ) = (&*self, message)
             && errored == card
-            && *kind != ErrorKind::Archive
         {
-            return Step::Note(format!("（外す前に進んでいた操作の知らせ）{message}"));
+            return Step::Note(format!("（外す前に進んでいた起こし直しの知らせ）{message}"));
+        }
+        // **枝分かれの待ちは、元のセッションの起こし直しの知らせでは落ちない**（実装
+        // レビュー第2回 Astra 2）。寝ている元はサーバの段取りが起こすので、その知らせが元の
+        // 席宛てに届く。競合（人が先に起こしていた）なら待てば起きるし、終わった断りなら
+        // 段取り自身が理由を添えて枝分かれを断る（種別 `branch`）。**枝分かれが済んだか
+        // 断られたかを決めるのは段取りの知らせだけ**にする——ここで落ちると、CLI が失敗を
+        // 返した後も裏で枝分かれが進む
+        if let (
+            Self::NewCard {
+                origin: Some(origin),
+                ..
+            },
+            ServerMessage::Error {
+                card_id: Some(errored),
+                message,
+                kind: ErrorKind::Revive,
+                ..
+            },
+        ) = (&*self, message)
+            && errored == origin
+        {
+            return Step::Note(format!("（元のセッションの起こし直しの知らせ）{message}"));
         }
         // Error はどの Goal でも同じ扱い（CLI設計§8-2・§7-3）：
         // 対象カード宛てか宛先なし（Spawn の失敗・解釈不能）は即座に落ち、
@@ -446,6 +481,110 @@ mod tests {
             message: "断り".to_string(),
         });
         assert_eq!(refused.to_string(), "断り");
+    }
+
+    /// 枝分かれの待ちの上限は、寝ている元の起こし直し（確かめを含む）と枝分かれ自身の長さから
+    /// 組む（実装レビュー第2回 Astra 3）。**確かめだけで 60 秒をまたぐ**ので、枝分かれ自身の
+    /// 60 秒のままだと、正常に進んでいる枝分かれでも CLI が先に諦める。
+    #[test]
+    fn 枝分かれの待ちの上限は元の起こし直しを含めて定数から組まれる() {
+        assert_eq!(BRANCH_CAP, REVIVE_CAP + SPAWN_CAP);
+        assert!(
+            session_host_core::resources::CONFIRM_WAIT > SPAWN_CAP,
+            "前提：確かめだけで枝分かれ自身の枠をまたぐ"
+        );
+        assert!(
+            BRANCH_CAP >= session_host_core::resources::CONFIRM_WAIT + SPAWN_CAP + SPAWN_CAP,
+            "★確かめ・起こし直し・枝分かれ自身を吸収できない"
+        );
+        assert_eq!(BRANCH_CAP, Duration::from_secs(185));
+    }
+
+    /// **定数だけ直しても、`branch` が古い枠のままなら CLI は先に諦める。** 使う側を本文で見る
+    /// （前例：`session-host-core` の `印は仕事を切り離す前に立てる`）。
+    #[test]
+    fn 枝分かれはその枠で待ち時間切れに裏で続いていることを添える() {
+        let source = include_str!("mod.rs");
+        let 本体 = source
+            .find("pub async fn branch(")
+            .map(|start| &source[start..])
+            .expect("枝分かれの口があること");
+        let 本体 = &本体[..本体.find("\n}\n").expect("関数の終わりがあること")];
+        assert!(
+            本体.contains("wait::BRANCH_CAP"),
+            "★枝分かれが元の起こし直しを含めた枠で待っていない"
+        );
+        assert!(
+            本体.contains("note_revive_timeout"),
+            "★枝分かれの時間切れに、裏で続いていることを添えていない"
+        );
+    }
+
+    #[test]
+    fn 枝分かれの待ちは元の起こし直しの知らせでは落ちず段取りの知らせで決まる() {
+        // 実装レビュー第2回 Astra 2。寝ている元はサーバの段取りが起こすので、その知らせが
+        // 元の席宛てに届く。**競合は待てば起き、終わった断りは段取りが理由を添えて断る**——
+        // 済んだか断られたかを決めるのは段取りの知らせだけ
+        let 押した席 = CardId::new();
+        let mut goal = Goal::NewCard {
+            known: HashSet::new(),
+            origin: Some(押した席),
+        };
+        for busy in [Some(true), Some(false), None] {
+            let step = goal.observe(&ServerMessage::Error {
+                card_id: Some(押した席),
+                message: "このカードは復旧中です".to_string(),
+                kind: ErrorKind::Revive,
+                busy,
+            });
+            assert!(
+                matches!(step, Step::Note(_)),
+                "★元の起こし直しの知らせ（busy: {busy:?}）で、枝分かれの待ちが落ちている"
+            );
+        }
+        // 段取り自身の断りでは、今までどおりその場で落ちる
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(押した席),
+                message: "元のセッションを起こせませんでした：メモリが足りない".to_string(),
+                kind: ErrorKind::Branch,
+                busy: None,
+            }),
+            Step::Fail(_)
+        ));
+        // 段取りが済めば、新しいカードで満ちる
+        let mut goal = Goal::NewCard {
+            known: HashSet::new(),
+            origin: Some(押した席),
+        };
+        let 新しい席 = CardId::new();
+        assert!(matches!(
+            goal.observe(&ServerMessage::SessionUpsert {
+                session: Box::new(meta(新しい席, SessionStatus::Starting)),
+            }),
+            Step::Done(_)
+        ));
+    }
+
+    #[test]
+    fn 外す待ちは持ち主の門の断りでその場で落ちる() {
+        // 実装レビュー第2回 Astra 4。**聞き流すのは取り下げた起こし直しの断りだけ。** 解決の後に
+        // 別の画面で外されると、持ち主の門は `NotFound` を返す。聞き流すと、もう届かない
+        // 外れた知らせを上限まで待つ
+        let card = CardId::new();
+        let mut goal = Goal::Removed { card };
+        assert!(
+            matches!(
+                goal.observe(&ServerMessage::Error {
+                    card_id: Some(card),
+                    message: "セッションが見つかりません".to_string(),
+                    kind: ErrorKind::NotFound,
+                    busy: None,
+                }),
+                Step::Fail(_)
+            ),
+            "★持ち主の門の断りを聞き流している"
+        );
     }
 
     fn meta(card: CardId, status: SessionStatus) -> SessionMeta {

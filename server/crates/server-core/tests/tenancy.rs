@@ -1241,6 +1241,7 @@ async fn 他人の_PC_の資源は引けない() {
                     host_free_state: None,
                     host_free_error: None,
                     effective_mb: Some(8_192),
+                    host_free_fresh_for_sec: None,
                 }),
             })
             .await;
