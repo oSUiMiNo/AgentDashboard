@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 213
+min_entries = 218
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1691,6 +1691,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "PC がカードを名乗ったときの照合で DB の答えが遅くても、時間の上限（2秒）を過ぎたら確かめられなかったとして持ち続け、受信へ戻って次の報告を処理する"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/gateway.rs", name = "名乗りの照合の_DB_の答えが遅くても時間の上限で受信へ戻る" },
+]
+breaks_when = "gateway.rs の reconcile の時間の上限（tokio::time::timeout）を外すと、名指しの1本が★で落ちることを直した担当が実測した（実装レビュー第10回 Astra 1）。自分でも reconcile の上限を conn.recheck_limits.timeout から Duration::from_secs(3600) に替え、名指しの1本が「★名乗りの照合の DB の答えを上限を過ぎても待ち続け、次の報告を処理していない」で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "PC が他のアカウントのカードを「外した」と報告したとき、記録にも外した印にも触らず外した知らせも配らない（印はアカウントとカードの組で持つので、持ち主がそのカードを名乗れば一覧に出る）"
 gate        = "unit"
 tests       = [
@@ -2149,6 +2159,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "多くの番号を運ぶ断りを控えたときでも、答えの本体は番号ごとに写さず、運ぶ番号のあいだで1つを分け合う"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "多くの番号を運ぶ断りを控えても本体は1つを分け合う" },
+]
+breaks_when = "registry.rs の OpLedger が控える答えの本体を番号ごとに写すと、名指しの1本が★で落ちる（番号200個の断りで控えが持つ番号の合計が 40000）ことを直した担当が実測した（実装レビュー第10回 Astra 2）。自分でも控えの写しを entry.answer = Some(Arc::new((**body).clone())) にし、名指しの1本が「★答えの本体を番号ごとに写している」（40000 対 200）で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "寝ているカードの終了を待つとき、接続直後の写しの Ended では満ちず（連絡係を使う構成で写しが2枚届いても満ちない）、終了の頼みの番号が付いた答えで満ちる。止めるものが無かったカードは、記録が終わっていれば成功になる"
 gate        = "unit"
 tests       = [
@@ -2218,6 +2238,17 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "束ねる番号が上限に満ちた後に番号付きで起こし直しを頼んだとき、競合と言わずにその番号への終わった断りをその場で返し、ローカルでは全体へ配って起きるのを待つ枝分かれも拾える（ローカル・セルフホストとも）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/restart.rs", name = "束が満ちた後の起こし直しの頼みにはその番号への終わった断りを配る" },
+  { file = "server/crates/core/tests/a2s.rs", name = "束が満ちた後の起こし直しの頼みには_PC_がその番号への終わった断りを返す" },
+]
+breaks_when = "local.rs の溢れ（ReviveContention::Overflow）を競合の Err に戻すと restart.rs の1本が、link.rs の溢れを競合として返すと a2s.rs の1本が★で落ちることを直した担当が実測した（実装レビュー第10回 Astra 2）。自分でも両方の経路に当てた——local.rs の Overflow の腕の先頭で Err(ALREADY_REVIVING) を返すと restart.rs の1本が「★束が満ちた後の頼みも競合として断り、その番号へ答える道を作っていない」で、link.rs の溢れの断りの busy を true にすると a2s.rs の1本が「★束が満ちた後の頼みの番号へ、PC が終わった断りを返していない」で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "枝分かれは目印より前に届いた起こし直しの断りを、配信から受けても拾わない"
 gate        = "unit"
 tests       = [
@@ -2229,13 +2260,13 @@ retired     = { by = "寝ているカードばかりなのに、メモリ不足�
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "照合で外したカードかを DB で確かめられなかったとき、そのカードを接続に持ち続け、PC がその後名乗らなくても生存確認のたびに確かめ直して片付ける"
+behavior    = "照合で外したカードかを DB で確かめられなかったとき、そのカードを接続に持ち続け、PC がその後名乗らなくても生存確認と同じ周期で確かめ直して片付ける"
 gate        = "unit"
 tests       = [
   { file = "server/crates/server-core/tests/gateway.rs", name = "外したかを確かめられなかったカードはその後名乗らなくても確かめ直して片付ける" },
   { file = "server/crates/server-core/tests/gateway.rs", name = "外したかを確かめられなかったカードは生存確認のたびに確かめ直す" },
 ]
-breaks_when = "確かめられなかったカードを持ち続けないと1本目が、生存確認での確かめ直しを外すと2本目が★で落ちることを直した担当が実測した（実装レビュー第9回。2本目は急かす口を使わずに周期を待つので 10 秒ほどかかる）。自分でも gateway.rs の reconcile の確かめられなかった腕で控えへ入れない形（.insert(card_id) を .contains(&card_id) にする）を当て、名指しの2本が「★照合で一度 DB を読めなかったカードを、その後確かめ直していない」（急かした／生存確認の周期）で落ちることを確かめた"
+breaks_when = "確かめられなかったカードを持ち続けないと1本目が★で落ちることを第9回に直した担当が実測した。確かめ直しのタスク（recheck_loop）の周期を外すと2本目が★で落ちる（実装レビュー第9回で入れ、第10回で確かめ直しを接続ごとの別タスクへ移した。2本目は急かす口を使わずに周期を待つので 10 秒ほどかかる）。第10回の後に自分でも recheck_loop の tick.tick() の腕を std::future::pending に替え、2本目が「★照合で一度 DB を読めなかったカードを、その後確かめ直していない（生存確認の周期）」で落ち、急かす口を使う1本目は通ることを確かめた"
 verified    = true
 
 [[entry]]
@@ -2246,6 +2277,18 @@ tests       = [
   { file = "server/crates/server-core/tests/gateway.rs", name = "照合のときだけ約束の列が満杯でも外したカードの取り下げは名乗り直しで届く" },
 ]
 breaks_when = "gateway.rs で畳む合図を立てない（close_now）、または接続のループが合図を見ない形にすると、名指しの1本が「★照合で取り下げを積めなかったのに接続を保っている」で落ちることを直した担当が実測した（実装レビュー第8回）。自分でも agent_loop の毎周の初めの close_requested の判定を外し（if false && …）、名指しの1本が同じ★で落ちることを当て直した。実装レビュー第9回で試験の中身が変わった（深さ1の約束の列に生存確認が先に入って揺れたので、約束の列を積めなくなるまで積む形にした。名前は同じ）。変わった後の試験にも同じ壊し方を当て直し、同じ★で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "照合で確かめられなかったカードを確かめ直すとき、DB の答えが遅くても PC の接続のふだんの受信（報告・履歴の ack）は止まらず、同時に走らせる数と照合1件を待つ時間に上限があり、時間の上限を過ぎたカードは持ち続けて次の周で確かめる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/gateway.rs", name = "確かめ直しの_DB_の答えが遅くてもふだんの受信は続く" },
+  { file = "server/crates/server-core/tests/gateway.rs", name = "確かめ直しは同時に走らせる数に上限がある" },
+  { file = "server/crates/server-core/tests/gateway.rs", name = "確かめ直しが時間の上限を過ぎたら持ち続けて次の周で確かめる" },
+]
+breaks_when = "gateway.rs の確かめ直しを受信のループの中へ戻すと1本目が、recheck_unverified の for_each_concurrent の上限を None にすると2本目が、確かめ直しの時間の上限（tokio::time::timeout）を外すと3本目が★で落ちることを直した担当が実測した（実装レビュー第10回 Astra 1）。自分でも agent_loop の受信の Ok の腕に recheck_unverified(&hub, &conn, &origin).await; を1行戻し、1本目が「★確かめ直しの DB の答えを待つ間、接続の報告を処理していない（残量の便が届かない）」で落ちることを確かめた"
 verified    = true
 
 [[entry]]
@@ -2308,6 +2351,16 @@ tests       = [
   { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは終了の頼み以外の起こし直しの断りでは満ちない" },
 ]
 breaks_when = "session/mod.rs の kill を、実体だけを止める以前の形へ戻す（session_revive の2本が★席を握って待っている／★見つからないと断っている、restart の2本が★新しいプロセスを起こしている／★終了できなかったと返している で落ちる）。起こし終えた実体を止めずに畳む形にする（★起こした実体を畳んでいる）。札を下ろす理由を強さを見ずに上書きする（★外した断りを上書きしている）。いずれも直した担当が実測した。自分でも ReviveTicket::withdraw で理由を max を取らずに上書きする形にし、session_revive の「終了の頼みの後に外されたら外した側の断りになり逆には戻らない」が★（外した後に届いた弱い理由で、外した断りを上書きしている）で落ちることを当て直した。第6回で CLI の終了待ちを頼みの番号で決める形へ改めた後、wait.rs で終了の頼みで取り下げた起こし直しの断り（withdrawn: kill）で満ちる以前の規則を戻すと、名指しの wait.rs の1本が「★終了の頼みで取り下げたの起こし直しの断りで、終了の待ちが満ちたか落ちた」で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "競合で断った起こし直しの頼みを繰り返しても、束ねる番号は頼んだ側が振った番号だけで同じ番号は重ねず、1枚のカードにつき上限（16）までに収まり、超えた頼みは溢れたと言い分ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "競合で断った頼みを繰り返しても束ねる番号は上限に収まり同じ番号は重ねない" },
+]
+breaks_when = "session/mod.rs の begin_revive_or_refuse で、重複の除去・振られた番号だけに絞る・上限のどれを外しても、それぞれの★で落ちることを直した担当が実測した（実装レビュー第10回 Astra 2）。自分でも重複の除去を外し（if state.ops.contains(&given) を if false && … にする）、名指しの1本が「★同じ番号の頼みを、束へ重ねて足している」で落ちることを確かめた"
 verified    = true
 
 [[entry]]
