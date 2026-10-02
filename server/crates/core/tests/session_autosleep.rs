@@ -240,3 +240,80 @@ async fn 自動で寝たカードも起こし直せる() {
 
     assert_eq!(revived.card_id, card_id, "同じカードで起き直っていない");
 }
+
+/// 開けるまで答えない Windows 側（メモリの測り。寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 設計§25）。
+#[derive(Debug, Default)]
+struct 止める外 {
+    開いた: std::sync::Mutex<bool>,
+    合図: std::sync::Condvar,
+}
+
+impl 止める外 {
+    fn 開ける(&self) {
+        *self.開いた.lock().expect("ロックが壊れていない") = true;
+        self.合図.notify_all();
+    }
+}
+
+impl session_host_core::memory_watch::OutsideProbe for 止める外 {
+    fn read(&self) -> session_host_core::memory_watch::Outside {
+        let mut 開いた = self.開いた.lock().expect("ロックが壊れていない");
+        while !*開いた {
+            開いた = self.合図.wait(開いた).expect("ロックが壊れていない");
+        }
+        session_host_core::memory_watch::Outside {
+            host_free_mb: Some(4_100),
+            vmmem_mb: Some(4_300),
+            error: None,
+        }
+    }
+}
+
+/// 落ちても門を開ける（閉じたままだと測りの糸が待ち続け、試験のプロセスが終われない）。
+struct 門を開けて去る(Arc<止める外>);
+
+impl Drop for 門を開けて去る {
+    fn drop(&mut self) {
+        self.0.開ける();
+    }
+}
+
+#[tokio::test]
+async fn 自動で寝かせても測りを待たない() {
+    // 寝かせる前後でメモリを測る（設計§25）。Windows を聞くのは 1〜27 秒かかるので、
+    // **見張りの1周がその答えを待つと、その間ほかのカードの見張りも止まる**
+    use session_host_core::memory_watch::{Event, MemoryWatch, Step};
+    let server = common::TestServer::start_with(設定(IDLE_SECS)).await;
+    let 外 = Arc::new(止める外::default());
+    let _札 = 門を開けて去る(Arc::clone(&外));
+    let watch = MemoryWatch::new(
+        Arc::new(session_host_core::memory_watch::ProcInside),
+        Some(Arc::clone(&外) as Arc<dyn session_host_core::memory_watch::OutsideProbe>),
+    );
+    let mut rx = watch.subscribe();
+    server.manager.set_memory_watch(watch);
+    let session = 入力待ちにする(&server).await;
+
+    越えるまで待つ().await;
+    let manager = Arc::clone(&server.manager);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || manager.sweep_once()),
+    )
+    .await
+    .expect("★見張りの1周が、寝かせる前の測りの Windows の答えを待った")
+    .expect("落ちていない");
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+
+    外.開ける();
+    let before = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("★寝かせた前後の測りが来ない")
+        .expect("知らせを受けられること");
+    assert_eq!(
+        (before.step, before.event, before.card_id),
+        (Step::Before, Event::SessionSleep, Some(session.card_id)),
+        "★自動で寝かせた出来事として測っていない: {before:?}"
+    );
+}

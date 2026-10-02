@@ -2628,6 +2628,9 @@ pub struct SessionManager {
     /// 覚えている値を向こうへ置くと**毎回消えて、押すたびに `powershell.exe` を
     /// 立てることになる。**
     host_free: Mutex<Arc<crate::resources::HostFree>>,
+    /// メモリが返ったかを、寝かせる・止める前後で測る一式（寝ているカードばかりなのに、
+    /// メモリ不足でセッションを起こせない 設計§25）。差し替えられるのはテストのため
+    memory_watch: Mutex<Arc<crate::memory_watch::MemoryWatch>>,
     /// 通したぶんを差し引いた**見込みの空き**（設計§19）。
     ///
     /// 席（[`SessionManager::revive_slots`]）とは**寿命が違う**ので別に持つ。席は
@@ -2856,6 +2859,15 @@ impl WithdrawReason {
             Self::Remove => "remove",
         }
     }
+
+    /// メモリの測りで、何の出来事として数えるか（設計§25）。**画面の「スリープ」と CLI の終了は
+    /// 同じ頼み（`Kill`）で届く**ので区別できない。カードが残って寝るので寝かせた出来事に数える
+    fn memory_event(self) -> crate::memory_watch::Event {
+        match self {
+            Self::Kill => crate::memory_watch::Event::SessionSleep,
+            Self::Removing | Self::Remove => crate::memory_watch::Event::SessionKill,
+        }
+    }
 }
 
 /// 起こし直しがどこまで進んだか。**外す側が、畳むのは誰かを決めるのに読む。**
@@ -3065,6 +3077,34 @@ impl SessionManager {
     /// まとめると、この区別がテストから作れなくなる。
     pub fn set_host_free(&self, host_free: Arc<crate::resources::HostFree>) {
         *self.host_free.lock().expect("ロックが壊れていない") = host_free;
+    }
+
+    /// メモリの測りの一式を差し替える（**テスト専用**。設計§25）。生きている claude の数は
+    /// この器から数えさせる。
+    #[doc(hidden)]
+    pub fn set_memory_watch(self: &Arc<Self>, watch: Arc<crate::memory_watch::MemoryWatch>) {
+        self.count_live_for(&watch);
+        *self.memory_watch.lock().expect("ロックが壊れていない") = watch;
+    }
+
+    /// メモリの測りの一式（設計§25）。版の入れ替えの前後を測るため、束ねる層が借りる。
+    pub fn memory_watch(&self) -> Arc<crate::memory_watch::MemoryWatch> {
+        Arc::clone(&self.memory_watch.lock().expect("ロックが壊れていない"))
+    }
+
+    /// 測りが「生きている claude の数」をこの器から数えられるようにする。**弱い参照で渡す**
+    /// ——強い参照だと、測りと器が互いを持ち合って器が消えなくなる。
+    fn count_live_for(self: &Arc<Self>, watch: &crate::memory_watch::MemoryWatch) {
+        let manager = Arc::downgrade(self);
+        watch.set_live_count(Arc::new(move || {
+            manager.upgrade().map(|manager| {
+                manager
+                    .sessions()
+                    .iter()
+                    .filter(|session| !matches!(session.status(), SessionStatus::Ended { .. }))
+                    .count()
+            })
+        }));
     }
 
     /// いまの資源と、**いま何枚起こし直せるか**（設計§18-2）。
@@ -3460,7 +3500,7 @@ impl SessionManager {
         events: Arc<dyn EventSink>,
     ) -> Arc<Self> {
         let host_free = crate::resources::HostFree::from_config(&config);
-        Arc::new(Self {
+        let manager = Arc::new(Self {
             config,
             program,
             hook_program,
@@ -3479,11 +3519,14 @@ impl SessionManager {
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
             host_free: Mutex::new(host_free),
+            memory_watch: Mutex::new(crate::memory_watch::MemoryWatch::from_env()),
             budget: Mutex::new(ReviveBudget::default()),
             after_confirm: Mutex::new(None),
             before_spawn: Mutex::new(None),
             exit_gate: Mutex::new(None),
-        })
+        });
+        manager.count_live_for(&manager.memory_watch());
+        manager
     }
 
     /// 画面配信の設定を差し替える（設計§13-3）。
@@ -4168,6 +4211,15 @@ impl SessionManager {
             Some(ReviveStage::Spawned) | None => {}
         }
         let session = self.get(card_id);
+        // **止める前に測る**（設計§25）。生きた実体を止めるときだけ——もう終わっている claude を
+        // 止めても、返るメモリは無い
+        if session
+            .as_ref()
+            .is_some_and(|session| !matches!(session.status(), SessionStatus::Ended { .. }))
+        {
+            self.memory_watch()
+                .note(reason.memory_event(), Some(card_id));
+        }
         match stage {
             // **起こしている最中。** 答えは札へ預けた（`withdraw`）——作り終えた起こす側が、古い実体と
             // 作った実体の両方を数えて答える（実装レビュー第8回 Astra 2）。ここでは数えない：
@@ -5464,6 +5516,11 @@ impl SessionManager {
                 elapsed_ms,
                 idle_secs,
                 "入力待ちが続いたので自動でスリープします"
+            );
+            // **止める前に測る**（設計§25）。測りは待たない
+            self.memory_watch().note(
+                crate::memory_watch::Event::SessionSleep,
+                Some(session.card_id),
             );
             session.kill();
             寝かせた += 1;

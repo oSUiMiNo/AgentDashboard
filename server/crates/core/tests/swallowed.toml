@@ -362,6 +362,13 @@ class = "by-design"
 reason = "同上。別の PC から引いたぶんも、出す先の都合は同じ"
 
 [[entry]]
+path = "server/crates/session-host-core/src/memory_watch.rs"
+fn = "emit"
+expr = '''self.samples.send(sample)'''
+class = "send"
+reason = "手元の配信（試験が見る口）に購読者が居ないのは異常ではない。測りそのものは直前の行（`kind=memory_watch`）に残してある"
+
+[[entry]]
 path = "server/crates/session-host-core/src/model_post.rs"
 fn = "run"
 expr = '''crate::hook_post::post(url, &body)'''

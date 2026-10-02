@@ -91,7 +91,18 @@ pub fn exit_process() -> Stopper {
 /// 押す前より悪い。
 ///
 /// 生き残れば、利用者は**古い版のまま操作を続けられる**し、理由が画面に残る。
-pub fn hand_over_process(state_dir: PathBuf) -> Stopper {
+///
+/// # 入れ替えの前後でメモリを測る
+///
+/// `memory` を渡すと、入れ替える直前の量を測って印に書き、入れ替えた後のプロセスが残りの
+/// 時点を測る（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§25）。
+/// 直前の測りは Windows の答えを最大 [`session_host_core::memory_watch::SWAP_BEFORE_WAIT`]
+/// だけ待つ。**PTY を持たないサーバモードは渡さない**——道連れにする claude が居ないので、
+/// 入れ替えで返るメモリが無い。
+pub fn hand_over_process(
+    state_dir: PathBuf,
+    memory: Option<Arc<session_host_core::memory_watch::MemoryWatch>>,
+) -> Stopper {
     Arc::new(move || {
         let Some(target) = version::next_binary(&state_dir) else {
             // 行き先が分からない。今までどおり落ちて、常駐に任せる
@@ -99,7 +110,14 @@ pub fn hand_over_process(state_dir: PathBuf) -> Stopper {
         };
 
         // 成功すれば返らない（プロセスの中身が入れ替わる）
-        crate::boot::hand_over_now(&state_dir, &target);
+        match &memory {
+            Some(memory) => memory.around_swap(
+                &state_dir,
+                session_host_core::memory_watch::SWAP_BEFORE_WAIT,
+                || crate::boot::hand_over_now(&state_dir, &target),
+            ),
+            None => crate::boot::hand_over_now(&state_dir, &target),
+        }
 
         // 返ってきた＝入れ替えられなかった。**落ちない。**
         let reason = format!("入れ替えられませんでした: {}", target.display());

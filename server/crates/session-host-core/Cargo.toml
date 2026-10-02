@@ -55,3 +55,6 @@ vt100.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
+# 偽の時計（`tokio::time::pause`）。メモリの測り（`memory_watch`）の「30 秒・2 分・10 分後」を
+# 本物の時間を待たずに確かめるため。新しいクレートは増えない（tokio の機能を1つ足すだけ）
+tokio = { workspace = true, features = ["test-util"] }

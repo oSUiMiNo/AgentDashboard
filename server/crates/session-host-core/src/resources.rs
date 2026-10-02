@@ -57,13 +57,7 @@ impl Probe for ProcMeminfo {
 /// 単位は kB 固定（カーネルがそう書く）。**要る行が欠けたら `None`**——
 /// 半分だけ読めた値で「入る」と答えるより、分からないと言うほうがよい。
 pub fn parse_meminfo(text: &str) -> Option<Memory> {
-    let field = |name: &str| -> Option<u64> {
-        text.lines()
-            .find(|line| line.starts_with(name) && line[name.len()..].starts_with(':'))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|kb| kb / 1024)
-    };
+    let field = |name: &str| meminfo_kb(text, name).map(|kb| kb / 1024);
     Some(Memory {
         total_mb: field("MemTotal")?,
         available_mb: field("MemAvailable")?,
@@ -73,6 +67,15 @@ pub fn parse_meminfo(text: &str) -> Option<Memory> {
         // **0 なら「0 枚」へ倒れる**ので、欠損は安全側に出る
         free_mb: field("MemFree").unwrap_or(0),
     })
+}
+
+/// `/proc/meminfo` の1行の値（kB）。**行の頭で名前と `:` を見る**——`Cached` を探して
+/// `SwapCached` を拾わない。メモリの測り（[`crate::memory_watch`]）も同じ読み方を使う。
+pub(crate) fn meminfo_kb(text: &str, name: &str) -> Option<u64> {
+    text.lines()
+        .find(|line| line.starts_with(name) && line[name.len()..].starts_with(':'))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 /// WSL の中に居るかを決める材料。**外の世界を読むのはここだけ。**
@@ -296,13 +299,13 @@ pub trait HostFreeProbe: Send + Sync + std::fmt::Debug {
 ///
 /// PATH に Windows の道が載らない構成（`appendWindowsPath=false`）でも通るように、
 /// 探さずに直に指す。**`pwsh.exe` は既定で入っていないので使わない。**
-const POWERSHELL: &str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+pub(crate) const POWERSHELL: &str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 
 /// 外側を聞くのを諦めるまでの時間。
 ///
 /// 実測は 6〜27 秒（2026-09）、静かな機械では約 1 秒（2026-10-01）で、**逼迫している
 /// ときほど遅い**。
-const HOST_FREE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const HOST_FREE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 判定の確認段階全体の上限（設計§3）。
 ///
@@ -381,7 +384,7 @@ impl HostFreeProbe for PowerShellHostFree {
 ///
 /// `powershell.exe` のエラーは数十行になることがあり、そのまま運ぶと断りの文面が
 /// 読めなくなる。
-fn short_reason(text: &str, empty: &str) -> String {
+pub(crate) fn short_reason(text: &str, empty: &str) -> String {
     const MAX_CHARS: usize = 200;
     let first = text.lines().map(str::trim).find(|line| !line.is_empty());
     match first {

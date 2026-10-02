@@ -32,6 +32,7 @@ pub mod jsonfile;
 pub mod link;
 pub mod logging;
 pub mod logs;
+pub mod memory_watch;
 pub mod model_aliases;
 pub mod model_catalog;
 pub mod model_post;

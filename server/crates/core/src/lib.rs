@@ -351,7 +351,11 @@ pub async fn serve_server(
                     install: Arc::new(std::sync::Mutex::new(None)),
                     // **落とすのではなく入れ替える。** 常駐に載っていない機械
                     // （ソースビルド）では、落ちると誰も起こさない
-                    stop: versions_api::hand_over_process(config.agent().resolved_state_dir()),
+                    stop: versions_api::hand_over_process(
+                        config.agent().resolved_state_dir(),
+                        // **PTY を持たないので測らない**（設計§25。入れ替えで返るメモリが無い）
+                        None,
+                    ),
                 }))
                 // 縮小の口は**サーバモードにも生やす**（縮小設計§9）。サーバは機械を
                 // 持たないので必ず 501 で断るが、**断る道そのものが台帳に載る**——
@@ -590,6 +594,8 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
         catalog.cli_version().to_string(),
     );
 
+    // 版の入れ替えの前後でメモリを測る一式（設計§25）。器を渡す前に借りておく
+    let memory_watch = manager.memory_watch();
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
         .with_settings(settings)
@@ -614,12 +620,19 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
                     })
                 })
             },
-            stop: versions_api::hand_over_process(agent_config.resolved_state_dir()),
+            stop: versions_api::hand_over_process(
+                agent_config.resolved_state_dir(),
+                Some(Arc::clone(&memory_watch)),
+            ),
         });
     let listener = bind(&server_config).await?;
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる
     session_host_core::version::confirm_started(&agent_config.resolved_state_dir());
+    // **入れ替えの前に測ったメモリの続きを測る**（設計§25）。直前の行もここで書く——入れ替える
+    // 前のプロセスが書いた行は、ログが非同期なので `exec` で消えうる。ログの初期化より後で
+    // なければ書いても残らないので、`boot.rs` には置けない
+    memory_watch.resume_after_swap_if_handed_over(&agent_config.resolved_state_dir());
     // **待ち受けを確保できたここで、縮小の結果も確定させる**（設計§4-1）。`boot.rs`
     // へ置けないのは、あそこがログの初期化より前に走るからである——`kind=compact_done`
     // を出しても、どこにも残らない
