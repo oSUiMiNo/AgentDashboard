@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 224
+min_entries = 229
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -2082,12 +2082,37 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "メモリの量を読むとき、WSL の中は kB を MB に直してキャッシュとバッファを足し、Windows 側は空き（kB）と VmmemWSL の常駐量（バイト）を取り違えずに MB に直し、VmmemWSL が無い・答えが読めない場合は空欄にして理由を残し、測った行は種類（kind=memory_watch）と系列で引ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "中の量はキャッシュとバッファを足して読む" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "外の量は空きをkBで常駐量をバイトで読む" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "VmmemWSLが無ければ常駐量だけ空欄で理由が残る" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "答えが読めなければ両方空欄で理由が残る" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "測った行は種類と系列で引ける" },
+]
+breaks_when = "単位の換算2つ・VmmemWSL が無いときの空欄と理由・行の種類を戻すと★で落ちることを直した担当が実測した（中の量と、答えが読めないときの2本は、機能を入れる前に★で落ちるのを見ただけで、戻して当ててはいない）。自分でも parse_outside の空きの kb / 1024 を kb にし、2本目が「★空き（kB）と常駐量（バイト）の単位を取り違えている」で落ちることを当て直した（3本目も落ちたが、★の無い前提の検査で落ちた）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "ローカルモードで起こし直しが断られたとき、その断りは revive 種別で配られる（Other だと押し直しても古い断りが画面に残る）"
 gate        = "unit"
 tests       = [
   { file = "server/crates/core/tests/restart.rs", name = "ローカルモードの起こし直しの断りはrevive種別で配られる" },
 ]
 breaks_when = "local.rs の断りの配信を ErrorKind::Other へ戻す（★の検査で left: Other ／ right: Revive と落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "一覧から外すときは止めた出来事（session_kill）として測り、もう終わっているカードを止めるときは測らない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "一覧から外すときは止めた出来事として測る" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "終わっているカードへの終了では測らない" },
+]
+breaks_when = "session/mod.rs の memory_event で外す側（Removing・Remove）を SessionSleep にすると1本目が、halt の生死の確認を is_some_and(|_| true) にすると2本目が★で落ちることを直した担当が実測した。自分でも外す側を SessionSleep にし、1本目が「★一覧から外す出来事として測っていない」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2112,6 +2137,17 @@ tests       = [
   { file = "server/crates/core/tests/branch.rs", name = "束が満ちた後の枝分かれは先の起こし直しが成功しても断る" },
 ]
 breaks_when = "session/mod.rs で受け付けた頼みにしか成功を答えないか、作り終えた後に束ねた頼みへその場で答えないと session_revive の1本が、受け付けた頼みにしか答えないか local.rs の競合を Err に戻すと core の branch の「その成功で進む」が★で落ちることを直した担当が実測した（実装レビュー第11回 Astra 2）。自分でも、答える番号の絞り込みを受け付けた頼み（reply）だけにする形（.filter(|op| Some(*op) != unnumbered && Some(*op) == reply)）にし、session_revive の1本が「★先の起こし直しが成功したのに、束ねた頼みに答えていない」、core の branch の1本が「★先の起こし直しへ束ねられた枝分かれが、その成功を受け取れずに進まない」で落ちることを確かめた。「束が満ちた後の枝分かれは…断る」は場面の確かめで、この壊しでも緑のままだった。待ち方の直し（自分の成功を待つ・断りを先に見る）を戻しても緑のままであることは直した担当が実測した——束が満ちた断りがカードの起きる前に届くため。順の保証は server-core の branch.rs の単体試験（自分の成功を待ち、断りを状態より先に見る行）が持つ"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "出来事の直前と30秒・2分・10分後に測り、系列が走っている間に続いた出来事は新しい系列を始めずに1本の系列へ束ねて数だけ増やす"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "出来事の直前と三つの時点を測る" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "続けて寝かせても系列は一本で数だけ増える" },
+]
+breaks_when = "memory_watch.rs の run で sleep_until(anchor + after) を sleep_until(anchor) にする、note の頭で束ねる道を外す、系列の終わりで片付けない、のどれでも★で落ちることを直した担当が実測した。系列を開くロックの内側にある2回目の束ね確認は、出来事が重なる順を試験で決められないので当てていない。自分でも sleep_until(anchor + after * 0) にし、1本目が「★30 秒経つ前に、次の時点を測った」で、2本目が「★系列が走っているのに、新しい系列を始めた」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2187,6 +2223,17 @@ tests       = [
   { file = "server/crates/server-core/tests/registry.rs", name = "多くの番号を運ぶ断りを控えても本体は1つを分け合う" },
 ]
 breaks_when = "registry.rs の OpLedger が控える答えの本体を番号ごとに写すと、名指しの1本が★で落ちる（番号200個の断りで控えが持つ番号の合計が 40000）ことを直した担当が実測した（実装レビュー第10回 Astra 2）。自分でも控えの写しを entry.answer = Some(Arc::new((**body).clone())) にし、名指しの1本が「★答えの本体を番号ごとに写している」（40000 対 200）で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "寝かせる・止める・自動でスリープするとき、止める直前にメモリの測りを呼び、測りの Windows 側の答えを待たずに戻る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "寝かせても測りを待たない" },
+  { file = "server/crates/core/tests/session_autosleep.rs", name = "自動で寝かせても測りを待たない" },
+]
+breaks_when = "memory_watch.rs の note() で Windows 側を同期で読むと★「…Windows 側の測りの答えを待った」で落ち、session/mod.rs の止める処理（halt）の note 呼び出しを外すと1本目が、自動スリープの note 呼び出しを外すと2本目が★「…測りが来ない」で落ちることを直した担当が実測した。自分でも自動スリープの self.memory_watch().note(…) を外し、2本目が「★寝かせた前後の測りが来ない」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2323,6 +2370,20 @@ tests       = [
   { file = "server/crates/server-core/tests/gateway.rs", name = "確かめ直しが時間の上限を過ぎたら持ち続けて次の周で確かめる" },
 ]
 breaks_when = "gateway.rs の確かめ直しを受信のループの中へ戻すと1本目が、recheck_unverified の for_each_concurrent の上限を None にすると2本目が、確かめ直しの時間の上限（tokio::time::timeout）を外すと3本目が★で落ちることを直した担当が実測した（実装レビュー第10回 Astra 1）。自分でも agent_loop の受信の Ok の腕に recheck_unverified(&hub, &conn, &origin).await; を1行戻し、1本目が「★確かめ直しの DB の答えを待つ間、接続の報告を処理していない（残量の便が届かない）」で落ちることを確かめた"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "版を入れ替えるとき、直前の測りは Windows の答えを上限で打ち切って印に書き、入れ替えた側の起動だけが印を拾って直前の行と残りの時点を同じ系列で書き、古い印は捨てて行を残し、入れ替えられなかったら同じプロセスで測りを続ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "入れ替えの後のプロセスが同じ系列で残りを測る" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "入れ替えの前の測りは上限で打ち切って先へ進む" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "入れ替えていない起動は印を拾わない" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "古い入れ替えの印は捨てて行を残す" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "入れ替えられなかったら同じプロセスで続ける" },
+]
+breaks_when = "memory_watch.rs の、印を拾う・運んだ直前の行を書く・Windows の答えの待ちを打ち切る・入れ替えた側の起動だけに絞る・古い印を捨てる・入れ替えに失敗したら拾い直す、の6か所のどれを戻しても★で落ちることを直した担当が実測した。自分でも resume_after_swap_if_handed_over の already_handed_over() の確認を外し（if false && …）、3本目が「★入れ替えていない起動が、入れ替えの続きを測り始めた」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
