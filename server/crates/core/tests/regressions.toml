@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 229
+min_entries = 230
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -2111,8 +2111,9 @@ gate        = "unit"
 tests       = [
   { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "一覧から外すときは止めた出来事として測る" },
   { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "終わっているカードへの終了では測らない" },
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "記録の側で外した知らせでも止めた出来事として測る" },
 ]
-breaks_when = "session/mod.rs の memory_event で外す側（Removing・Remove）を SessionSleep にすると1本目が、halt の生死の確認を is_some_and(|_| true) にすると2本目が★で落ちることを直した担当が実測した。自分でも外す側を SessionSleep にし、1本目が「★一覧から外す出来事として測っていない」で落ちることを当て直した"
+breaks_when = "session/mod.rs の archive／forget で畳む前の note_memory_before_stop を外すと1本目／3本目が★「測りが来ない」で落ち、note_memory_before_stop の「終わっているか」の判定を外すと2本目が★で落ちることを直した担当が実測した（実装レビュー Fable 1・2）。自分でも forget の note_memory_before_stop 呼び出しを外し、3本目が「★記録の側で外した知らせ（forget）：測りが来ない」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2182,6 +2183,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "同じカードを止めている最中に重なって届いた終了の頼み（同じ番号の送り直し・別の番号・番号の無い頼み）は、1つの出来事として1回だけ数える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "同じカードを止めている間の頼みは一回と数える" },
+]
+breaks_when = "session/mod.rs の note_memory_before_stop で expected_exit の確認を外すと「★同じ1枚を止めている間の頼みを、別の寝かせとして数えた」（session_sleep:3）で落ち、kill_answering の「受けた」での測りを外すと★「測りが来ない」で落ちることを直した担当が実測した（実装レビュー Fable 3）。自分でも expected_exit の確認を (true || …) で効かなくし、同じ★（session_sleep:3）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "外した知らせが起こし直しの頼みより先に届いても、外す前の札が残っている間に届いても、外したカードは起こさず終わった断りで返す（外せなかったカードには印を残さない）"
 gate        = "unit"
 tests       = [
@@ -2233,7 +2244,7 @@ tests       = [
   { file = "server/crates/session-host-core/tests/memory_watch.rs", name = "寝かせても測りを待たない" },
   { file = "server/crates/core/tests/session_autosleep.rs", name = "自動で寝かせても測りを待たない" },
 ]
-breaks_when = "memory_watch.rs の note() で Windows 側を同期で読むと★「…Windows 側の測りの答えを待った」で落ち、session/mod.rs の止める処理（halt）の note 呼び出しを外すと1本目が、自動スリープの note 呼び出しを外すと2本目が★「…測りが来ない」で落ちることを直した担当が実測した。自分でも自動スリープの self.memory_watch().note(…) を外し、2本目が「★寝かせた前後の測りが来ない」で落ちることを当て直した"
+breaks_when = "memory_watch.rs の note() で Windows 側を同期で読むと★「…Windows 側の測りの答えを待った」で落ち、session/mod.rs の kill の note_memory_before_stop 呼び出しを外すと1本目が、自動スリープの note 呼び出しを外すと2本目が★「…測りが来ない」で落ちることを直した担当が実測した。自分でも自動スリープの self.memory_watch().note(…) を外し、2本目が「★寝かせた前後の測りが来ない」で落ちることを当て直した。測る場所を halt から各入口へ移した後も、kill の note_memory_before_stop 呼び出しを外すと1本目が「★寝かせた直前：測りが来ない」で落ちることを自分で当て直した"
 verified    = true
 
 [[entry]]
