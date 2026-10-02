@@ -136,8 +136,31 @@ reservation_pattern = r"予約は無い|予約が無い|予約[:：]\s*[^\s／/�
 reservation_new = "予約：なし" if reservation == "なし" else f"予約：{reservation}"
 fields.append(("予約の有無", reservation_pattern, reservation_new))
 
-edits = []
+# 現況の欄は data-state 属性で印を付けてある。印があればその要素の中身だけを書き換え、
+# 経緯の文に同じ形の文字列が何度出てきても数に入れない（2026-10-02、経緯の文と重なって書けなかった）
+marker_keys = {"走行版・ディスクの版": "versions", "PID・起動時刻": "pid", "予約の有無": "reservation"}
+
+def marker_regex(key):
+    return re.compile(r'(<(\w+)[^>]*\sdata-state="' + key + r'"[^>]*>)(.*?)(</\2>)', re.S)
+
+marked = []
+unmarked_fields = []
 for label, pattern, new_value in fields:
+    rx = marker_regex(marker_keys[label])
+    if rx.search(html):
+        marked.append((label, rx, new_value))
+    else:
+        unmarked_fields.append((label, pattern, new_value))
+
+marker_changed = []
+for label, rx, new_value in marked:
+    olds = [m.group(3) for m in rx.finditer(html)]
+    if any(o != new_value for o in olds):
+        marker_changed.append((label, olds[0], new_value))
+    html = rx.sub(lambda m: m.group(1) + new_value + m.group(4), html)
+
+edits = []
+for label, pattern, new_value in unmarked_fields:
     matches = re.findall(pattern, html)
     if len(matches) != 1:
         failed.append(f"手で直す：{label}（{len(matches)}件）")
@@ -148,11 +171,11 @@ for label, pattern, new_value in fields:
 for line in failed:
     print(line)
 
-if not edits:
+if not edits and not marked:
     print("差分が確定しない欄があるため何も書かない")
     sys.exit(4)
 
-changed = [(label, old_value, new_value) for label, old_value, new_value in edits if old_value != new_value]
+changed = marker_changed + [(label, old_value, new_value) for label, old_value, new_value in edits if old_value != new_value]
 
 for label, old_value, new_value in changed:
     print(f"{label}｜before：{old_value[:40]}")
@@ -164,8 +187,8 @@ if not changed:
 if dry_run:
     sys.exit(0)
 
-applied = 0
-for label, old_value, new_value in changed:
+applied = len(marker_changed)
+for label, old_value, new_value in changed[len(marker_changed):]:
     if html.count(old_value) != 1:
         print(f"手で直す：{label}（書き込み直前に件数が変わった）")
         sys.exit(4)
