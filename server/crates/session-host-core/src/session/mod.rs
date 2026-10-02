@@ -2859,15 +2859,6 @@ impl WithdrawReason {
             Self::Remove => "remove",
         }
     }
-
-    /// メモリの測りで、何の出来事として数えるか（設計§25）。**画面の「スリープ」と CLI の終了は
-    /// 同じ頼み（`Kill`）で届く**ので区別できない。カードが残って寝るので寝かせた出来事に数える
-    fn memory_event(self) -> crate::memory_watch::Event {
-        match self {
-            Self::Kill => crate::memory_watch::Event::SessionSleep,
-            Self::Removing | Self::Remove => crate::memory_watch::Event::SessionKill,
-        }
-    }
 }
 
 /// 起こし直しがどこまで進んだか。**外す側が、畳むのは誰かを決めるのに読む。**
@@ -3090,6 +3081,26 @@ impl SessionManager {
     /// メモリの測りの一式（設計§25）。版の入れ替えの前後を測るため、束ねる層が借りる。
     pub fn memory_watch(&self) -> Arc<crate::memory_watch::MemoryWatch> {
         Arc::clone(&self.memory_watch.lock().expect("ロックが壊れていない"))
+    }
+
+    /// 止める前にメモリを測る（設計§25）。**生きていて、まだ止め始めていない実体があるときだけ**。
+    ///
+    /// - もう終わっている claude を止めても、返るメモリは無い
+    /// - 止めている最中に重なって届いた頼み（同じ番号の送り直し・別の番号・番号の無い頼み）は、
+    ///   同じ1枚を寝かせる1つの出来事である。2回数えると、束ねた数（`events`）を寝かせた枚数と
+    ///   して読めなくなる（実装レビュー Fable 3）。止め始めたかは、止める合図を出す前に立つ印
+    ///   （`expected_exit`）で見る
+    ///
+    /// **画面の「スリープ」と CLI の `session kill` は、PC には同じ頼み（`Kill`）で届く**ので
+    /// 区別できない。カードが残って寝るので、どちらも寝かせた出来事に数える（設計§25-4）。
+    fn note_memory_before_stop(&self, card_id: CardId, event: crate::memory_watch::Event) {
+        let stopping_now = self.get(card_id).is_some_and(|session| {
+            !matches!(session.status(), SessionStatus::Ended { .. })
+                && !session.expected_exit.load(Ordering::SeqCst)
+        });
+        if stopping_now {
+            self.memory_watch().note(event, Some(card_id));
+        }
     }
 
     /// 測りが「生きている claude の数」をこの器から数えられるようにする。**弱い参照で渡す**
@@ -4044,6 +4055,7 @@ impl SessionManager {
     /// 札が在るだけで取り下げたことにして配り直さなかったので、立ち上がりきる前に終わった実体への
     /// 終了には何も届かなかった（[`SessionManager::halt`]）。
     pub fn kill(&self, card_id: CardId) -> Result<(), SessionError> {
+        self.note_memory_before_stop(card_id, crate::memory_watch::Event::SessionSleep);
         match self.halt(card_id, WithdrawReason::Kill, None) {
             Halted::Withdrew => Ok(()),
             Halted::Stopped(session) => {
@@ -4102,6 +4114,7 @@ impl SessionManager {
         };
         match 受付 {
             受付::受けた => {
+                self.note_memory_before_stop(card_id, crate::memory_watch::Event::SessionSleep);
                 self.halt(card_id, WithdrawReason::Kill, Some(op));
             }
             受付::送り直し => {
@@ -4168,6 +4181,7 @@ impl SessionManager {
     /// 印を立てるのは、記録を外せた後に届く [`SessionManager::forget`] の仕事である。ここで
     /// 立てると、記録を外せなかったとき一覧に残ったカードを二度と起こせなくなる。
     pub fn stop_for_removal(&self, card_id: CardId) -> bool {
+        self.note_memory_before_stop(card_id, crate::memory_watch::Event::SessionKill);
         !matches!(
             self.halt(card_id, WithdrawReason::Removing, None),
             Halted::Nothing
@@ -4211,15 +4225,6 @@ impl SessionManager {
             Some(ReviveStage::Spawned) | None => {}
         }
         let session = self.get(card_id);
-        // **止める前に測る**（設計§25）。生きた実体を止めるときだけ——もう終わっている claude を
-        // 止めても、返るメモリは無い
-        if session
-            .as_ref()
-            .is_some_and(|session| !matches!(session.status(), SessionStatus::Ended { .. }))
-        {
-            self.memory_watch()
-                .note(reason.memory_event(), Some(card_id));
-        }
         match stage {
             // **起こしている最中。** 答えは札へ預けた（`withdraw`）——作り終えた起こす側が、古い実体と
             // 作った実体の両方を数えて答える（実装レビュー第8回 Astra 2）。ここでは数えない：
@@ -4470,6 +4475,10 @@ impl SessionManager {
         let Some(withdrew) = self.retire(card_id, Retire::IfPresent) else {
             return Err(SessionError::NotFound(card_id));
         };
+        // **畳む前に測る**（設計§25。実装レビュー Fable 1）。生きた claude を抱えたカードを外す
+        // 本番の道はここ（画面・`session rm`）。`fold` の中へは入れない——起こし直しも `fold` を
+        // 通るので、起こし直しの畳みまで「外した」と数えてしまう
+        self.note_memory_before_stop(card_id, crate::memory_watch::Event::SessionKill);
         self.fold_unless_spawning(card_id, withdrew);
         // **配るのはこちらだけ。** 復旧は同じ本体を通るが、ここを配ると
         // 起こし直すつもりのカードが画面から消えてしまう（設計§7-1）
@@ -4677,6 +4686,8 @@ impl SessionManager {
     pub fn forget(&self, card_id: CardId) -> bool {
         let withdrew = self.retire(card_id, Retire::Always).flatten();
         crate::attachments::forget(&self.config().resolved_state_dir(), card_id);
+        // 畳む前に測る（[`SessionManager::archive`] と同じ）
+        self.note_memory_before_stop(card_id, crate::memory_watch::Event::SessionKill);
         let folded = self.fold_unless_spawning(card_id, withdrew);
         withdrew.is_some() || folded
     }

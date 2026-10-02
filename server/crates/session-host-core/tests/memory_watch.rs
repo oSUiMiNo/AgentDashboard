@@ -626,22 +626,75 @@ async fn 寝かせても測りを待たない() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 一覧から外すときは止めた出来事として測る() {
+/// 一覧から外す頼みを流し、止めた出来事として測ったことを見る。
+///
+/// **製品が通る口で外す**（実装レビュー Fable 2）。生きた claude を抱えたカードを外すと、
+/// 画面・`session rm` は `archive`、記録の側だけで外したカードは `forget` を通る。
+/// `stop_for_removal` は記録だけ外す道で、生きたカードには届かない。
+async fn 外すと止めた出来事として測る(
+    what: &'static str,
+    外す: impl FnOnce(&session_host_core::session::SessionManager, CardId) + Send + 'static,
+) {
     let (manager, session, 外, _札, mut rx) = 門の閉じた測りで1枚起こす().await;
     let card_id = session.card_id;
 
     let 止める = Arc::clone(&manager);
-    待たずに戻る("一覧から外す頼み", move || {
-        assert!(止める.stop_for_removal(card_id));
-    })
-    .await;
+    待たずに戻る(what, move || 外す(&止める, card_id)).await;
     外.開ける();
-    let before = 測りを待つ(&mut rx, "外した直前").await;
+    let before = 測りを待つ(&mut rx, what).await;
     assert_eq!(
         (before.step, before.event, before.card_id),
         (Step::Before, Event::SessionKill, Some(card_id)),
-        "★一覧から外す出来事として測っていない: {before:?}"
+        "★{what}を、一覧から外す出来事として測っていない: {before:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 一覧から外すときは止めた出来事として測る() {
+    外すと止めた出来事として測る(
+        "一覧から外す頼み（archive）",
+        |manager, card_id| {
+            manager.archive(card_id).expect("生きたカードを外せること");
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 記録の側で外した知らせでも止めた出来事として測る() {
+    外すと止めた出来事として測る(
+        "記録の側で外した知らせ（forget）",
+        |manager, card_id| {
+            assert!(manager.forget(card_id), "実体を畳めること");
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 同じカードを止めている間の頼みは一回と数える() {
+    // 実装レビュー Fable 3。同じ番号の送り直し（CLI の再送）・別の番号の頼み・番号の無い頼みが、
+    // 止め終わる前に重なって届く。どれも同じ1枚を寝かせる1つの出来事で、束ねた数
+    // （`events`）を寝かせた枚数として読めるように、1回だけ数える
+    let (manager, session, 外, _札, mut rx) = 門の閉じた測りで1枚起こす().await;
+    let card_id = session.card_id;
+    let op = protocol::ws::OpId::new();
+
+    let 止める = Arc::clone(&manager);
+    待たずに戻る("重なった終了の頼み", move || {
+        止める.kill_answering(card_id, op);
+        止める.kill_answering(card_id, op);
+        止める.kill_answering(card_id, protocol::ws::OpId::new());
+        止める
+            .kill(card_id)
+            .expect("止めている最中のカードへの終了は断らない");
+    })
+    .await;
+    外.開ける();
+    let before = 測りを待つ(&mut rx, "寝かせた直前").await;
+    assert_eq!(
+        before.events, "session_sleep:1",
+        "★同じ1枚を止めている間の頼みを、別の寝かせとして数えた: {before:?}"
     );
 }
 
@@ -649,8 +702,17 @@ async fn 一覧から外すときは止めた出来事として測る() {
 async fn 終わっているカードへの終了では測らない() {
     let (manager, session, 外, _札, _rx) = 門の閉じた測りで1枚起こす().await;
     外.開ける();
-    session.kill();
-    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+    // **claude が自分で終わった形にする**（止める合図を出さない）。合図で止めると止め始めた印が
+    // 立ち、「終わっているか」を見なくても測らずに済んでしまう
+    common::send_line(&session, "exit");
+    let 期限 = tokio::time::Instant::now() + common::TIMEOUT;
+    while !matches!(session.status(), SessionStatus::Ended { .. }) {
+        assert!(
+            tokio::time::Instant::now() < 期限,
+            "claude が自分で終わらない"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     manager
         .kill(session.card_id)

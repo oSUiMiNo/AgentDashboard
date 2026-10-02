@@ -712,8 +712,11 @@ impl MemoryWatch {
 
     /// Windows 側を別の糸で聞き、`wait` まで待つ（入れ替えの直前）。過ぎたら空欄と理由を返す。
     ///
-    /// 打ち切った後も糸は答えが返るまで走り続け、返した答えは捨てる（受け手が居ない）。
-    /// 入れ替えでプロセスごと消えるので、残り続けることは無い。
+    /// 打ち切った後も糸は答えが返るまで走り続け、返した答えは捨てる（受け手が居ない）。糸は
+    /// 入れ替え（`exec`）で消えるが、**糸が立てた `powershell.exe` はこのプロセスの子として残る**
+    /// （実装レビュー Fable 4）。入れ替える直前の子の引き取り（`agentdashboard-core` の
+    /// `children::reap`）が止めて引き取る。引き取りきれなければ新しいプロセスの子として残り、
+    /// 終わった後は次の入れ替えの引き取りまでゾンビとして残りうる。
     fn ask_outside_within(&self, wait: Duration) -> (Option<Outside>, Option<u64>) {
         let Some(probe) = self.outside.clone() else {
             return (None, None);
