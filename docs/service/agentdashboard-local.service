@@ -45,7 +45,17 @@ User=youruser
 # ここを書き換える（2/2）。**実機ツリー**を指すこと。開発ツリー
 # （`~/Dev/AgentDashboard`）を指しても、そちらで建てたものは実機に効かない
 WorkingDirectory=/home/youruser/AgentDashboard
-ExecStart=/home/youruser/AgentDashboard/server/target/release/agentdashboard
+
+# **ログインシェルを通して起こす。** systemd の既定の PATH には `~/.local/bin` が
+# 無いので、実行ファイルを直に書くと `claude` が見つからず、**ダッシュボードは
+# 起きるのにセッションが1本も起きない**（2026-11-20、縮小の台本が `wsl.exe … --
+# 実行ファイル` で直に起こしたダッシュボードで実際に踏んだ。同じ形）。子の claude は
+# ダッシュボードの PATH をそのまま受け継ぐので、ここで揃えれば子にも効く。
+#
+# **`-lc` ではなく `-lic`。** `-lc` だと `~/.bashrc` の対話の部分が読まれず、nvm の
+# node が PATH に入らない（MCP サーバやフックが `npx` / `node` を使う）。端末がないので
+# 起動のたびに `no job control in this shell` が記録に出るが、害はない
+ExecStart=/bin/bash -lic 'exec /home/youruser/AgentDashboard/server/target/release/agentdashboard'
 
 # **落ちたら起こし直す。**
 #
