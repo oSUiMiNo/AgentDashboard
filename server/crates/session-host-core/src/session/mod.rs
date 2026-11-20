@@ -3776,8 +3776,46 @@ impl SessionManager {
     /// **呼び出し側が「どの CLI セッションで始まるか」を知っている場合にだけ** `Some` に
     /// する。フックが届いたら [`crate::state`] の張り替えが確定させるので、CLI が別の
     /// IDを名乗った場合も追随する。
+    ///
+    /// **起こせなかったら、ここで WARN を1行残す**（ガイドライン「外の世界と接するところには
+    /// 必ず1行残す」）。新規・呼び戻し・起こし直し（`revive`）はすべてここを通るので、
+    /// 1箇所で全部の入口に効く。以前は断りを呼び出し側（画面）へ返すだけで、ログには
+    /// 何も残らなかった——2026-11-20、PATH に `claude` が無いダッシュボードで起こし直しが
+    /// 5回とも失敗したが、ログからは試みられたことすら分からなかった。
     #[allow(clippy::too_many_arguments)]
     fn spawn_as(
+        self: &Arc<Self>,
+        card_id: CardId,
+        cwd: &str,
+        start: lifecycle::SessionStart,
+        extra_args: &[String],
+        initial_mode: Option<PermissionMode>,
+        initial_session_id: Option<ClaudeSessionId>,
+    ) -> Result<Arc<Session>, SessionError> {
+        let spawned = self.spawn_as_unlogged(
+            card_id,
+            cwd,
+            start,
+            extra_args,
+            initial_mode,
+            initial_session_id,
+        );
+        if let Err(error) = &spawned {
+            tracing::warn!(
+                %card_id,
+                cwd,
+                program = %self.program,
+                %error,
+                "セッションを起こせませんでした"
+            );
+        }
+        spawned
+    }
+
+    /// [`SessionManager::spawn_as`] の中身。**ここを直接呼ばないこと**——失敗が
+    /// ログに残らなくなる。
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_as_unlogged(
         self: &Arc<Self>,
         card_id: CardId,
         cwd: &str,

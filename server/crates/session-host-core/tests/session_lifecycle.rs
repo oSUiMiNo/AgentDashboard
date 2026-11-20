@@ -466,3 +466,69 @@ async fn 子が居なくなっても端末への書き込みは失敗しない()
          そのときは send_key の warn を実測で押さえること"
     );
 }
+
+/// ログを集める（`tracing` の出力先を差し替える。**同じスレッドで走ったぶんだけ**拾う）。
+#[derive(Clone, Default)]
+struct 行の溜め(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for 行の溜め {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("ロックが壊れていない")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for 行の溜め {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn ログを集める<T>(body: impl FnOnce() -> T) -> (T, String) {
+    let 溜め = 行の溜め::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(溜め.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8_lossy(&溜め.0.lock().expect("ロックが壊れていない")).into_owned();
+    (out, text)
+}
+
+/// 起動に失敗したら、ダッシュボードのログに WARN を1行残す（2026-11-20）。
+///
+/// 縮小の台本が `wsl.exe … -- 実行ファイル` で起こしたダッシュボードは PATH に
+/// `~/.local/bin` を持たず、起こし直しが5回とも失敗した。**断りは画面へ返っていたが、
+/// ログには1行も残らなかった**ので、後から読んでも試みられたことすら分からなかった。
+#[tokio::test]
+async fn 起動に失敗したらwarnを1行残す() {
+    let manager = common::build_manager(
+        std::sync::Arc::new(SessionHostConfig::default()),
+        "agentdashboard-no-such-claude".to_string(),
+    );
+
+    let (起こした, 行) = ログを集める(|| manager.spawn(&common::work_dir()));
+
+    let 断り = 起こした
+        .expect_err("無い CLI では起こせないこと")
+        .to_string();
+    assert!(断り.contains("セッションを起動できませんでした"), "{断り}");
+    assert!(
+        行.contains("WARN") && 行.contains("セッションを起こせませんでした"),
+        "★起動に失敗したのに、ログに WARN が残っていない: {行}"
+    );
+    assert!(
+        行.contains("agentdashboard-no-such-claude"),
+        "何を起こそうとしたかが行に無い: {行}"
+    );
+}
