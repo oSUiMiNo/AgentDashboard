@@ -532,3 +532,50 @@ async fn 起動に失敗したらwarnを1行残す() {
         "何を起こそうとしたかが行に無い: {行}"
     );
 }
+
+/// 起動する CLI が PATH に見つからなければ、起動時の1行を WARN にする（2026-11-20）。
+#[test]
+fn 起動する_cliが_pathに見つからなければ_warnで残す() {
+    let path = std::ffi::OsString::from("/agentdashboard-no-such-dir");
+    let (見つけた, 行) = ログを集める(|| {
+        session_host_core::session::lifecycle::announce_program("claude", Some(path.as_os_str()))
+    });
+
+    assert_eq!(見つけた, None);
+    assert!(
+        行.contains("WARN") && 行.contains("PATH に見つかりません"),
+        "★CLI が見つからないのに、起動時の行が WARN になっていない: {行}"
+    );
+    assert!(
+        行.contains("/agentdashboard-no-such-dir"),
+        "見た PATH が行に無い（何が抜けているか判断できない）: {行}"
+    );
+}
+
+/// 見つかるときは今までどおり INFO で名乗る（WARN を出さない）。
+#[test]
+fn 起動する_cliが見つかれば_infoで名乗る() {
+    let fake = common::fake_claude();
+    let dir = fake
+        .parent()
+        .expect("擬似 claude には置き場所がある")
+        .to_path_buf();
+    let name = fake
+        .file_name()
+        .expect("擬似 claude には名前がある")
+        .to_string_lossy()
+        .into_owned();
+    let path = std::env::join_paths([std::path::PathBuf::from("/agentdashboard-no-such-dir"), dir])
+        .expect("PATH を組めること");
+
+    let (見つけた, 行) = ログを集める(|| {
+        session_host_core::session::lifecycle::announce_program(&name, Some(path.as_os_str()))
+    });
+
+    assert_eq!(見つけた.as_deref(), Some(fake.as_path()));
+    assert!(行.contains("INFO") && 行.contains("起動する CLI"), "{行}");
+    assert!(
+        !行.contains("WARN"),
+        "見つかったのに WARN を出している: {行}"
+    );
+}

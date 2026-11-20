@@ -192,7 +192,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
 
     // 4. セッションの持ち主
     let manager = SessionManager::with_sink(Arc::clone(&config), Arc::clone(&link) as _);
-    tracing::info!("起動する CLI: {}", manager.program());
+    lifecycle::announce_program(manager.program(), std::env::var_os("PATH").as_deref());
     hooks::serve(hook_listener, Arc::clone(&manager));
 
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）。

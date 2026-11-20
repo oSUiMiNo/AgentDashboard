@@ -523,7 +523,10 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
         Arc::clone(&agent_config),
         local::reporting(Arc::clone(&registry), Arc::clone(&offsets)),
     );
-    tracing::info!("起動する CLI: {}", manager.program());
+    session_host_core::session::lifecycle::announce_program(
+        manager.program(),
+        std::env::var_os("PATH").as_deref(),
+    );
 
     // 起動している CLI へ問い合わせる2つを、まとめてブロッキング用のスレッドへ逃がす。
     //

@@ -15,7 +15,7 @@
 use super::permission;
 use portable_pty::CommandBuilder;
 use protocol::{ClaudeSessionId, PermissionMode};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 起動する CLI の実行ファイルを差し替えるための環境変数。
 ///
@@ -52,6 +52,65 @@ pub const TERM_VALUE: &str = "xterm-256color";
 /// 起動する実行ファイル名を決める。
 pub fn claude_program() -> String {
     std::env::var(CLAUDE_BIN_ENV).unwrap_or_else(|_| DEFAULT_CLAUDE_PROGRAM.to_string())
+}
+
+/// 起動する CLI の実行ファイルを、**子へ渡すのと同じ PATH** から探す。
+///
+/// 子の PATH は親の PATH をそのまま通す（[`ALLOWED_ENV`]）ので、ここで見つからなければ
+/// セッションは1本も起きない。名前に `/` を含むときは PATH を見ずにそのパスを確かめる
+/// （PTY で起こすときと同じ解釈）。
+pub fn locate_program(program: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let candidate = Path::new(program);
+    if program.contains('/') {
+        return is_executable_file(candidate).then(|| candidate.to_path_buf());
+    }
+    std::env::split_paths(path_var?)
+        .map(|dir| dir.join(program))
+        .find(|path| is_executable_file(path))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// 起動する CLI を名乗る1行を残す。**見つからなければ WARN にする。**
+///
+/// ログイン時の設定を読まずに起こされたダッシュボード（例：`wsl.exe … -- 実行ファイル`
+/// や systemd の unit）は PATH に `~/.local/bin` を持たず、`claude` を見つけられない。
+/// 以前はこの行が INFO のまま名前だけを出していたので、**セッションが1本も起きない
+/// 状態で起動したことが、ログのどこにも警告として残らなかった**（2026-11-20 に実際に
+/// 踏んだ。縮小の台本が起こしたダッシュボードで、起こし直しが5回とも黙って失敗した）。
+/// 見たままの PATH を添えるので、何が抜けているかをこの1行で判断できる。
+pub fn announce_program(program: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    match locate_program(program, path_var) {
+        Some(found) => {
+            tracing::info!(found = %found.display(), "起動する CLI: {program}");
+            Some(found)
+        }
+        None => {
+            let path = path_var
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            tracing::warn!(
+                path = %path,
+                "起動する CLI（{program}）が PATH に見つかりません。このままではセッションを起こせません\
+                 （ログイン時の設定を読まずに起こすと PATH に ~/.local/bin が入らない。\
+                 ログインシェル経由で起こし直してください）"
+            );
+            None
+        }
+    }
 }
 
 /// その名前の環境変数を子へ渡してよいか。
