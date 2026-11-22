@@ -31,6 +31,9 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 import { ArrowUpGlyph, CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
+import { OpenInButtons } from '@/components/OpenIn/OpenInButtons'
+import { OpenInMenuItems } from '@/components/OpenIn/OpenInMenuItems'
+import { OpenedMark } from '@/components/OpenIn/OpenedMark'
 import { copyToClipboard } from '@/lib/clipboard'
 import { fileIcon } from '@/lib/fileKind'
 import { FileTypeIcon } from '@/components/ui/fileTypeIcon'
@@ -46,6 +49,7 @@ import {
   type DirEntry,
   type DirListing,
 } from '@/lib/hostfs'
+import type { OpenApp, OpenInView } from '@/lib/openIn'
 import { usePoll, 一覧を引き直す間隔 } from '@/lib/poll'
 
 /**
@@ -95,6 +99,21 @@ interface Props {
   /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
   onPickFile?: (path: string) => void
   current?: string
+  /**
+   * エクスプローラ・VSCode で開く口（サイドバーにエクスプローラで開くボタンが欲しい 設計§7-1）。
+   *
+   * **サイドバーだけが渡す。** 追加シートは渡さないので、ボタン・右クリックの項目・
+   * 行の印はどれも出ない（今の DOM のまま）。親PC でない（`same_machine: false`）ときも同じ
+   * ——押しても何も起きないものを置かない。
+   */
+  openIn?: OpenInProp
+}
+
+/** `openIn` の形。`Row` にも同じものを渡す */
+interface OpenInProp {
+  view: OpenInView
+  open: (app: OpenApp, path: string) => void
+  busy: boolean
 }
 
 /**
@@ -115,6 +134,7 @@ export function FolderBrowser({
   onPathChange,
   onPickFile,
   current,
+  openIn,
 }: Props) {
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -401,6 +421,78 @@ export function FolderBrowser({
   const 上へ行ける =
     ひとつ上 !== undefined &&
     (root === undefined || isUnder(root, ひとつ上.path))
+  // **親PC の画面で、口が読めたときだけ。** それ以外は何も描かない（設計§7-1）
+  const 開く口 = openIn?.view.same_machine === true ? openIn : undefined
+
+  // **中身は1文字も変えずに外へ出しただけ。** 開く口があるときだけ外枠で包んで、右に
+  // 2つのボタンを置く（設計§7-2）。`folder-crumbs` の testid と中の並びは既存のテストと
+  // E2E が読んでいる
+  const パンくず = (
+    <nav
+      data-testid="folder-crumbs"
+      aria-label="いまの場所"
+      className={`flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs${開く口 === undefined ? "" : " min-w-0 flex-1"}`}
+    >
+      {/*
+        **パンくずの左に置く**（要件3）。行き先はパンくずの中にあるが、**押す場所が
+        パンくずの中だと、深い階層では横に流れて見つからない**——位置が固定の的を1つ
+        置くことで、どこに居ても同じ場所を押せば1つ上へ行ける。
+      */}
+      <Button
+        type="button"
+        /*
+          **枠と地を持たせて、押せるものだと分かるようにする**（2026-09-05 の指定）。
+          `ghost` の細い山形は**パスの区切りや文字に紛れて、UI だと読めなかった**——
+          ここはパンくずという**文字が並ぶ場所**なので、他所より器の助けが要る。
+        */
+        variant="outline"
+        size="icon-xs"
+        data-testid="folder-up"
+        aria-label="1つ上のフォルダへ"
+        title={
+          上へ行ける
+            ? `1つ上のフォルダへ：${ひとつ上?.path ?? ""}`
+            : "ここが起点なので、これより上へは出られません"
+        }
+        disabled={!上へ行ける}
+        className="shrink-0"
+        onClick={() => {
+          if (ひとつ上 !== undefined) {
+            void go(ひとつ上.path)
+          }
+        }}
+      >
+        {/* 器（24px）に対して 14px。`icon-xs` の既定（12px）だと器の中で泳ぐ */}
+        <ArrowUpGlyph className="size-3.5" />
+      </Button>
+
+      {外側 !== undefined && (
+        <button
+          type="button"
+          data-testid="folder-crumb"
+          disabled
+          title={`起点より上：${外側.path}`}
+          aria-label={`起点より上：${外側.path}`}
+          className="text-muted-foreground rounded px-1 py-0.5"
+        >
+          …
+        </button>
+      )}
+      {内側.map((crumb, at) => (
+        <span key={crumb.path} className="flex items-center gap-1">
+          {(at > 0 ? 内側[at - 1]?.label !== '/' : 外側 !== undefined) && <span className="text-muted-foreground">/</span>}
+          <button
+            type="button"
+            data-testid="folder-crumb"
+            className="hover:text-primary rounded px-1 py-0.5 underline"
+            onClick={() => void go(crumb.path)}
+          >
+            {crumb.label}
+          </button>
+        </span>
+      ))}
+    </nav>
+  )
 
   return (
     <div
@@ -410,70 +502,21 @@ export function FolderBrowser({
       // `ul` の `overflow-y-auto` が効かずに親ごとはみ出す
       className="flex h-full min-h-0 flex-col gap-2"
     >
-      <nav
-        data-testid="folder-crumbs"
-        aria-label="いまの場所"
-        className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs"
-      >
-        {/*
-          **パンくずの左に置く**（要件3）。行き先はパンくずの中にあるが、**押す場所が
-          パンくずの中だと、深い階層では横に流れて見つからない**——位置が固定の的を1つ
-          置くことで、どこに居ても同じ場所を押せば1つ上へ行ける。
-        */}
-        <Button
-          type="button"
-          /*
-            **枠と地を持たせて、押せるものだと分かるようにする**（2026-09-05 の指定）。
-            `ghost` の細い山形は**パスの区切りや文字に紛れて、UI だと読めなかった**——
-            ここはパンくずという**文字が並ぶ場所**なので、他所より器の助けが要る。
-          */
-          variant="outline"
-          size="icon-xs"
-          data-testid="folder-up"
-          aria-label="1つ上のフォルダへ"
-          title={
-            上へ行ける
-              ? `1つ上のフォルダへ：${ひとつ上?.path ?? ""}`
-              : "ここが起点なので、これより上へは出られません"
-          }
-          disabled={!上へ行ける}
-          className="shrink-0"
-          onClick={() => {
-            if (ひとつ上 !== undefined) {
-              void go(ひとつ上.path)
-            }
-          }}
-        >
-          {/* 器（24px）に対して 14px。`icon-xs` の既定（12px）だと器の中で泳ぐ */}
-          <ArrowUpGlyph className="size-3.5" />
-        </Button>
-
-        {外側 !== undefined && (
-          <button
-            type="button"
-            data-testid="folder-crumb"
-            disabled
-            title={`起点より上：${外側.path}`}
-            aria-label={`起点より上：${外側.path}`}
-            className="text-muted-foreground rounded px-1 py-0.5"
-          >
-            …
-          </button>
-        )}
-        {内側.map((crumb, at) => (
-          <span key={crumb.path} className="flex items-center gap-1">
-            {(at > 0 ? 内側[at - 1]?.label !== '/' : 外側 !== undefined) && <span className="text-muted-foreground">/</span>}
-            <button
-              type="button"
-              data-testid="folder-crumb"
-              className="hover:text-primary rounded px-1 py-0.5 underline"
-              onClick={() => void go(crumb.path)}
-            >
-              {crumb.label}
-            </button>
-          </span>
-        ))}
-      </nav>
+      {開く口 === undefined ? (
+        パンくず
+      ) : (
+        <div data-testid="folder-crumbs-row" className="flex items-start gap-1">
+          {パンくず}
+          {root !== undefined && (
+            <OpenInButtons
+              root={root}
+              view={開く口.view}
+              open={開く口.open}
+              busy={開く口.busy}
+            />
+          )}
+        </div>
+      )}
 
       {error !== null && (
         <p data-testid="folder-error" className="text-xs text-red-400">
@@ -562,6 +605,7 @@ export function FolderBrowser({
                 // **答えを持っているのは1行だけ。** 他の行は常に手つかずへ戻る
                 copyState={copied?.path === full ? copied.state : "idle"}
                 onCopy={(value) => copy(full, value)}
+                openIn={開く口}
               />
             )
           })}
@@ -655,6 +699,7 @@ function Row({
   current = false,
   copyState,
   onCopy,
+  openIn,
 }: {
   current?: boolean
   entry: DirEntry
@@ -669,15 +714,31 @@ function Row({
   /** この行のコピーがどうなったか。**答えを持つのは1行だけ**（親が決める） */
   copyState: "idle" | "done" | "failed"
   onCopy: (value: string) => void
+  /** エクスプローラ・VSCode で開く口。**親PC の画面のサイドバーだけ**が渡す（設計§7-1） */
+  openIn?: OpenInProp
 }) {
   const openable = entry.kind === "dir"
   // **`file` に限る。** `symlink` を混ぜると、いままで押せなかった行が押せるようになる
   const linkable = entry.kind === "file" && onPickFile !== undefined
   const pressable = openable || linkable
+  // **文字のまま突き合わせる。** サーバは送ったパスのまま返す（設計§3-6）
+  const 開いている = openIn?.view.opened.some((entry) => entry.path === full) ?? false
 
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
   const 行のクラス =
     `h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal${current ? " folder-entry-current" : ""}`
+
+  // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）。**1つの式から作る**
+  // ——開く口の有無で2箇所に書くと、片方だけ直されて札の形が割れる
+  const 札 = (寄せ方: string) => (
+    <span
+      data-testid="folder-project-mark"
+      title="このフォルダは .git を持っています"
+      className={`border-primary/40 text-primary shrink-0 rounded border px-1 text-[10px]${寄せ方 === "" ? "" : ` ${寄せ方}`}`}
+    >
+      PJT
+    </span>
+  )
 
   const 中身 = (
     <>
@@ -707,16 +768,16 @@ function Row({
       <span title={entry.name} className="min-w-0 truncate">
         {entry.name}
       </span>
-      {entry.is_project && (
-        // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
-        <span
-          data-testid="folder-project-mark"
-          title="このフォルダは .git を持っています"
-          className="border-primary/40 text-primary ml-auto shrink-0 rounded border px-1 text-[10px]"
-        >
-          PJT
-        </span>
-      )}
+      {openIn === undefined
+        ? entry.is_project && 札("ml-auto")
+        : (開いている || entry.is_project) && (
+            // **行末へ寄せるのは入れ物の側。** 印だけ・札だけ・両方のどれでも行末に並ぶ
+            // （開く口の設計§7-4）
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {開いている && <OpenedMark />}
+              {entry.is_project && 札("")}
+            </span>
+          )}
     </>
   )
 
@@ -825,6 +886,18 @@ function Row({
               ブラウザの新しいタブで開く
             </a>
           </ContextMenuItem>
+        )}
+        {/*
+          **エクスプローラ・VSCode で開く**（開く口の設計§7-5）。「新しいタブで開く」の後、
+          「絶対パスをコピー」の前。フォルダの行は見出しの下の区切り線がそのまま上の区切りに
+          なるので、前の区切り線を重ねない
+        */}
+        {openIn !== undefined && (
+          <>
+            {linkable && <ContextMenuSeparator />}
+            <OpenInMenuItems path={full} view={openIn.view} open={openIn.open} />
+            <ContextMenuSeparator />
+          </>
         )}
         <ContextMenuItem
           data-testid="folder-menu-copy-abs"

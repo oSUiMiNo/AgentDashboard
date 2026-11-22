@@ -86,6 +86,7 @@
 import { motion } from 'motion/react'
 import type { CSSProperties } from 'react'
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
+import { useOpenIn } from '@/components/OpenIn/useOpenIn'
 import { FilesResizer } from '@/components/ProjectFiles/FilesResizer'
 import { Button } from '@/components/ui/button'
 import { CloseGlyph } from '@/components/ui/glyphs'
@@ -144,6 +145,9 @@ export function Sidebar({
   onMove,
   onDrop,
 }: Props) {
+  // **サイドバーを開いている間だけ問い合わせる**（畳むと木から消えて止まる）。追加シートは
+  // `FolderBrowser` に渡さないので、エクスプローラ・VSCode で開く口はここにしか出ない
+  const 開く口 = useOpenIn(host)
   return (
     <>
       {/*
@@ -220,6 +224,11 @@ export function Sidebar({
             onPathChange={onPathChange}
             onPickFile={onPickFile}
             current={current}
+            openIn={
+              開く口.view === null
+                ? undefined
+                : { view: 開く口.view, open: 開く口.open, busy: 開く口.busy }
+            }
           />
         </div>
 

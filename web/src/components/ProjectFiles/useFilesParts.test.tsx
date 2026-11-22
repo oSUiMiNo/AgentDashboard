@@ -707,8 +707,13 @@ describe('一覧は画像を先読みしない', () => {
     await screen.findByText('一枚目.png')
 
     // **一覧の1回だけ。** 画像の数だけ問答が走ると、跨いだ配置では
-    // 1件あたり最大5秒の時間切れがその数だけ並ぶ
-    expect(calls).toHaveLength(1)
+    // 1件あたり最大5秒の時間切れがその数だけ並ぶ。
+    //
+    // **数えるのは一覧と中身の問答だけ。** サイドバーはエクスプローラ・VSCode で開く口
+    // （`/open`）も1回聞く（サイドバーにエクスプローラで開くボタンが欲しい 設計§7-6）が、
+    // それは画像の先読みとは関係が無い
+    const 一覧と中身 = calls.filter((url) => !url.endsWith('/open'))
+    expect(一覧と中身).toHaveLength(1)
     expect(calls.filter((url) => url.includes('as=raw'))).toHaveLength(0)
   })
 })
