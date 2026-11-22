@@ -164,3 +164,28 @@ describe('スラッシュコマンドのカード', () => {
     expect(readFile).not.toHaveBeenCalled()
   })
 })
+
+describe('大きいコマンドの定義（ファイル閲覧の上限 設計§10-1）', () => {
+  it('先頭の窓しか届かなくても、途中までの本文と「上限まで読みました」を出す', async () => {
+    // **`slashCommandFile.ts` は `readFile` のまま使う呼び手である。** 全文が要る口
+    // （`readWholeFile`）へ替えると、先頭の窓が「読めなかった」扱いになってこの表示が消える
+    vi.spyOn(hostfs, 'listDir').mockResolvedValue({
+      path: '/home/me',
+      entries: [],
+      truncated: false,
+    } as never)
+    vi.spyOn(hostfs, 'readFile').mockImplementation(async (_host, path) => {
+      if (path !== '/home/me/.claude/commands/sample-skill-1.md') {
+        throw new hostfs.HostFsError(404, `${path} を開けません`)
+      }
+      return { path, text: '# 先頭の見出し\n\n途中まで', truncated: true, bytes: 4 * 1024 * 1024 }
+    })
+    置く(コマンドのノード())
+    await userEvent.click(await screen.findByTestId('slash-command'))
+    const card = await screen.findByTestId('slash-command-card')
+    await waitFor(() =>
+      expect(within(card).getByRole('heading', { name: '先頭の見出し' })).toBeInTheDocument(),
+    )
+    expect(card.textContent).toContain('…（上限まで読みました）')
+  })
+})
