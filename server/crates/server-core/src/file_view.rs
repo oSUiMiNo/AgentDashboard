@@ -170,33 +170,78 @@ pub fn warnings_for(
 ///
 /// 行が無ければ起動の形の既定。**選択肢に無い値と、DB が読めないときも既定へ倒す**——
 /// 読めないことを理由にファイルを開けなくしない。ただし**黙っては倒さない**：
-/// `kind=file_view_limit_unreadable` を1行残す（後から「なぜ設定が効かないのか」を追えるように）。
+/// `kind=file_view_limit_unreadable` を残す（後から「なぜ設定が効かないのか」を追えるように）。
+/// **同じ理由（同じ値・DB が読めない）が続く間は1回だけ**残す——窓読み1つごとに呼ばれるため
+/// （`.claude/docs/guideline.md`「1件ごとに回る場所には入れない」。コードレビュー対応 2026-11-23 対応7）。
+/// 正しく読めたら覚えを消すので、後でまた壊れたら1回出る。
 pub async fn effective_limit(db: &DatabaseConnection, policy: &FileViewPolicy) -> u64 {
     let fallback = policy.default_limit();
-    match crate::db::settings::file_view_max_bytes(db).await {
+    let read = crate::db::settings::file_view_max_bytes(db).await;
+    let now = match &read {
+        Ok(Some(value)) if !FILE_VIEW_LIMIT_CHOICES.contains(value) => {
+            Some(Unreadable::NotAChoice(*value))
+        }
+        Err(_) => Some(Unreadable::Db),
+        Ok(_) => None,
+    };
+    let warn = {
+        let mut last = LAST_UNREADABLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        should_warn(&mut last, now)
+    };
+    match read {
         Ok(None) => fallback,
         Ok(Some(value)) if FILE_VIEW_LIMIT_CHOICES.contains(&value) => value,
         Ok(Some(value)) => {
-            tracing::warn!(
-                kind = "file_view_limit_unreadable",
-                reason = "not_a_choice",
-                value,
-                fallback,
-                "ファイル閲覧の上限に選択肢に無い値が入っているので、既定で開きます"
-            );
+            if warn {
+                tracing::warn!(
+                    kind = "file_view_limit_unreadable",
+                    reason = "not_a_choice",
+                    value,
+                    fallback,
+                    "ファイル閲覧の上限に選択肢に無い値が入っているので、既定で開きます"
+                );
+            }
             fallback
         }
         Err(err) => {
-            tracing::warn!(
-                kind = "file_view_limit_unreadable",
-                reason = "db",
-                error = %err,
-                fallback,
-                "ファイル閲覧の上限を読めないので、既定で開きます"
-            );
+            if warn {
+                tracing::warn!(
+                    kind = "file_view_limit_unreadable",
+                    reason = "db",
+                    error = %err,
+                    fallback,
+                    "ファイル閲覧の上限を読めないので、既定で開きます"
+                );
+            }
             fallback
         }
     }
+}
+
+/// 上限の鍵を読めなかった理由（[`effective_limit`] の警告を1回にまとめるための覚え）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Unreadable {
+    NotAChoice(u64),
+    Db,
+}
+
+/// 最後に警告した理由。プロセスに1つ。
+static LAST_UNREADABLE: std::sync::Mutex<Option<Unreadable>> = std::sync::Mutex::new(None);
+
+/// 警告を出すかを決める。正しく読めた（`now == None`）なら覚えを消して出さない。
+/// 前と同じ理由なら出さない。違えば覚えて出す。
+fn should_warn(last: &mut Option<Unreadable>, now: Option<Unreadable>) -> bool {
+    if now.is_none() {
+        *last = None;
+        return false;
+    }
+    if now == *last {
+        return false;
+    }
+    *last = now;
+    true
 }
 
 /// 設定の口が画面へ返す、上限のいまの姿（設計§6-2 の `max_bytes`・`configured`）。
@@ -255,6 +300,36 @@ mod tests {
             name: "Amazon EC2".to_string(),
             source: CloudSource::Dmi,
         })
+    }
+
+    #[test]
+    fn 読めない値の警告は同じ理由について1回だけ出す() {
+        let mut last = None;
+        let two = Some(Unreadable::NotAChoice(2 * MIB));
+        let seven = Some(Unreadable::NotAChoice(7 * MIB));
+        assert_eq!(
+            [
+                should_warn(&mut last, two),
+                should_warn(&mut last, two),
+                should_warn(&mut last, two)
+            ],
+            [true, false, false],
+            "同じ値が続く間は最初の1回だけ"
+        );
+        assert!(should_warn(&mut last, seven), "値が変われば1回出す");
+        assert!(!should_warn(&mut last, None), "正しく読めたときは出さない");
+        assert!(
+            should_warn(&mut last, seven),
+            "正しく読めたら覚えを消すので、また壊れたら1回出す"
+        );
+        assert_eq!(
+            [
+                should_warn(&mut last, Some(Unreadable::Db)),
+                should_warn(&mut last, Some(Unreadable::Db))
+            ],
+            [true, false],
+            "DB が読めないのが続く間も1回だけ"
+        );
     }
 
     #[test]
