@@ -30,7 +30,7 @@
 use protocol::a2s::HostFailure;
 use protocol::fs::{
     DirEntry, DirListing, EntryKind, FileBlob, FileContent, FileKind, MAX_BLOB_BYTES, MAX_ENTRIES,
-    MAX_FILE_BYTES, MAX_LISTING_BYTES, WrittenFile, kind_of, media_type_of,
+    MAX_LISTING_BYTES, WHOLE_TEXT_BYTES, WrittenFile, kind_of, media_type_of,
 };
 use std::path::{Path, PathBuf};
 
@@ -342,11 +342,11 @@ pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
 
     // **開く前に大きさで断る。** 読んでから捨てるのでは、上限を置いた意味が無い
     let bytes = meta.len();
-    if bytes > MAX_FILE_BYTES {
+    if bytes > WHOLE_TEXT_BYTES {
         return Err(HostFsError::new(
             HostFailure::TooLarge,
             format!(
-                "{} は {bytes} バイトで、上限の {MAX_FILE_BYTES} バイトを超えています",
+                "{} は {bytes} バイトで、上限の {WHOLE_TEXT_BYTES} バイトを超えています",
                 path.display()
             ),
         ));
@@ -471,10 +471,10 @@ pub fn write_file(
     // **切り詰めて上書きする事故を塞ぐ**（設計§9）。いまは上限超えを丸ごと断っているので
     // 発火しないが、部分読みが入ったときにここが効く
     let bytes = meta.len();
-    if bytes > MAX_FILE_BYTES {
+    if bytes > WHOLE_TEXT_BYTES {
         return Err(HostFsError::new(
             HostFailure::TooLarge,
-            format!("{shown} は {bytes} バイトで、上限の {MAX_FILE_BYTES} バイトを超えています"),
+            format!("{shown} は {bytes} バイトで、上限の {WHOLE_TEXT_BYTES} バイトを超えています"),
         ));
     }
 

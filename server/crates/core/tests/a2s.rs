@@ -1983,7 +1983,7 @@ async fn 上限いっぱいのテキストが線を往復する() {
     // **同じ字の繰り返しにしない。** JSON にするとき膨らむ字（引用符・バックスラッシュ・
     // 改行・タブ）と多バイト字を混ぜておかないと、**エスケープの往復で化けても気づけない**。
     // 最後は ASCII で埋めて、上限ちょうどのバイト数に合わせる
-    let size = protocol::fs::MAX_FILE_BYTES as usize;
+    let size = protocol::fs::WHOLE_TEXT_BYTES as usize;
     let unit = "あ\"\\\n行\t";
     let mut body = String::with_capacity(size + unit.len());
     while body.len() + unit.len() <= size {

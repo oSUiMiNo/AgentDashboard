@@ -48,7 +48,7 @@ pub const MAX_LISTING_BYTES: usize = 512 * 1024;
 /// [`MAX_BLOB_BYTES`] を通るのは**画像だけ**である（`server-core` の生の口を見よ）。
 /// したがってこの値は、整形して読む・生テキストで見る・`iframe` で描く の**すべて**を
 /// 決めている。
-pub const MAX_FILE_BYTES: u64 = 3 * 1024 * 1024;
+pub const WHOLE_TEXT_BYTES: u64 = 3 * 1024 * 1024;
 
 /// フォルダ1つの中身（設計§8）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,7 +98,7 @@ pub struct FileContent {
     pub text: String,
     /// 上限の**内側で**行数などの都合により切ったか。
     ///
-    /// [`MAX_FILE_BYTES`] を超えた場合はここを使わず、断る（設計§9）。切れていることが
+    /// [`WHOLE_TEXT_BYTES`] を超えた場合はここを使わず、断る（設計§9）。切れていることが
     /// 伝わらない形（先頭だけ返して黙る）を避けるため、意味を混ぜない。
     pub truncated: bool,
     /// 元のファイルの大きさ。断るときにも添えるので、返せた場合も入れておく
@@ -131,7 +131,7 @@ pub struct FileContent {
 
 /// バイト列で返してよいファイルの大きさの上限（`ファイル閲覧で画像とHTMLも表示する` 設計§4）。
 ///
-/// **テキストの [`MAX_FILE_BYTES`] とは別の値にしてある。** 読みたいものの大きさが桁で違う——
+/// **テキストの [`WHOLE_TEXT_BYTES`] とは別の値にしてある。** 読みたいものの大きさが桁で違う——
 /// 手元のスクショの最大は 545 KB で、テキストの上限が 256 KiB だったころは開けなかった。
 ///
 /// **その差は縮んだが、分けたままにする**（テキストは 3 MiB へ上がった）。**通す側の理由が
@@ -363,7 +363,7 @@ mod tests {
         // 設計§23-2 と食い違ったら、どちらかが嘘になっている
         assert_eq!(MAX_ENTRIES, 1_000);
         assert_eq!(MAX_LISTING_BYTES, 524_288);
-        assert_eq!(MAX_FILE_BYTES, 3_145_728);
+        assert_eq!(WHOLE_TEXT_BYTES, 3_145_728);
     }
 
     /// 種別の表（`ファイル閲覧で画像とHTMLも表示する` 設計§2。テスト計画フェーズ2）。
@@ -465,7 +465,7 @@ mod tests {
             // テストも一緒に動いて通ってしまう
             assert_eq!(MAX_BLOB_BYTES, 8_388_608);
             // テキストの上限とは別の値であること（設計§4-1）
-            assert_ne!(MAX_BLOB_BYTES, MAX_FILE_BYTES);
+            assert_ne!(MAX_BLOB_BYTES, WHOLE_TEXT_BYTES);
         }
 
         #[test]

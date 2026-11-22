@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 
 use protocol::a2s::HostFailure;
-use protocol::fs::{EntryKind, MAX_BLOB_BYTES, MAX_ENTRIES, MAX_FILE_BYTES};
+use protocol::fs::{EntryKind, MAX_BLOB_BYTES, MAX_ENTRIES, WHOLE_TEXT_BYTES};
 use session_host_core::hostfs;
 use std::path::{Path, PathBuf};
 
@@ -366,7 +366,7 @@ fn utf8として読めないファイルは断る() {
 #[test]
 fn 上限を超えるファイルは大きさを添えて断る() {
     let sandbox = Sandbox::new("toolarge");
-    let size = (MAX_FILE_BYTES + 1) as usize;
+    let size = (WHOLE_TEXT_BYTES + 1) as usize;
     let path = sandbox.file("大きい.txt", &vec![b'a'; size]);
 
     let err = hostfs::read_file(&path).expect_err("断ること");
@@ -385,7 +385,7 @@ fn リンク越しでも大きさの上限は効く() {
     // 辿らない側で測るとリンク自身の長さ（数十バイト）になるのに、読むほうは
     // 辿るので、上限を無視した中身がそのまま画面まで流れる
     let sandbox = Sandbox::new("linklarge");
-    let size = (MAX_FILE_BYTES + 1) as usize;
+    let size = (WHOLE_TEXT_BYTES + 1) as usize;
     let real = sandbox.file("大きい.txt", &vec![b'a'; size]);
     let link = sandbox.path().join("近道.txt");
     std::os::unix::fs::symlink(&real, &link).expect("リンクを作れること");
@@ -559,7 +559,7 @@ fn 中身は検めない() {
 fn テキストの上限は動かしていない() {
     // **画像の上限を足しても、テキストの側は1バイトも動かさない**（設計§13）
     let sandbox = Sandbox::new("blob-text-untouched");
-    let size = MAX_FILE_BYTES as usize + 1;
+    let size = WHOLE_TEXT_BYTES as usize + 1;
     sandbox.file("長い.md", &vec![b'a'; size]);
 
     let err = hostfs::read_file(&sandbox.path().join("長い.md")).expect_err("今までどおり断ること");
@@ -568,7 +568,7 @@ fn テキストの上限は動かしていない() {
     // 画像の上限（8 MiB）で判定していたら、この大きさは通ってしまう。
     // **定数どうしの比較は const block へ**（clippy）——ここは実行時ではなく
     // 「2つの上限が別物である」という約束そのものを固定している
-    const { assert!(MAX_FILE_BYTES < MAX_BLOB_BYTES) };
+    const { assert!(WHOLE_TEXT_BYTES < MAX_BLOB_BYTES) };
 }
 
 #[test]

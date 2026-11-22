@@ -361,7 +361,7 @@ async fn htmlにはテキストの上限が効く() {
     // **種別ごとに別の道を通っている**ことの裏取り（設計§5-2）。
     // 画像の上限（8 MiB）で判定していたら、この大きさは通ってしまう
     let sandbox = Sandbox::new("htmllarge");
-    let size = protocol::fs::MAX_FILE_BYTES as usize + 1;
+    let size = protocol::fs::WHOLE_TEXT_BYTES as usize + 1;
     let path = sandbox.file("大きい.html", &vec![b'a'; size]);
     let server = common::TestServer::start_with(config_for("htmllarge")).await;
 
