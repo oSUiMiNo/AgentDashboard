@@ -234,6 +234,14 @@ export function FileWindowView({
       if (kind === 'after') {
         const got = append(current, chunk)
         if (got === null) {
+          // 継げない答え。黙って返すと、下端へ送るたびに同じ頼みを撃ち続ける
+          // （コードレビュー対応 2026-11-23 対応4）
+          putStop('after', {
+            kind: 'error',
+            message: '続きを読み込めませんでした',
+            retry: request,
+            mode: 'after',
+          })
           return
         }
         if (got.dropped === 'head') {
@@ -248,7 +256,16 @@ export function FileWindowView({
         // 行頭へ寄せた先が今の先頭だった（空の窓）。同じ範囲を寄せずに1回だけ頼み直す
         if (chunk.start === chunk.end && request.alignLine && !retried) {
           await load('before', { ...request, alignLine: false }, true)
+          return
         }
+        // それでも継げない答えには止めの印を出し、同じ頼みを撃ち続けない
+        // （コードレビュー対応 2026-11-23 対応4）
+        putStop('before', {
+          kind: 'error',
+          message: '前の部分を読み込めませんでした',
+          retry: request,
+          mode: 'before',
+        })
         return
       }
       keepAnchor(current[0]?.start)
@@ -360,7 +377,9 @@ export function FileWindowView({
     pendingScrollRef.current = 'top'
     putStop('before', null)
     putStop('after', null)
-    void load('reload', { offset: from, length: windowBytes, alignLine: from > 0 })
+    // 今の先頭の窓の start は既に字の境目。寄せると次の改行の後ろへ進み、一番上の行が消える
+    // （コードレビュー対応 2026-11-23 対応5）
+    void load('reload', { offset: from, length: windowBytes, alignLine: false })
   }, [windowBytes, load, putStop])
 
   const commitSeek = useCallback(() => {

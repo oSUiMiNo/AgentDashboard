@@ -262,6 +262,58 @@ describe('読み足し', () => {
   })
 })
 
+describe('継げない答え（コードレビュー対応 2026-11-23 対応4）', () => {
+  it('前へ読み足した答えが今の先頭に継がらなければ止めの印を出し、同じ頼みを撃たない', async () => {
+    const calls = 窓口を偽る()
+    const box = 箱を作る({ scrollHeight: 1000, clientHeight: 100, scrollTop: 500 })
+    描く(box)
+    fireEvent.click(screen.getByTestId('file-window-end'))
+    const 末尾の頭 = 全体 - 窓幅
+    await 答える(calls[0], 窓で(窓(末尾の頭, 全体)))
+    box.scrollTop = 0
+    fireEvent.scroll(box)
+    expect(calls).toHaveLength(2)
+    // 終わりが今の先頭を越える（継げない）答え
+    await 答える(calls[1], 窓で(窓(末尾の頭 - 窓幅 + 10, 末尾の頭 + 4)))
+    expect(screen.getByTestId('file-window-error').textContent).toBe(
+      '前の部分を読み込めませんでした',
+    )
+    fireEvent.scroll(box)
+    fireEvent.scroll(box)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('先頭の窓が2バイト目から始まるとき、前へ読み足すと先頭に着く', async () => {
+    const calls = 窓口を偽る()
+    const box = 箱を作る({ scrollHeight: 1000, clientHeight: 100, scrollTop: 500 })
+    // 窓の幅を「全体−2」にすると、「末尾へ」の窓は2バイト目から始まる
+    描く(box, { windowBytes: 全体 - 2 })
+    fireEvent.click(screen.getByTestId('file-window-end'))
+    expect(calls[0]).toMatchObject({ offset: 2 })
+    await 答える(calls[0], 窓で(窓(2, 全体)))
+    box.scrollTop = 0
+    fireEvent.scroll(box)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toMatchObject({ offset: 0, length: '2', align: null })
+    await 答える(calls[1], 窓で(窓(0, 2)))
+    const spans = screen.getByTestId('file-window-text').querySelectorAll('span')
+    expect([...spans].map((span) => span.getAttribute('data-start'))).toEqual(['0', '2'])
+    expect(screen.queryByTestId('file-window-before')).toBeNull()
+    expect(screen.queryByTestId('file-window-error')).toBeNull()
+  })
+
+  it('続きの答えが継がらなければ止めの印を出す', async () => {
+    const calls = 窓口を偽る()
+    const box = 箱を作る({ scrollHeight: 100, clientHeight: 100, scrollTop: 0 })
+    描く(box)
+    expect(calls).toHaveLength(1)
+    await 答える(calls[0], 窓で(窓(先頭のバイト数 + 5, 先頭のバイト数 + 20)))
+    expect(screen.getByTestId('file-window-error').textContent).toBe('続きを読み込めませんでした')
+    fireEvent.scroll(box)
+    expect(calls).toHaveLength(1)
+  })
+})
+
 describe('読んでいる間にファイルが変わった', () => {
   it('印の違う窓は捨て、知らせと「読み直す」を出し、読み直すと新しい印で並ぶ', async () => {
     const calls = 窓口を偽る()
@@ -277,6 +329,26 @@ describe('読んでいる間にファイルが変わった', () => {
     await 答える(calls[1], 窓で(窓(0, 全体, 's2', '読み直した中身')))
     expect(screen.queryByTestId('file-window-changed')).toBeNull()
     expect(screen.getByTestId('file-window-text').textContent).toBe('読み直した中身')
+  })
+
+  it('読み直すは今の先頭から寄せずに読む（コードレビュー対応 2026-11-23 対応5）', async () => {
+    const calls = 窓口を偽る()
+    const box = 箱を作る({ scrollHeight: 1000, clientHeight: 100, scrollTop: 500 })
+    // 窓の幅を「全体−100」にすると、「末尾へ」の窓は100バイト目から始まる
+    描く(box, { windowBytes: 全体 - 100 })
+    fireEvent.click(screen.getByTestId('file-window-end'))
+    await 答える(calls[0], 窓で(窓(100, 全体)))
+    box.scrollTop = 0
+    fireEvent.scroll(box)
+    expect(calls).toHaveLength(2)
+    await 答える(calls[1], 窓で(窓(0, 100, 's2')))
+    expect(screen.getByTestId('file-window-changed')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('file-window-reload'))
+    const last = calls[calls.length - 1]
+    expect(last).toMatchObject({ offset: 100, align: null })
+    await 答える(last, 窓で(窓(100, 全体, 's2')))
+    const first = screen.getByTestId('file-window-text').querySelector('span')
+    expect(first?.getAttribute('data-start')).toBe('100')
   })
 })
 
