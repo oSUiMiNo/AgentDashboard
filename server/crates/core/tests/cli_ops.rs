@@ -954,6 +954,99 @@ async fn 従来の呼び方は一文字も変わっていない() {
     assert!(raw.contains("\"truncated\""), "生の本文もそのまま返ること");
 }
 
+/// 一括で読む線（3 MiB）を超える字のファイル。**疎にしない**——NUL が混ざると窓が 415 で断られる。
+/// 多バイト字を全部の行に混ぜ、窓の境目が字の途中に来るようにする。
+fn 大きい字のファイル(path: &Path) -> Vec<u8> {
+    let mut body = String::new();
+    let mut n = 0u64;
+    while body.len() < 3 * 1024 * 1024 + 512 * 1024 {
+        body.push_str(&format!("{n:07} 窓で読む あいうえお abc\n"));
+        n += 1;
+    }
+    std::fs::write(path, &body).expect("置けること");
+    body.into_bytes()
+}
+
+#[tokio::test]
+async fn host_file_の窓読みは途中までの続きから継げて行頭へも寄せられる() {
+    // `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` テスト計画フェーズ5
+    // 「`host file --offset`」。ローカルの既定は 5 GiB なので 3.5 MiB は先頭の窓で返る
+    let dir = work_dir("host-file-range");
+    let path = dir.join("大きい.log");
+    let whole = 大きい字のファイル(&path);
+    let bytes = whole.len() as u64;
+    let path_text = path.display().to_string();
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+
+    // ① `--offset` なしは先頭の窓だけ。続きの位置は `text` のバイト数
+    let (content, _) = client::host_file(&target, "local", &path_text)
+        .await
+        .expect("取れること");
+    assert!(content.truncated, "一括で読む線を超えたら途中まで");
+    assert!(
+        content.text.len() as u64 <= protocol::fs::WINDOW_BYTES,
+        "先頭の窓だけを運ぶこと: {}",
+        content.text.len()
+    );
+    assert_eq!(content.bytes, bytes);
+    let note = agentdashboard_core::client::output::render_truncated_note(&content);
+    assert!(
+        note.contains(&format!("続きは --offset {}", content.text.len())),
+        "注記の続きの位置がバイト数: {note}"
+    );
+
+    // ② 続きを `text.len()` から頼むと、隙間なく継がる
+    let first_end = content.text.len() as u64;
+    let (next, raw) = client::host_file_range(&target, "local", &path_text, first_end, None, false)
+        .await
+        .expect("続きを読めること");
+    assert!(
+        raw.contains("\"at_line_start\""),
+        "生の答えもそのまま返ること"
+    );
+    assert_eq!(next.start, first_end, "続きの頭は頼んだ位置");
+    assert!(next.end > next.start, "中身があること");
+    let joined = format!("{}{}", content.text, next.text);
+    assert_eq!(
+        joined.as_bytes(),
+        &whole[..next.end as usize],
+        "先頭から継ぐと元と一致すること"
+    );
+
+    // ③ 末尾の手前から行頭へ寄せる
+    let (tail, _) = client::host_file_range(&target, "local", &path_text, bytes - 1000, None, true)
+        .await
+        .expect("末尾の窓を読めること");
+    assert!(tail.at_line_start, "行頭へ寄せられること");
+    assert_eq!(
+        whole[tail.start as usize - 1],
+        b'\n',
+        "改行の直後から始まること"
+    );
+    assert_eq!(tail.end, bytes, "末尾まで読めること");
+
+    // ④ 長さ1を頼んでも字の境目へ寄って壊れない（窓は正しい UTF-8・空か前へ進む）
+    let (tiny, _) = client::host_file_range(&target, "local", &path_text, 9, Some(1), false)
+        .await
+        .expect("長さ1でも断られないこと");
+    assert!(tiny.end >= tiny.start);
+    assert_eq!(
+        tiny.text.as_bytes(),
+        &whole[tiny.start as usize..tiny.end as usize],
+        "返った字が元の同じ範囲と一致すること"
+    );
+
+    // ⑤ 末尾の先は空の窓（断らない）
+    let (past, _) = client::host_file_range(&target, "local", &path_text, bytes + 10, None, false)
+        .await
+        .expect("末尾の先は空の窓で返ること");
+    assert_eq!((past.start, past.end), (bytes, bytes));
+    assert!(past.text.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn 過去の一覧は_CLI_からも枠で絞れる() {
     // **画面の口は CLI からも同じようにできること**（設計§11）。画面は枠の「＋」

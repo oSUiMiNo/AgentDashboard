@@ -423,6 +423,35 @@ pub fn render_dir(listing: &protocol::fs::DirListing) -> String {
     out
 }
 
+/// `host file --offset` で窓を読んだときに標準エラーへ出す1行
+/// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-1）。
+///
+/// **本文と混ぜない**（CLI設計§10-4）。数は生のバイト数で出す——次の `--offset` へ
+/// そのまま写せる数が要るため。続きがあるなら次の位置を具体の数で添える。
+pub fn render_range_note(chunk: &protocol::fs::FileChunk) -> String {
+    let tail = if chunk.end >= chunk.bytes {
+        "末尾まで".to_string()
+    } else {
+        format!("続きは --offset {}", chunk.end)
+    };
+    format!(
+        "（{}〜{} バイト目／全体 {} バイト。{tail}）",
+        chunk.start, chunk.end, chunk.bytes
+    )
+}
+
+/// `--offset` なしで途中までの答え（`truncated`）が来たときの注記（設計§8-1）。
+///
+/// **続きの位置は `text` の UTF-8 のバイト数そのもの。** 先頭の窓は 0 から始まるので、
+/// 字の数ではなくバイト数を出す（多バイト字で食い違う）。
+pub fn render_truncated_note(content: &protocol::fs::FileContent) -> String {
+    format!(
+        "（大きいので途中まで。全体は {} バイトあります。続きは --offset {} で読めます）",
+        content.bytes,
+        content.text.len()
+    )
+}
+
 /// `host resources` の1枚（起こし直し設計§18-4）。
 ///
 /// **番兵を数として出さない**（コードレビュー対応2）。`fits_now` が `None` なのは
@@ -1103,6 +1132,66 @@ mod tests {
         assert!(
             !text.contains("TODOを完了に変更する"),
             "一覧に名前が出ている: {text}"
+        );
+    }
+    // --- 窓で読む注記（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-1） ---
+
+    fn chunk(start: u64, end: u64, bytes: u64) -> protocol::fs::FileChunk {
+        protocol::fs::FileChunk {
+            path: "/x".to_string(),
+            start,
+            end,
+            bytes,
+            text: String::new(),
+            stamp: "s".to_string(),
+            at_line_start: false,
+        }
+    }
+
+    #[test]
+    fn 窓の注記は続きの位置を具体の数で添える() {
+        let text = render_range_note(&chunk(0, 262144, 6442450944));
+        assert_eq!(
+            text,
+            "（0〜262144 バイト目／全体 6442450944 バイト。続きは --offset 262144）"
+        );
+        assert!(
+            !text.contains("末尾まで"),
+            "途中なのに末尾と言っている: {text}"
+        );
+    }
+
+    #[test]
+    fn 窓が末尾に届いたら続きを言わない() {
+        let text = render_range_note(&chunk(6442188800, 6442450944, 6442450944));
+        assert!(text.contains("末尾まで"), "末尾と言っていない: {text}");
+        assert!(
+            !text.contains("--offset"),
+            "末尾なのに続きを言っている: {text}"
+        );
+        // 末尾の先を頼んだ空の窓も「末尾まで」
+        let empty = render_range_note(&chunk(100, 100, 100));
+        assert_eq!(empty, "（100〜100 バイト目／全体 100 バイト。末尾まで）");
+    }
+
+    #[test]
+    fn 途中までの注記の続きの位置は字の数ではなくバイト数() {
+        let content = protocol::fs::FileContent {
+            path: "/x".to_string(),
+            text: "あい".to_string(),
+            truncated: true,
+            bytes: 10_000_000,
+            stamp: "s".to_string(),
+            writable: false,
+        };
+        let text = render_truncated_note(&content);
+        assert!(
+            text.contains("続きは --offset 6 で読めます"),
+            "多バイト字のバイト数（6）を出していない: {text}"
+        );
+        assert!(
+            text.contains("10000000 バイト"),
+            "全体の大きさが無い: {text}"
         );
     }
 }

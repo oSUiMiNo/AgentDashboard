@@ -633,6 +633,16 @@ enum HostCmd {
         /// `--raw` の書き出し先。**標準出力へバイト列は流さない**
         #[arg(long)]
         out_file: Option<std::path::PathBuf>,
+        /// 窓で読む：この位置（バイト）から読む。続きは前の答えの終わりの位置から頼む。
+        /// `--raw` とは一緒に使えない（窓は字で返す口、`--raw` は丸ごとのバイト列）
+        #[arg(long, value_name = "BYTES", conflicts_with = "raw")]
+        offset: Option<u64>,
+        /// 窓の長さ（バイト）。省くとサーバの既定（256 KiB）。大きすぎる値はサーバが 1 MiB に切り詰める
+        #[arg(long, value_name = "BYTES", requires = "offset")]
+        length: Option<u64>,
+        /// 窓の頭を行頭へ寄せる（位置へ飛んで読むとき、行の途中から始めない）
+        #[arg(long, requires = "offset")]
+        line: bool,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -1556,6 +1566,9 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             path,
             raw: true,
             out_file,
+            offset: _,
+            length: _,
+            line: _,
             out: _,
         } => {
             // **`--out-file` が無ければ断る。** 標準出力へバイト列を流すと、
@@ -1582,6 +1595,30 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             path,
             raw: false,
             out_file: _,
+            offset: Some(offset),
+            length,
+            line,
+            out,
+        } => {
+            // 窓で読む（画面の窓で読む面と同じ口）。本文は標準出力、位置の注記は標準エラー
+            let (chunk, raw) =
+                client::host_file_range(target, &host, &path, offset, length, line).await?;
+            if out.json {
+                println!("{raw}");
+            } else {
+                生のまま書く(&mut std::io::stdout(), chunk.text.as_bytes())
+                    .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
+                eprintln!("{}", output::render_range_note(&chunk));
+            }
+        }
+        HostCmd::File {
+            host,
+            path,
+            raw: false,
+            out_file: _,
+            offset: None,
+            length: _,
+            line: _,
             out,
         } => {
             let (content, raw) = client::host_file(target, &host, &path).await?;
@@ -1593,10 +1630,7 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
                 生のまま書く(&mut std::io::stdout(), content.text.as_bytes())
                     .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
                 if content.truncated {
-                    eprintln!(
-                        "（大きいので途中まで。全体は {} バイトあります）",
-                        content.bytes
-                    );
+                    eprintln!("{}", output::render_truncated_note(&content));
                 }
             }
         }
@@ -1950,6 +1984,37 @@ mod tests {
         );
         // 群そのものは生きている（比較対象。これも落ちたら試験の作りが壊れている）
         assert!(Cli::try_parse_from(["agentdashboard", "host", "dir", "local"]).is_ok());
+    }
+
+    #[test]
+    fn 窓で読む引数は_raw_と一緒に使えず_offset_無しでは長さも行頭も付けられない() {
+        // `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-1。
+        // 窓は字で返す口、`--raw` は丸ごとのバイト列なので混ぜない（clap の誤り＝exit 2）
+        let parse = |args: &[&str]| {
+            let mut all = vec!["agentdashboard", "host", "file", "local", "/x"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(parse(&["--offset", "0"]).is_ok(), "窓で読む指定は通る");
+        assert!(
+            parse(&["--offset", "0", "--length", "1024", "--line"]).is_ok(),
+            "長さと行頭の寄せも付けられる"
+        );
+        let conflict = parse(&["--raw", "--out-file", "/tmp/x", "--offset", "0"])
+            .err()
+            .expect("--raw と --offset の同時指定は誤り");
+        assert_eq!(
+            conflict.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "衝突として断ること"
+        );
+        assert!(
+            parse(&["--length", "10"]).is_err(),
+            "--offset 無しの --length は誤り"
+        );
+        assert!(parse(&["--line"]).is_err(), "--offset 無しの --line は誤り");
+        // 対照：`--raw` だけなら今までどおり通る（これが落ちたら試験の作りが壊れている）
+        assert!(parse(&["--raw", "--out-file", "/tmp/x"]).is_ok());
     }
 
     #[test]

@@ -478,6 +478,33 @@ pub async fn host_file(
     http::fetch_as(target, &url).await
 }
 
+/// `GET /api/hosts/{host}/file?path=…&as=range&offset=…[&length=…][&align=line]`
+/// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-1）。
+///
+/// **画面の窓で読む面と同じ口**を叩く。長さの切り詰めと上限の判定はサーバ（と PC）の仕事で、
+/// ここでは数を運ぶだけ。続きは答えの `end` から頼めば、継ぎ目に欠けも重なりも出ない。
+pub async fn host_file_range(
+    target: &Target,
+    host: &str,
+    path: &str,
+    offset: u64,
+    length: Option<u64>,
+    line: bool,
+) -> Result<(protocol::fs::FileChunk, String), ClientError> {
+    let mut url = format!(
+        "/api/hosts/{}/file?path={}&as=range&offset={offset}",
+        http::percent_encode(host),
+        http::percent_encode(path)
+    );
+    if let Some(length) = length {
+        url.push_str(&format!("&length={length}"));
+    }
+    if line {
+        url.push_str("&align=line");
+    }
+    http::fetch_as(target, &url).await
+}
+
 /// `PUT /api/hosts/{host}/file?path=…&stamp=…`
 /// （`ファイルビュアにエディタ機能を追加` 設計§2-2）。
 ///
