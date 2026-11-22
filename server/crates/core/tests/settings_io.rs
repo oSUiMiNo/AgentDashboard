@@ -324,3 +324,160 @@ async fn 静けさは3段以外を断り記録を動かさない() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// 応答の `file_view` を取り出す。
+fn file_view(body: &str) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::from_str(body).expect("JSON であること");
+    value["file_view"].clone()
+}
+
+/// ファイル閲覧の上限の一式が返り、変えると残り、`"default"` で既定へ戻ること
+/// （イシュー「ファイル閲覧の上限を設定から変え、大きいものは流し読みする」設計§6-2・§6-3）。
+///
+/// **画面は定数の写しを持たない**ので、選択肢の16個と名前、既定、各線の値がここで
+/// 全部そろっていないと、画面が自分で補えない。
+#[tokio::test]
+async fn ファイル閲覧の上限の一式が返り_変えると残り_defaultで既定へ戻る() {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let (server, dir) = server().await;
+
+    let (status, body) = server.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    let view = file_view(&body);
+    // ローカルモード（`Open`・127.0.0.1）なので既定は 5 GiB、警告もクラウドも無い
+    assert_eq!(view["max_bytes"], 5 * GIB, "{view}");
+    assert_eq!(view["configured"], false, "{view}");
+    assert_eq!(view["default_bytes"], 5 * GIB, "{view}");
+    assert_eq!(view["via_server"], false, "{view}");
+    assert!(view["cloud"].is_null(), "{view}");
+    assert!(view["warn_from_bytes"].is_null(), "{view}");
+    assert_eq!(view["editable"], true, "{view}");
+    assert_eq!(view["whole_text_bytes"], 3_145_728, "{view}");
+    assert_eq!(view["window_bytes"], 262_144, "{view}");
+    assert_eq!(view["preview_max_bytes"], 33_554_432, "{view}");
+    assert_eq!(view["image_max_bytes"], 8_388_608, "{view}");
+
+    // 選択肢は16個。値は protocol の表と、名前は要件の16個と1つずつ一致する
+    let choices = view["choices"].as_array().expect("配列であること");
+    let bytes: Vec<u64> = choices
+        .iter()
+        .map(|choice| choice["bytes"].as_u64().expect("数であること"))
+        .collect();
+    assert_eq!(bytes, protocol::fs::FILE_VIEW_LIMIT_CHOICES.to_vec());
+    let labels: Vec<&str> = choices
+        .iter()
+        .map(|choice| choice["label"].as_str().expect("文字列であること"))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "1 MB", "3 MB", "5 MB", "10 MB", "15 MB", "20 MB", "30 MB", "50 MB", "100 MB",
+            "300 MB", "500 MB", "1 GB", "3 GB", "5 GB", "10 GB", "20 GB",
+        ]
+    );
+
+    // 変えると、答えにも次の読みにも残る
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(file_view(&body)["max_bytes"], 10 * MIB, "{body}");
+    assert_eq!(file_view(&body)["configured"], true, "{body}");
+    let (_, body) = server.get("/api/settings").await;
+    assert_eq!(
+        file_view(&body)["max_bytes"],
+        10 * MIB,
+        "残っていない: {body}"
+    );
+    assert_eq!(file_view(&body)["configured"], true, "{body}");
+
+    // "default" で起動の形の既定へ戻る
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":"default"}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(file_view(&body)["configured"], false, "{body}");
+    assert_eq!(file_view(&body)["max_bytes"], 5 * GIB, "{body}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 上限は選択肢の16個と `"default"` だけを受け、断ったら何も変えないこと（設計§6-3）。
+///
+/// **null は「触っていない」**——送っても値は変わらない（null で既定へ戻す形にしていない）。
+#[tokio::test]
+async fn ファイル閲覧の上限は選択肢とdefaultだけを受け_断ったら何も変えない() {
+    const MIB: u64 = 1024 * 1024;
+    let (server, dir) = server().await;
+
+    // 選択肢に無い数・読めない文字列は、こちらで断って理由にキーの名前を出す
+    for body in [
+        r#"{"file_view_max_bytes":2097152}"#,
+        r#"{"file_view_max_bytes":0}"#,
+        r#"{"file_view_max_bytes":"3MB"}"#,
+        r#"{"file_view_max_bytes":"Default"}"#,
+    ] {
+        let (status, answer) = server.put("/api/settings", body).await;
+        assert_eq!(status, 400, "{body} → {answer}");
+        assert!(
+            answer.contains("file_view_max_bytes"),
+            "どのキーが駄目かが分かる文であること: {body} → {answer}"
+        );
+    }
+    // 型が合わないものは本文の解釈で弾かれる（既存の `型が違う値は断られる` と同じ扱い）
+    for body in [
+        r#"{"file_view_max_bytes":-1}"#,
+        r#"{"file_view_max_bytes":true}"#,
+    ] {
+        let (status, answer) = server.put("/api/settings", body).await;
+        assert!(status == 400 || status == 422, "{body} → {status} {answer}");
+    }
+    let (_, body) = server.get("/api/settings").await;
+    assert_eq!(
+        file_view(&body)["configured"],
+        false,
+        "断ったのに書き換わっている: {body}"
+    );
+
+    // null は触っていない扱い：入れてある 10 MiB のまま
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":null}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        file_view(&body)["max_bytes"],
+        10 * MIB,
+        "null で値が動いた: {body}"
+    );
+    assert_eq!(file_view(&body)["configured"], true, "{body}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 上限を入れても書き出しに乗らないこと（設計§6-1：サーバ全体の鍵は持ち出しの対象外）。
+///
+/// 入れる前の顔ぶれは `書き出しにはアカウントの設定しか入らない` が見ている。ここは
+/// **値を入れた後でも**乗らないことを足す。
+#[tokio::test]
+async fn ファイル閲覧の上限を入れても書き出しに乗らない() {
+    let (server, dir) = server().await;
+
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, exported) = server.get("/api/settings/export").await;
+    assert_eq!(status, 200, "{exported}");
+    assert!(
+        !exported.contains("file_view"),
+        "サーバ全体の鍵が書き出しに乗っている: {exported}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

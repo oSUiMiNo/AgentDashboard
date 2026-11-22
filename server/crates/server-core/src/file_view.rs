@@ -174,6 +174,51 @@ pub async fn effective_limit(db: &DatabaseConnection, policy: &FileViewPolicy) -
     }
 }
 
+/// 設定の口が画面へ返す、上限のいまの姿（設計§6-2 の `max_bytes`・`configured`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitState {
+    /// いま効いている上限（[`effective_limit`]）
+    pub max_bytes: u64,
+    /// 選択肢の値が入っているか（`false`＝起動の形の既定のまま。選択肢に無い値が入っていても
+    /// 効いているのは既定なので `false`）
+    pub configured: bool,
+}
+
+/// 上限のいまの姿を読む。**設定の口（`crates/core`）はここを呼ぶ**——あちらは sea-orm を
+/// 通常依存に持たないので、DB の型を引数に書く関数を置けない。
+pub async fn limit_state(db: &DatabaseConnection, policy: &FileViewPolicy) -> LimitState {
+    let configured = matches!(
+        crate::db::settings::file_view_max_bytes(db).await,
+        Ok(Some(value)) if FILE_VIEW_LIMIT_CHOICES.contains(&value)
+    );
+    LimitState {
+        max_bytes: effective_limit(db, policy).await,
+        configured,
+    }
+}
+
+/// 上限を変えた前後の効いている値（ログの `from`・`to`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitChange {
+    pub before: u64,
+    pub after: u64,
+}
+
+/// 上限を保存し、前後の効いている値を返す。`None` は行を消す＝起動の形の既定へ戻す。
+///
+/// **呼ぶ前に [`crate::db::settings::check`] を通すこと。** ここは書くだけで、選択肢かどうかを
+/// 見ない。変えてよい人かも見ない（設定の口が、ほかの項目を保存する前に見る）。
+pub async fn change_limit(
+    db: &DatabaseConnection,
+    policy: &FileViewPolicy,
+    value: Option<u64>,
+) -> Result<LimitChange, sea_orm::DbErr> {
+    let before = effective_limit(db, policy).await;
+    crate::db::settings::set_file_view_max_bytes(db, value).await?;
+    let after = effective_limit(db, policy).await;
+    Ok(LimitChange { before, after })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]

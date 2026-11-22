@@ -37,6 +37,7 @@ use server_core::{
     account::SessionHostView,
     auth::{AuthContext, AuthMode, Identity},
     db,
+    file_view::{CloudSource, Deployment, FileViewPolicy},
     registry::SessionRegistry,
 };
 use session_host_core::{session::SessionManager, settings::SettingsStore};
@@ -120,6 +121,61 @@ pub struct SettingsView {
     /// サーバ側の関門が「同じ表示形なら配らない」ので**次に値が動くまで便が飛ばない**
     /// （5時間窓・7日窓なので数時間空く）。
     pub machine_rate_limits: Option<protocol::RateLimits>,
+    /// ファイル閲覧の上限の一式（イシュー「ファイル閲覧の上限を設定から変え、大きいものは
+    /// 流し読みする」設計§6-2）。
+    ///
+    /// - **画面は定数の写しを持たない。** 選択肢・既定・一括で読む線・窓の大きさ・
+    ///   プレビューの天井・画像の上限は、全部ここから受け取る。写しを持つと、Rust と
+    ///   TypeScript の2か所で値が食い違いうる
+    /// - `editable` は**保存ボタンを出すかの判定にしか使わない**。変えてよい人かを弾くのは
+    ///   サーバ（`PUT` が 403 を返す）
+    pub file_view: FileViewView,
+}
+
+/// ファイル閲覧の上限の一式（設計§6-2）。
+#[derive(Debug, Serialize)]
+pub struct FileViewView {
+    /// いま効いている上限（バイト）
+    pub max_bytes: u64,
+    /// 値を入れてあるか（`false`＝起動の形の既定のまま）
+    pub configured: bool,
+    /// 起動の形の既定（ローカル 5 GiB／サーバ 3 MiB）
+    pub default_bytes: u64,
+    /// 選べる16個（2進。名前は `protocol::fs::limit_label`）
+    pub choices: Vec<FileViewChoice>,
+    /// サーバを介す構成か（サーバモード）
+    pub via_server: bool,
+    /// クラウドの上で動いていると判定したか。判定していなければ `None`
+    pub cloud: Option<CloudView>,
+    /// 警告を出し始める値。サーバを介すかクラウドのときだけ `Some`
+    pub warn_from_bytes: Option<u64>,
+    /// この人が上限を変えてよいか（サーバ全体に効く操作の線。`versions_api`）
+    pub editable: bool,
+    /// 一括で読む線（これを超えたら生テキストで少しずつ読む。画面の説明文に使う）
+    pub whole_text_bytes: u64,
+    /// 窓の大きさ（窓で読む面が頼む長さ）
+    pub window_bytes: u64,
+    /// プレビューの天井（HTML・SVG を描いた形で見せてよい大きさ）
+    pub preview_max_bytes: u64,
+    /// 画像の上限（この設定では変わらない、と説明するため）
+    pub image_max_bytes: u64,
+}
+
+/// 上限の選択肢1つ。
+#[derive(Debug, Serialize)]
+pub struct FileViewChoice {
+    pub bytes: u64,
+    /// 画面に出す名前（例：「3 MB」）
+    pub label: String,
+}
+
+/// クラウドの判定（設計§7）。
+#[derive(Debug, Serialize)]
+pub struct CloudView {
+    /// 画面と警告に出す名前（例：「Amazon EC2」）
+    pub name: String,
+    /// 判定の出どころ：`"dmi"`（DMI の値から）／`"config"`（設定ファイルの指定から）
+    pub source: &'static str,
 }
 
 /// メモと画像の保持（メモ設計§11-1）。
@@ -181,6 +237,9 @@ pub struct SettingsState {
     /// 使用上限の保管（status設計）。**`SettingsView::machine_rate_limits` をかぶせるため
     /// だけに要る**——DB には持たないので、応答を作るたびにここから引く。
     pub registry: Arc<SessionRegistry>,
+    /// 起動の形とクラウドの判定（ファイル閲覧の上限の既定と警告を決める。設計§6-2）。
+    /// ローカルの器（`LocalServer`）が渡す。
+    pub file_view: FileViewPolicy,
 }
 
 pub fn routes(state: SettingsState) -> Router {
@@ -201,6 +260,23 @@ pub fn routes(state: SettingsState) -> Router {
 /// ローカルの CLI が居ないので、繋がっている PC が名乗ったもの（Hello）と、保存して
 /// ある表（`agents.model_table`）から組み立てる。
 pub fn server_routes(hub: Arc<server_core::gateway::SessionHostHub>) -> Router {
+    server_routes_with(hub, FileViewPolicy::default())
+}
+
+/// [`server_routes`] に、起動の形とクラウドの判定（設計§6-2）を渡す形。
+///
+/// **`server_routes(hub)` は既定（サーバ・クラウドなし＝上限の既定 3 MiB）で呼ぶだけ**に
+/// してある——試験の呼び手を動かさないため。起動の道（`lib.rs`）はこちらを使う。
+///
+/// # 決まりは `Extension` で渡す
+///
+/// サーバの手は `State<Arc<SessionHostHub>>` を受けている。状態を束ねた型に替えると、
+/// 上限を使わない持ち出しの2つの手まで型が変わる。`Extension` なら、上限を使う
+/// 2つの手（読む・変える）だけが受け取る。
+pub fn server_routes_with(
+    hub: Arc<server_core::gateway::SessionHostHub>,
+    policy: FileViewPolicy,
+) -> Router {
     Router::new()
         .route(
             "/api/settings",
@@ -208,12 +284,14 @@ pub fn server_routes(hub: Arc<server_core::gateway::SessionHostHub>) -> Router {
         )
         .route("/api/settings/export", get(api_server_export))
         .route("/api/settings/import", post(api_server_import))
+        .layer(Extension(policy))
         .with_state(hub)
 }
 
 async fn api_server_settings(
     State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
+    Extension(policy): Extension<FileViewPolicy>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
     // 名乗った中身は DB にある（`agents.capabilities`）。**接続表ではなく保存を見る**
     // のは、ブラウザが繋がったインスタンスにその PC が居ないことがあるため（設計§9-2）。
@@ -291,6 +369,12 @@ async fn api_server_settings(
             configured: false,
             editable: false,
         },
+        // サーバモードの入口は常にアカウント（`AuthContext::server`）
+        file_view: file_view_view(
+            &policy,
+            server_core::file_view::limit_state(hub.db(), &policy).await,
+            crate::versions_api::may_operate_server_wide(AuthMode::Account, &identity),
+        ),
     }))
 }
 
@@ -341,6 +425,25 @@ pub struct SettingsUpdate {
     ///
     /// **中身は `check()` が見る**（見せ方が2つのどちらか・拡張子が小文字で `.` 無し）。
     pub file_modes: Option<std::collections::BTreeMap<String, String>>,
+    /// ファイル閲覧の上限（設計§6-3）。数ならバイト数で選択肢のどれか、文字列なら
+    /// `"default"`（起動の形の既定へ戻す）だけ。
+    ///
+    /// **`null` は「触っていない」**（他の欄と同じ）。null で既定へ戻す形にしないのは、
+    /// `Option` の「送られていない」と区別できないため。【エージェントの仮置き（利用者未承認）】
+    ///
+    /// **変えられるのはサーバ全体に効く操作をしてよい人だけ**（`versions_api` の線）。
+    /// 確かめるのは、ほかの項目を1つも保存する前。
+    pub file_view_max_bytes: Option<FileViewLimitInput>,
+}
+
+/// ファイル閲覧の上限の入力（設計§6-3）。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FileViewLimitInput {
+    /// バイト数。選択肢のどれかでなければ 400
+    Bytes(u64),
+    /// `"default"`（既定へ戻す）。それ以外の綴りは 400
+    Keyword(String),
 }
 
 impl SettingsUpdate {
@@ -380,6 +483,24 @@ impl SettingsUpdate {
         if let Some(対応) = &self.file_modes {
             db::settings::check(db::settings::FILE_MODES, &serde_json::json!(対応))
                 .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+        }
+        // **上限は選択肢の16個と "default" だけ。** 数の範囲は型に出ないので、ここを
+        // 通さないと 2 MiB のような選択肢に無い値が記録へ入る（読むときは既定へ倒すが、
+        // 「設定したのに効かない」に見える）
+        match &self.file_view_max_bytes {
+            Some(FileViewLimitInput::Bytes(bytes)) => {
+                db::settings::check(db::settings::FILE_VIEW_MAX_BYTES, &serde_json::json!(bytes))
+                    .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+            }
+            Some(FileViewLimitInput::Keyword(word)) if word != "default" => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "file_view_max_bytes に文字列で渡せるのは \"default\"（既定へ戻す）だけです（\"{word}\" が入っています）"
+                    ),
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -471,6 +592,11 @@ pub async fn api_settings(
         // 届いていなければ `None` のまま——画面は「まだ分からない」と「0%」を
         // 別に描く決まりなので、捏造しない
         machine_rate_limits: state.registry.rate_limits_of(identity.account_id, None),
+        file_view: file_view_view(
+            &state.file_view,
+            server_core::file_view::limit_state(state.auth.db(), &state.file_view).await,
+            crate::versions_api::may_operate_server_wide(state.auth.mode, &identity),
+        ),
     }))
 }
 
@@ -481,6 +607,14 @@ pub async fn api_update_settings(
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
     update.check()?;
+
+    // **変えてよい人かは、ほかの項目を1つも保存する前に見る。** 後に置くと、同じ本文に
+    // 入っていた別の項目だけが保存されてから 403 になり、「断られたのに一部は変わった」が起きる
+    if update.file_view_max_bytes.is_some()
+        && !crate::versions_api::may_operate_server_wide(state.auth.mode, &identity)
+    {
+        return Err(refuse_file_view_limit(state.auth.mode));
+    }
 
     if let Some(password) = &update.lan_password {
         // **登録できるのは 127.0.0.1 からだけ**（設計§8-3）。LAN の向こうから
@@ -555,6 +689,15 @@ pub async fn api_update_settings(
         .map_err(save_failed)?;
     }
 
+    if let Some(input) = &update.file_view_max_bytes {
+        let stored = input.stored();
+        let change =
+            server_core::file_view::change_limit(state.auth.db(), &state.file_view, stored)
+                .await
+                .map_err(save_failed)?;
+        log_file_view_limit_changed(&state.file_view, &identity, stored, change);
+    }
+
     // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
     // 404 を返すと、保存されたのに失敗したように見える（統合テストは画面を立てずに
     // セッションだけを確かめることがある）
@@ -588,6 +731,11 @@ pub async fn api_update_settings(
                 .await,
             file_modes: db::settings::file_modes(state.auth.db(), identity.account_id).await,
             machine_rate_limits: state.registry.rate_limits_of(identity.account_id, None),
+            file_view: file_view_view(
+                &state.file_view,
+                server_core::file_view::limit_state(state.auth.db(), &state.file_view).await,
+                crate::versions_api::may_operate_server_wide(state.auth.mode, &identity),
+            ),
         }));
     }
     api_settings(State(state), Extension(identity)).await
@@ -603,9 +751,17 @@ pub async fn api_update_settings(
 async fn api_server_update_settings(
     State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
+    Extension(policy): Extension<FileViewPolicy>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
     update.check()?;
+
+    // ほかの項目を1つも保存する前に見る（ローカルの手と同じ理由）
+    if update.file_view_max_bytes.is_some()
+        && !crate::versions_api::may_operate_server_wide(AuthMode::Account, &identity)
+    {
+        return Err(refuse_file_view_limit(AuthMode::Account));
+    }
 
     if update.lan_password.is_some() {
         return Err((
@@ -674,7 +830,15 @@ async fn api_server_update_settings(
         .map_err(save_failed)?;
     }
 
-    api_server_settings(State(hub), Extension(identity)).await
+    if let Some(input) = &update.file_view_max_bytes {
+        let stored = input.stored();
+        let change = server_core::file_view::change_limit(hub.db(), &policy, stored)
+            .await
+            .map_err(save_failed)?;
+        log_file_view_limit_changed(&policy, &identity, stored, change);
+    }
+
+    api_server_settings(State(hub), Extension(identity), Extension(policy)).await
 }
 
 /// `POST /api/settings/import` の応答（持ち出し設計§9）。
@@ -873,6 +1037,98 @@ async fn api_server_import(
     }))
 }
 
+/// ファイル閲覧の上限の一式を組む（設計§6-2）。**`SettingsView` を組む3か所（ローカルの
+/// 読む口・持ち主の居ない変える口・サーバの読む口）は全部ここを呼ぶ**——組み立てを
+/// 散らすと、どこか1か所だけ欄が古いまま残る。
+///
+/// DB を読むのは呼び手（`server_core::file_view::limit_state`）。**`crates/core` は sea-orm を
+/// 通常依存に持たない**ので、DB の型を引数に書かずに済む形にしてある。
+fn file_view_view(
+    policy: &FileViewPolicy,
+    state: server_core::file_view::LimitState,
+    editable: bool,
+) -> FileViewView {
+    FileViewView {
+        max_bytes: state.max_bytes,
+        configured: state.configured,
+        default_bytes: policy.default_limit(),
+        choices: protocol::fs::FILE_VIEW_LIMIT_CHOICES
+            .iter()
+            .map(|&bytes| FileViewChoice {
+                bytes,
+                label: protocol::fs::limit_label(bytes),
+            })
+            .collect(),
+        via_server: policy.via_server(),
+        cloud: policy.cloud.as_ref().map(|guess| CloudView {
+            name: guess.name.clone(),
+            source: match guess.source {
+                CloudSource::Dmi => "dmi",
+                CloudSource::Config => "config",
+            },
+        }),
+        warn_from_bytes: policy.warn_from(),
+        editable,
+        whole_text_bytes: protocol::fs::WHOLE_TEXT_BYTES,
+        window_bytes: protocol::fs::WINDOW_BYTES,
+        preview_max_bytes: server_core::file_view::PREVIEW_MAX_BYTES,
+        image_max_bytes: protocol::fs::MAX_BLOB_BYTES,
+    }
+}
+
+/// 起動の形の綴り（ログの `deployment` 欄）。起動のログとここで同じ綴りを使う。
+pub(crate) fn deployment_name(policy: &FileViewPolicy) -> &'static str {
+    match policy.deployment {
+        Deployment::Local => "local",
+        Deployment::Server => "server",
+    }
+}
+
+/// 上限を変えてよくない人への断り方（設計§6-3）。**誰なら変えられるか**を書く。
+fn refuse_file_view_limit(mode: AuthMode) -> (StatusCode, String) {
+    let reason = match mode {
+        AuthMode::Account => "ファイル閲覧の上限は、サーバの管理者だけが変えられます",
+        // 判定上ここへは来ない（合言葉を通った人は変えられる）が、網羅のために書く
+        AuthMode::LanPassword => "ファイル閲覧の上限を変えるには、合言葉を通っている必要があります",
+        AuthMode::Open => {
+            "ファイル閲覧の上限は、この PC のブラウザ（127.0.0.1）からだけ変えられます"
+        }
+    };
+    (StatusCode::FORBIDDEN, reason.to_string())
+}
+
+impl FileViewLimitInput {
+    /// 保存する値。`"default"` は `None`（行を消す＝既定へ戻す）。
+    ///
+    /// **`check()` を通った後で呼ぶこと**（`"default"` 以外の綴りはそこで断っている）。
+    fn stored(&self) -> Option<u64> {
+        match self {
+            FileViewLimitInput::Bytes(bytes) => Some(*bytes),
+            FileViewLimitInput::Keyword(_) => None,
+        }
+    }
+}
+
+/// 上限が変わったことを残す（ローカルとサーバの両方の手から呼ぶ1か所）。
+///
+/// **警告の確認はサーバでは求めない**（設計§6-3）。確認は画面の窓と CLI の表示が受け持つ。
+fn log_file_view_limit_changed(
+    policy: &FileViewPolicy,
+    identity: &Identity,
+    stored: Option<u64>,
+    change: server_core::file_view::LimitChange,
+) {
+    tracing::info!(
+        kind = "file_view_limit_changed",
+        account_id = %identity.account_id,
+        from = change.before,
+        to = change.after,
+        reset = stored.is_none(),
+        deployment = deployment_name(policy),
+        "ファイル閲覧の上限を変えました"
+    );
+}
+
 /// 保存に失敗したときの返し方。
 ///
 /// **黙って失敗すると「変えたのに戻る」**という追いにくい形になるので、必ず断りを返す。
@@ -917,6 +1173,7 @@ mod tests {
             memo_max_bytes: None,
             writable_roots: None,
             file_modes: None,
+            file_view_max_bytes: None,
         }
     }
 

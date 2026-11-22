@@ -1067,3 +1067,186 @@ fn 残ったか(置き場所: &std::path::Path) -> bool {
                 .is_ok_and(|text| text.contains("ログイン画面で落ちました"))
     })
 }
+
+// --- ファイル閲覧の上限を変えてよい人 ------------------------------------------
+//
+// イシュー「ファイル閲覧の上限を設定から変え、大きいものは流し読みする」設計§6-3。
+// 上限は**サーバ全体の1つの鍵**で、転送の費用を払うのはサーバの持ち主なので、
+// 版の切り替えと同じ線（`versions_api::may_operate_server_wide`）で変えてよい人を決める。
+
+/// 応答の `file_view` を取り出す。
+fn file_view_of(body: &str) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::from_str(body).expect("JSON であること");
+    value["file_view"].clone()
+}
+
+#[tokio::test]
+async fn ローカルで上限を変えられるのは手元か合言葉を通った人だけ() {
+    // **鍵の無い構成（`Open`）では手元に限る。** LAN の向こうから来た相手は誰でも来られる
+    // ので、サーバ全体に効く上限を動かせてはいけない
+    let toml = std::env::temp_dir().join(format!(
+        "agentdashboard-limit-open-{}.toml",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let there = common::TestServer::start_with_settings_from(
+        agentdashboard_core::config::Config::default(),
+        toml.clone(),
+        lan_peer(),
+    )
+    .await;
+    let (status, body) = there.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(file_view_of(&body)["editable"], false, "{body}");
+    let (status, body) = there
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await;
+    assert_eq!(status, 403, "LAN の向こうから上限を変えられている: {body}");
+    assert!(
+        body.contains("127.0.0.1"),
+        "どこからなら変えられるかを書くこと: {body}"
+    );
+    let (_, body) = there.get("/api/settings").await;
+    assert_eq!(
+        file_view_of(&body)["configured"],
+        false,
+        "断ったのに変わった: {body}"
+    );
+    drop(there);
+    let _ = std::fs::remove_file(&toml);
+
+    // **合言葉の構成では、通っていれば変えられる。** 版の切り替えと同じ線（WSL でサーバを
+    // 動かし Windows のブラウザで見る構成は、手元を満たせない）
+    let config = opened_config();
+    let toml = std::env::temp_dir().join(format!(
+        "agentdashboard-limit-lan-{}.toml",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let here = common::TestServer::start_with_settings(config.clone(), toml.clone()).await;
+    let (status, body) = here
+        .put(
+            "/api/settings",
+            &serde_json::json!({ "lan_password": "とてもながいあいことば" }).to_string(),
+        )
+        .await;
+    assert_eq!(status, 200, "127.0.0.1 から登録できない: {body}");
+    let database_url = here.config.resolved_database_url();
+    drop(here);
+    let _ = std::fs::remove_file(&toml);
+
+    let toml = std::env::temp_dir().join(format!(
+        "agentdashboard-limit-lan-there-{}.toml",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut there = common::TestServer::start_with_settings_from(
+        agentdashboard_core::config::Config {
+            database_url: Some(database_url),
+            ..config
+        },
+        toml.clone(),
+        lan_peer(),
+    )
+    .await;
+    let (status, body) = there.login(None, "とてもながいあいことば").await;
+    assert_eq!(status, 200, "実際: {body}");
+    let (status, body) = there.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(file_view_of(&body)["editable"], true, "{body}");
+    let (status, body) = there
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await;
+    assert_eq!(status, 200, "合言葉を通ったのに断られた: {body}");
+    assert_eq!(file_view_of(&body)["max_bytes"], 10_485_760, "{body}");
+    drop(there);
+    let _ = std::fs::remove_file(&toml);
+}
+
+#[tokio::test]
+async fn セルフホストでは管理者だけが上限を変えられ_変えた値は全員に効く() {
+    let mut server = selfhost().await;
+    server.setup("あるじ", "とてもながいあいことば").await;
+
+    // サーバモード（クラウドなし）の既定は 3 MiB で、5 MiB 以上で警告する
+    let (status, body) = server.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    let view = file_view_of(&body);
+    assert_eq!(view["editable"], true, "{view}");
+    assert_eq!(view["via_server"], true, "{view}");
+    assert_eq!(view["default_bytes"], 3_145_728, "{view}");
+    assert_eq!(view["max_bytes"], 3_145_728, "{view}");
+    assert_eq!(view["warn_from_bytes"], 5_242_880, "{view}");
+
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"file_view_max_bytes":10485760}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "管理者が断られた: {body}");
+
+    server.add_member("ひとり").await;
+    let (status, body) = server.login("ひとり", "とてもながいあいことば").await;
+    assert_eq!(status, 200, "入れない: {body}");
+
+    // **サーバ全体の1つの鍵**なので、管理者が変えた値がこの人にも効いている
+    let (status, body) = server.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    let view = file_view_of(&body);
+    assert_eq!(view["editable"], false, "{view}");
+    assert_eq!(
+        view["max_bytes"], 10_485_760,
+        "管理者が変えた値が効いていない: {view}"
+    );
+    let quiet_before =
+        serde_json::from_str::<serde_json::Value>(&body).expect("JSON")["motion_quiet"]
+            .as_str()
+            .expect("静けさは文字列")
+            .to_string();
+
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"file_view_max_bytes":5242880}"#),
+        )
+        .await;
+    assert_eq!(status, 403, "管理者でない人が上限を変えられている: {body}");
+    assert!(
+        body.contains("管理者"),
+        "誰なら変えられるかを書くこと: {body}"
+    );
+
+    // **一部だけ保存されない**：同じ本文の別の項目も、断られたら1つも書かれない
+    let other = if quiet_before == "still" {
+        "calm"
+    } else {
+        "still"
+    };
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(
+                &serde_json::json!({ "motion_quiet": other, "file_view_max_bytes": 5_242_880 })
+                    .to_string(),
+            ),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains(&format!("\"motion_quiet\":\"{quiet_before}\"")),
+        "断られたのに一部が保存された: {body}"
+    );
+    assert_eq!(file_view_of(&body)["max_bytes"], 10_485_760, "{body}");
+
+    // アカウントの設定は管理者でなくても変えられる（絞りすぎていない）
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(&serde_json::json!({ "motion_quiet": other }).to_string()),
+        )
+        .await;
+    assert_eq!(status, 200, "アカウントの設定まで断られている: {body}");
+}

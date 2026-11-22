@@ -216,6 +216,7 @@ impl LocalServer {
                 manager: Arc::clone(&self.manager),
                 auth: Arc::clone(&self.auth),
                 registry: Arc::clone(&self.registry),
+                file_view: self.file_view.clone(),
             }),
             Arc::clone(&self.auth),
         );

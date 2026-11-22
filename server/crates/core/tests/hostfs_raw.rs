@@ -482,6 +482,41 @@ async fn 窓の長さは切り詰め_上限は設定で決まりブラウザの�
 }
 
 #[tokio::test]
+async fn 上限は設定の口から変えると次の読みから効く() {
+    // 設計§6-3。上の試験は DB を直に書いていた（フェーズ3 にはまだ PUT が無かった）。
+    // ここは画面と同じ道（`PUT /api/settings`）で変えて、次の読みから効くことを見る。
+    // **この器は設定の持ち主を立てない**（`start_with`）ので、持ち主の居ない変える口が
+    // 返す答えにも `file_view` が入っていることを同時に見る
+    let sandbox = Sandbox::new("limitput");
+    let text = 混ぜた本文((2 * MIB + MIB / 2) as usize);
+    let path = sandbox.file("育つ記録.log", text.as_bytes());
+    let server = common::TestServer::start_with(config_for("limitput")).await;
+    let file = format!("/api/hosts/local/file?path={}", escape(&path));
+
+    let (status, body) = server.get(&file).await;
+    assert_eq!(status, 200, "既定（ローカルの 5 GB）なら開けること：{body}");
+
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":1048576}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+    assert_eq!(
+        answer["file_view"]["max_bytes"], MIB,
+        "持ち主の居ない変える口の答えにも上限が入ること：{body}"
+    );
+    let (status, body) = server.get(&file).await;
+    assert_eq!(status, 413, "上限 1 MB なら 2.5 MB は断ること：{body}");
+
+    let (status, body) = server
+        .put("/api/settings", r#"{"file_view_max_bytes":"default"}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = server.get(&file).await;
+    assert_eq!(status, 200, "既定へ戻せば開けること：{body}");
+}
+
+#[tokio::test]
 async fn 大きいファイルのjsonは先頭の窓だけを運び書き戻せない() {
     // 設計§5-3。一括で読む線（3 MiB）を超えたら、先頭の窓だけ＋`truncated`
     let sandbox = Sandbox::new("jsonwindow");
