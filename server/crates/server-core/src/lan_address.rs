@@ -141,7 +141,8 @@ pub fn probe() -> Probe {
 ///
 /// 規則4が**番号の見た目ではなく網の計算**で判定するための道具である。
 /// 「`172.` で始まるものを除く」式にすると、この機械では素通りする（設計§4-4）。
-fn in_net(addr: Ipv4Addr, net: Ipv4Addr, prefix: u8) -> bool {
+/// `core::open_api` の親PC の判定も使う（網の計算を2箇所に持たない）。
+pub fn in_net(addr: Ipv4Addr, net: Ipv4Addr, prefix: u8) -> bool {
     if prefix == 0 {
         return true;
     }
