@@ -24,6 +24,7 @@ pub mod compact_api;
 pub mod config;
 pub mod gate;
 pub mod local;
+pub mod open_api;
 pub mod settings_api;
 pub mod versions_api;
 
@@ -92,6 +93,9 @@ pub struct LocalServer {
     /// 流し読みする` 設計§5-2）。**ローカルの器なので既定はローカル（5 GiB）**。
     /// クラウドの判定は起動の道が [`Self::with_file_view`] で差し込む
     file_view: server_core::file_view::FileViewPolicy,
+    /// エクスプローラ・VSCode で開く口（`サイドバーにエクスプローラで開くボタンが欲しい`
+    /// 設計§4）。**既定は無い**——テストの `LocalServer` に本物の道具を起こす口を生やさない
+    open_in: Option<open_api::OpenApiState>,
 }
 
 /// 版の口が要る、`state_dir` 以外の材料。
@@ -124,12 +128,19 @@ impl LocalServer {
             compact: None,
             client_logs: None,
             file_view: server_core::file_view::FileViewPolicy::local(None),
+            open_in: None,
         }
     }
 
     /// 縮小の口を繋いだ状態にする（縮小設計§9）。
     pub fn with_compact(mut self, compact: session_host_core::compact::CompactConfig) -> Self {
         self.compact = Some(compact);
+        self
+    }
+
+    /// エクスプローラ・VSCode で開く口を繋いだ状態にする（設計§5）。
+    pub fn with_open_in(mut self, state: open_api::OpenApiState) -> Self {
+        self.open_in = Some(state);
         self
     }
 
@@ -269,6 +280,14 @@ impl LocalServer {
                 ));
             }
         }
+        // エクスプローラ・VSCode で開く口（設計§5）。**`state_dir` に縛らない**——帳面は
+        // メモリだけに持ち、置き場所を使わない
+        if let Some(state) = &self.open_in {
+            router = router.merge(server_core::guard(
+                open_api::routes(state.clone()),
+                Arc::clone(&self.auth),
+            ));
+        }
         server_core::auth::with_sessions(router, &self.auth)
     }
 }
@@ -390,7 +409,10 @@ pub async fn serve_server(
                     launcher: Arc::new(session_host_core::compact::RealLauncher),
                     // **PTY を持たないので道連れにするものが無い**（版の口と同じ）
                     registry: None,
-                })),
+                }))
+                // エクスプローラ・VSCode で開く口も**サーバモードに生やして必ず 501**
+                // （設計§5）。縮小と同じく、断る道を両モードに置く
+                .merge(open_api::routes(open_api::OpenApiState::server_mode())),
             Arc::clone(&auth),
         ));
     let router = server_core::auth::with_sessions(router, &auth);
@@ -633,6 +655,9 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
         // 縮小の口（縮小設計§9）。**ローカルモードが本番**——縮めるのはこの機械の
         // 仮想ディスクなので、PTY を持っている側だけが道連れを数えられる
         .with_compact(config.compact())
+        // エクスプローラ・VSCode で開く口（設計§5）。本物の起こし口を選ぶのはここだけ
+        // （`AGENTDASHBOARD_OPEN_IN` で塞げる）
+        .with_open_in(open_api::OpenApiState::from_env())
         .with_versions(VersionsWiring {
             config_arg,
             // 記録への口は**型を書かずに関数で受け取る**（設計§23-9 と同じ形）
