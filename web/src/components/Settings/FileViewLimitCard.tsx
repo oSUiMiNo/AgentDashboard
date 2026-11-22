@@ -27,10 +27,17 @@ import {
 
 /** 警告の窓を出している間の中身 */
 interface 候補 {
+  /** 表示と警告の判定に使う数 */
   value: number
   label: string
   段: FileViewWarning[]
   何段目: number
+  /**
+   * 押し切ったときに送るもの。「既定に戻す」は数ではなく `'default'` を送る（行を消す）——
+   * 数を送ると「既定のまま」が「既定と同じ値を入れた」に変わり、起動の形を変えたときに
+   * 既定が追随しなくなる（コードレビュー対応 2026-11-23 対応3）
+   */
+  送る: number | 'default'
 }
 
 /** 判定の出どころを、初めて読む人にも分かる言葉で */
@@ -108,10 +115,30 @@ export function FileViewLimitCard() {
             if (段.length === 0) {
               void 保存する(value)
             } else {
-              set候補({ value, label, 段, 何段目: 0 })
+              set候補({ value, label, 段, 何段目: 0, 送る: value })
             }
           }}
-          戻す={() => void 保存する('default')}
+          戻す={() => {
+            // 戻すと上がるときも、選ぶ欄と同じ規則で確かめる（コードレビュー対応 2026-11-23 対応3）
+            const 段 = warningsFor(
+              fileView.default_bytes,
+              fileView.max_bytes,
+              fileView.warn_from_bytes,
+              fileView.via_server,
+              fileView.cloud !== null,
+            )
+            if (段.length === 0) {
+              void 保存する('default')
+            } else {
+              set候補({
+                value: fileView.default_bytes,
+                label: formatLimit(fileView.default_bytes),
+                段,
+                何段目: 0,
+                送る: 'default',
+              })
+            }
+          }}
         />
       )}
       {候補 !== null && (
@@ -125,7 +152,7 @@ export function FileViewLimitCard() {
               return
             }
             set候補(null)
-            void 保存する(候補.value)
+            void 保存する(候補.送る)
           }}
         />
       )}
@@ -214,7 +241,7 @@ function 本体({
           size="sm"
           data-testid="file-view-limit-reset"
           className="w-fit"
-          disabled={保存中 !== null}
+          disabled={保存中 !== null || 候補 !== null}
           onClick={戻す}
         >
           既定（{formatLimit(default_bytes)}）に戻す

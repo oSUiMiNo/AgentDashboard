@@ -232,6 +232,55 @@ describe('警告の段の数', () => {
   })
 })
 
+describe('既定に戻す（コードレビュー対応 2026-11-23 対応3）', () => {
+  const 戻すと上がる: Partial<FileViewSettings> = {
+    cloud: クラウド,
+    warn_from_bytes: 5 * MIB,
+    default_bytes: 5 * GIB,
+    max_bytes: 3 * MIB,
+    configured: true,
+    editable: true,
+  }
+
+  it('既定に戻すと上がるときは確認の窓を出し、押し切ると default を送る', async () => {
+    置く(戻すと上がる)
+    描く()
+    await userEvent.click(screen.getByTestId('file-view-limit-reset'))
+    const 窓 = screen.getByTestId('file-view-limit-confirm')
+    expect(窓.dataset.step).toBe('cloud')
+    expect(update).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByTestId('file-view-limit-confirm-go'))
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith({ file_view_max_bytes: 'default' })
+  })
+
+  it('確認の窓でやめると何も送らない', async () => {
+    置く(戻すと上がる)
+    描く()
+    await userEvent.click(screen.getByTestId('file-view-limit-reset'))
+    await userEvent.click(screen.getByTestId('file-view-limit-confirm-cancel'))
+    expect(screen.queryByTestId('file-view-limit-confirm')).toBeNull()
+    expect(update).not.toHaveBeenCalled()
+    expect(選ぶ欄().value).toBe(String(3 * MIB))
+  })
+
+  it('既定に戻すと下がるときは窓を出さずに送る', async () => {
+    置く({ ...戻すと上がる, max_bytes: 10 * GIB })
+    描く()
+    await userEvent.click(screen.getByTestId('file-view-limit-reset'))
+    expect(screen.queryByTestId('file-view-limit-confirm')).toBeNull()
+    expect(update).toHaveBeenCalledWith({ file_view_max_bytes: 'default' })
+  })
+
+  it('警告の値が無ければ窓を出さずに送る', async () => {
+    置く({ ...戻すと上がる, cloud: null, warn_from_bytes: null })
+    描く()
+    await userEvent.click(screen.getByTestId('file-view-limit-reset'))
+    expect(screen.queryByTestId('file-view-limit-confirm')).toBeNull()
+    expect(update).toHaveBeenCalledWith({ file_view_max_bytes: 'default' })
+  })
+})
+
 describe('管理者でない人は選べない', () => {
   it('サーバでは「管理者だけ」、ローカルでは「127.0.0.1 から」と言い、選ぶ欄を閉じる', () => {
     置く({ ...サーバ, editable: false })
