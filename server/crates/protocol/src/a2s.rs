@@ -101,6 +101,11 @@ pub enum KillOutcome {
 pub enum HostReply {
     Dir(crate::fs::DirListing),
     File(crate::fs::FileContent),
+    /// 窓1つ（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-4）。
+    ///
+    /// **`Log`・`Blob` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの
+    /// 解決・連絡係の封筒の5箇所が二重になる。
+    FileRange(crate::fs::FileChunk),
     /// 引いてきたログ（ログ設計§13-1）。
     ///
     /// **別の答えの型を作らずここへ足した。** 分けると待ち口（`pending`）・答えの
@@ -336,6 +341,17 @@ pub enum AgentMessage {
         /// のではなく出さない——押せて何も起きないものは、壊れているのと見分けが付かない。
         #[serde(default)]
         supports_file_write: bool,
+        /// **ファイルを位置を指定して窓で読める**か（`ファイル閲覧の上限を設定から変え、
+        /// 大きいものは流し読みする` 設計§2-4）。
+        ///
+        /// 上の9つとまったく同じ形。**`supports_host_fs` に相乗りさせない**——古い PC でも
+        /// 3 MiB までのテキストは読めるので、まとめると「テキストも読めません」と嘘をつく。
+        ///
+        /// [`ServerToAgent::ReadFileRange`] は答えを返す種別だが、**名乗らない PC は接続を
+        /// 保ったまま無視する**ので、投げると永遠に答えが返らない。名乗らない PC には、
+        /// サーバが一括で読む線より大きい上限を渡さない（設計§4-3）。
+        #[serde(default)]
+        supports_file_range: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -738,6 +754,36 @@ pub enum ServerToAgent {
     ReadFile {
         request_id: RequestId,
         path: String,
+        /// 設定の上限（バイト）。**サーバが DB から読んで要求ごとに運ぶ**——読む側（PC）が
+        /// これで守る（ブラウザの言い値は使わない。`ファイル閲覧の上限を設定から変え、
+        /// 大きいものは流し読みする` 設計§2-4・§4）。
+        ///
+        /// **欄の無い古いサーバから受けたら `None`**＝PC は `fs::WHOLE_TEXT_BYTES` で守る
+        /// （いまと同じ振る舞い）。古い PC はこの欄を知らずに無視し、自分の 3 MiB で守る
+        /// ——どちらに倒れても安全側である。
+        #[serde(default)]
+        max_bytes: Option<u64>,
+    },
+    /// ファイルの**位置を指定して窓1つ**を読んでほしい（`ファイル閲覧の上限を設定から変え、
+    /// 大きいものは流し読みする` 設計§2-4・§3-2）。答えは [`HostReply::FileRange`]。
+    ///
+    /// **[`Self::ReadFile`] と別の種別にしてある。** あちらは「全文（一括で読む線を超えたら
+    /// 先頭の窓）」を返す口で、こちらは続きを位置で頼む口——欄の意味が違う。
+    ///
+    /// 投げる前に**名乗り**（`supports_file_range`）を見ること。名乗らない PC は接続を
+    /// 保ったまま無視するので、投げると永遠に答えが返らない。
+    ReadFileRange {
+        request_id: RequestId,
+        path: String,
+        /// 読み始める位置（バイト）。文字の途中なら PC が次の字の頭へ寄せる
+        offset: u64,
+        /// 読む長さ（バイト）。PC が `fs::RANGE_MAX_BYTES` で切り詰める
+        length: u64,
+        /// 最初の改行の直後へ寄せるか（位置へ飛ぶとき、行頭から見せるため）
+        align_line: bool,
+        /// 設定の上限。意味は [`Self::ReadFile`] の同じ欄と同じ（`None` なら `WHOLE_TEXT_BYTES`）
+        #[serde(default)]
+        max_bytes: Option<u64>,
     },
     /// ファイルを**書き戻してほしい**（`ファイルビュアにエディタ機能を追加` 設計§2）。
     ///
@@ -956,6 +1002,7 @@ mod tests {
                 supports_attachment_sweep: true,
                 supports_recall: true,
                 supports_file_write: true,
+                supports_file_range: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -1169,9 +1216,26 @@ mod tests {
                 request_id: RequestId::new(),
                 path: None,
             },
+            // 上限つき（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-4）。
+            // **欄のある形と無い形（`None`）の両方が往復すること**を固定する
             ServerToAgent::ReadFile {
                 request_id: RequestId::new(),
                 path: "/home/example/dev/app/計画.md".to_string(),
+                max_bytes: Some(crate::fs::WHOLE_TEXT_BYTES),
+            },
+            ServerToAgent::ReadFile {
+                request_id: RequestId::new(),
+                path: "/home/example/dev/app/計画.md".to_string(),
+                max_bytes: None,
+            },
+            // 窓読み（同 設計§2-4）。**足したら必ずここへ足す**
+            ServerToAgent::ReadFileRange {
+                request_id: RequestId::new(),
+                path: "/home/example/dev/app/大きい.log".to_string(),
+                offset: 262_144,
+                length: 1_048_576,
+                align_line: true,
+                max_bytes: Some(5 * 1024 * 1024 * 1024),
             },
             ServerToAgent::ReadBlob {
                 request_id: RequestId::new(),
@@ -1235,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn 答えの8種と理由の7値がすべて往復する() {
+    fn 答えの9種と理由の7値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
         // 「まとめて駄目でした」に潰れるのを防ぐため、**7値を数え上げて**固定する
         let reasons = [
@@ -1257,6 +1321,17 @@ mod tests {
                 stamp: "24-1700000000000000000".to_string(),
                 // PC は決めない（サーバが上書きする）。設計§8
                 writable: false,
+            }),
+            // 窓1つ（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-4）。
+            // 多バイト字・引用符・バックスラッシュを混ぜる。**足したら必ずここへ足す**
+            HostReply::FileRange(crate::fs::FileChunk {
+                path: "/home/example/dev/app/大きい.log".to_string(),
+                start: 262_144,
+                end: 524_288,
+                bytes: 6_442_450_944,
+                text: "あ\"\\\n行\t".to_string(),
+                stamp: "6442450944-1700000000000000000".to_string(),
+                at_line_start: true,
             }),
             // 書き戻した答え（`ファイルビュアにエディタ機能を追加` 設計§2）。
             // **足したら必ずここへ足す**
@@ -1307,7 +1382,9 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 7 + reasons.len());
+        // 窓1つ（`FileRange`）を足して8つ（`ファイル閲覧の上限を設定から変え、大きいものは
+        // 流し読みする` 設計§2-4）
+        assert_eq!(all.len(), 8 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }
@@ -1514,6 +1591,7 @@ mod tests {
             supports_resources,
             supports_revive,
             supports_recall,
+            supports_file_range,
             agent_version,
             ..
         } = parsed
@@ -1532,7 +1610,39 @@ mod tests {
         // 呼び戻しの能力も同じ（名前付け設計§7-3）。名乗らないホストへ投げると、
         // 過去のセッションを起こしたつもりで**何も起きない**
         assert!(!supports_recall);
+        // 窓読みの能力も同じ。名乗らないホストへ投げると永遠に答えが返らない
+        // （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-4）
+        assert!(!supports_file_range);
         assert_eq!(agent_version, "0.1.5");
+    }
+
+    #[test]
+    fn 上限の欄を持たない古い読む命令も解ける() {
+        // 欄の無い古いサーバから届く `read_file` が、`max_bytes: None`（＝PC は
+        // `WHOLE_TEXT_BYTES` で守る）として解けること（`ファイル閲覧の上限を設定から変え、
+        // 大きいものは流し読みする` 設計§2-4）。**`#[serde(default)]` を外すと、古いサーバ
+        // からの読む命令が全部解けなくなる**
+        let new = ServerToAgent::ReadFile {
+            request_id: RequestId::new(),
+            path: "/a/b.md".to_string(),
+            max_bytes: Some(1),
+        };
+        let mut value = serde_json::to_value(&new).expect("直列化できること");
+        let removed = value
+            .as_object_mut()
+            .expect("オブジェクトであること")
+            .remove("max_bytes");
+        assert!(removed.is_some(), "直列化した形に max_bytes の鍵があること");
+        let parsed: ServerToAgent =
+            serde_json::from_value(value).expect("欄の無い古い読む命令が解けること");
+        let ServerToAgent::ReadFile {
+            path, max_bytes, ..
+        } = parsed
+        else {
+            panic!("ReadFile として解けること");
+        };
+        assert_eq!(path, "/a/b.md");
+        assert_eq!(max_bytes, None);
     }
 
     #[test]

@@ -476,6 +476,15 @@ pub struct Capabilities {
     /// 出さない**——押して断られるのではなく出さない。
     #[serde(default)]
     pub supports_file_write: bool,
+    /// 位置を指定して**窓で読める**か（`ファイル閲覧の上限を設定から変え、大きいものは
+    /// 流し読みする` 設計§4-3）。上の9つとまったく同じ形で、**名乗りの無い古い記録は偽**
+    /// として読む。
+    ///
+    /// **投げる前にここを見る。** 名乗らない PC は接続を保ったまま無視するので、
+    /// 投げると永遠に答えが返らない。名乗らない PC には、一括で読む線より大きい上限を
+    /// 渡さない（同 設計§4-3）。
+    #[serde(default)]
+    pub supports_file_range: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1509,6 +1518,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
     match reply {
         HostReply::Dir(_) => "dir",
         HostReply::File(_) => "file",
+        HostReply::FileRange(_) => "file_range",
         HostReply::Log(_) => "log",
         HostReply::Blob(_) => "blob",
         HostReply::Written(_) => "written",
@@ -2015,7 +2025,11 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         let path = path.to_string();
         match self
             .ask(request, Need::HostFs, move |request_id| {
-                ServerToAgent::ReadFile { request_id, path }
+                ServerToAgent::ReadFile {
+                    request_id,
+                    path,
+                    max_bytes: None,
+                }
             })
             .await?
         {
@@ -2500,6 +2514,7 @@ async fn agent_loop(
         supports_recall,
         supports_attachment_sweep,
         supports_file_write,
+        supports_file_range,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -2540,6 +2555,7 @@ async fn agent_loop(
         supports_recall,
         supports_attachment_sweep,
         supports_file_write,
+        supports_file_range,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

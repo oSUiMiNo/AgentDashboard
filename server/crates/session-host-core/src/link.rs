@@ -1056,6 +1056,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // **この実行ファイルは `hostfs::write_file` を持っている**ので常に真。
         // 名乗らない PC には、サーバが**そもそも編集を出さない**
         supports_file_write: true,
+        // 窓で読める版であることを名乗る（`ファイル閲覧の上限を設定から変え、大きいものは
+        // 流し読みする` 設計§3-2）。上8つと同じで、**この実行ファイルは
+        // `hostfs::read_file_range` を持っている**ので常に真
+        supports_file_range: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1235,7 +1239,16 @@ fn handle_incoming(
 enum Ask {
     /// 一覧。`None` はその PC のホーム（設計§26-2）
     Dir(Option<String>),
-    File(String),
+    /// 上限つきで読む。2つめは**設定の上限**（サーバが運んできた値。欄が無ければ
+    /// `fs::WHOLE_TEXT_BYTES`）。`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§3-2
+    File(String, u64),
+    /// 位置を指定して窓1つを読む（同 設計§3-2）。**`File` と別にしてある**——答えの型
+    /// （`FileChunk`）が違う
+    FileRange {
+        path: String,
+        range: protocol::fs::FileRange,
+        limit: u64,
+    },
     /// テキストを書き戻す（`ファイルビュアにエディタ機能を追加` 設計§2）。
     /// **`File` と別にしてある**——向きが逆で、**許可された根と印を一緒に運ぶ**
     WriteFile {
@@ -1318,10 +1331,17 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                 Ok(listing) => HostReply::Dir(listing),
                 Err(err) => failed(err),
             },
-            Ask::File(path) => match crate::hostfs::read_file_from(&path) {
+            Ask::File(path, limit) => match crate::hostfs::read_file_from_within(&path, limit) {
                 Ok(content) => HostReply::File(content),
                 Err(err) => failed(err),
             },
+            // 窓ごとに回るので**ログは出さない**（断りはサーバが出す。設計§3-2・§11）
+            Ask::FileRange { path, range, limit } => {
+                match crate::hostfs::read_file_range_from(&path, range, limit) {
+                    Ok(chunk) => HostReply::FileRange(chunk),
+                    Err(err) => failed(err),
+                }
+            }
             Ask::Blob(path) => match crate::hostfs::read_blob(Path::new(&path)) {
                 Ok(blob) => HostReply::Blob(blob),
                 Err(err) => failed(err),
@@ -1699,8 +1719,36 @@ fn apply_command(
             // どちらも解決できるのはこちら側だけ——**解決そのものは逃がした先で行う**
             answer_ask(outgoing.clone(), request_id, Ask::Dir(path));
         }
-        ServerToAgent::ReadFile { request_id, path } => {
-            answer_ask(outgoing.clone(), request_id, Ask::File(path));
+        ServerToAgent::ReadFile {
+            request_id,
+            path,
+            max_bytes,
+        } => {
+            // 欄の無い古いサーバからは `None`＝いまと同じ 3 MiB で守る
+            // （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-4）
+            let limit = max_bytes.unwrap_or(protocol::fs::WHOLE_TEXT_BYTES);
+            answer_ask(outgoing.clone(), request_id, Ask::File(path, limit));
+        }
+        // 窓読み（同 設計§3-2）。**ここで直接読まない**——上の ListDir のコメントと同じ理由
+        ServerToAgent::ReadFileRange {
+            request_id,
+            path,
+            offset,
+            length,
+            align_line,
+            max_bytes,
+        } => {
+            let range = protocol::fs::FileRange {
+                offset,
+                length,
+                align_line,
+            };
+            let limit = max_bytes.unwrap_or(protocol::fs::WHOLE_TEXT_BYTES);
+            answer_ask(
+                outgoing.clone(),
+                request_id,
+                Ask::FileRange { path, range, limit },
+            );
         }
         ServerToAgent::ReadBlob { request_id, path } => {
             answer_ask(outgoing.clone(), request_id, Ask::Blob(path));
