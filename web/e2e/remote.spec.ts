@@ -531,3 +531,72 @@ test('枝分かれは、リモート経路でも通って札が届く', async ({
   await expect(並び.nth(1).getByTestId('branch-badge')).toBeVisible()
   await expect(並び.nth(0).getByTestId('branch-badge')).toHaveCount(0)
 })
+
+test('サーバモードでは既定が 3 MB で、5 MB 以上に上げると警告が1段出る', async ({
+  page,
+}) => {
+  // ファイル閲覧の上限（ファイル閲覧の上限を設定から変え、大きいものは流し読みする
+  // テスト計画フェーズ6「E2E（サーバモード）」）
+  const MIB = 1024 * 1024
+  await openDashboard(page)
+
+  // **このアカウントは `scripts/e2e-remote` が `POST /api/setup` で作る最初の管理者。**
+  // 管理者でなければ選べない側（`file-view-limit-readonly`）を見ることになるので、前提を
+  // 先に固定する。管理者でない人の振る舞いは画面の単体試験と `core/tests/auth.rs` が見る
+  const me = (await (await page.request.get('/api/me')).json()) as {
+    is_admin?: boolean
+  }
+  expect(me.is_admin, 'E2E のアカウントが管理者であること').toBe(true)
+
+  await page.getByTestId('settings-link').click()
+  const select = page.getByTestId('file-view-limit-select')
+  await expect(select).toHaveValue(String(3 * MIB))
+  await expect(select.locator('option', { hasText: '・既定' })).toHaveText(
+    '3 MB（3,145,728 バイト）・既定',
+  )
+  await expect(page.getByTestId('file-view-limit-via-server')).toContainText(
+    '既定は 3 MB です',
+  )
+
+  let 保存した回数 = 0
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/settings') && request.method() === 'PUT') {
+      保存した回数 += 1
+    }
+  })
+
+  try {
+    await select.selectOption(String(10 * MIB))
+    const 窓 = page.getByTestId('file-view-limit-confirm')
+    await expect(窓).toBeVisible()
+    await expect(窓).toHaveAttribute('data-step', 'server')
+    // 1段だけ（`remote-server.toml` の `metered_cloud = "no"`）
+    await expect(page.getByTestId('file-view-limit-confirm-go')).toHaveText('変える')
+
+    await page.getByTestId('file-view-limit-confirm-cancel').click()
+    await expect(窓).toHaveCount(0)
+    await expect(select).toHaveValue(String(3 * MIB))
+    expect(保存した回数, 'やめたら保存しないこと').toBe(0)
+
+    await select.selectOption(String(10 * MIB))
+    const 保存 = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/settings') &&
+        response.request().method() === 'PUT',
+    )
+    await page.getByTestId('file-view-limit-confirm-go').click()
+    expect((await 保存).status()).toBe(200)
+    await expect(select).toHaveValue(String(10 * MIB))
+
+    await page.reload()
+    await expect(page.getByTestId('file-view-limit-select')).toHaveValue(
+      String(10 * MIB),
+    )
+  } finally {
+    // **設定は次のテストへ残る**（E2E は1つのサーバを共有している）。断言が落ちても戻す
+    const 戻した = await page.request.put('/api/settings', {
+      data: { file_view_max_bytes: 'default' },
+    })
+    expect(戻した.ok()).toBe(true)
+  }
+})

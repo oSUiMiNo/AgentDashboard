@@ -9,3 +9,7 @@ port = 4174
 # 記録の置き場所。`scripts/e2e-remote` が起動のたびに消す
 state_dir = "web/.e2e-state/remote/server"
 database_url = "sqlite://web/.e2e-state/remote/server/dashboard.db"
+
+# ファイル閲覧の上限の警告の段数を、走らせる機械に左右させない（`config.toml` と同じ理由）。
+# サーバモードの段（1段）だけを見る。クラウドの段は画面の単体試験と Rust の試験で見る
+metered_cloud = "no"
