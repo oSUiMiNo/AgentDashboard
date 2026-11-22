@@ -677,6 +677,8 @@ tail --pid="$P" -f /dev/null
 | `session/pty.rs` の `read_loop`（PTY の読み取り） | 起動・EOF・停止・一時停止の遷移だけ |
 | `session/mod.rs` の `coalesce_loop`（出力の合流） | 何も出さない |
 | `server-core/src/gateway.rs` の `deliver_screen`（画面の配信） | 購読の開始と終了だけ |
+| `server-core/src/hosts.rs` の `stream_text`（大きいファイルを窓ごとに読んで流して返す） | 始まりは出さない。打ち切ったときだけ `file_stream_aborted`（WARN） |
+| `session-host-core/src/hostfs.rs` の `read_file_range`（窓1つを読む） | 何も出さない（断りはサーバの `api_file` が `file_refused` で出す） |
 | `transcript-parser/src/cli.rs` の `emit`（ノードごとの書き出し） | 書けなかったときだけ |
 | `logging.rs` のファイル層（ログを書くこと自体） | 何も出さない（捨てた件数だけ数える） |
 
