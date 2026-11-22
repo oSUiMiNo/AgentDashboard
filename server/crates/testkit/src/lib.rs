@@ -245,7 +245,15 @@ pub struct RawResponse {
     pub status: u16,
     /// 状態行を含むヘッダ部分をそのまま。**小文字化しない**（照合する側が決める）
     pub headers: String,
+    /// 本文。チャンク転送で返った応答は**解いたあと**の中身（チャンクの見出しを含まない）
     pub body: Vec<u8>,
+    /// 本文が送り手の決めた終わりまで届いたか。
+    ///
+    /// チャンク転送なら長さ0の終わりの塊を受け取った、`Content-Length` なら長さが一致した、
+    /// どちらも無ければ（接続を閉じて終わる形）`true`。流して返す口（`ファイル閲覧の上限を
+    /// 設定から変え、大きいものは流し読みする` 設計§5-4）は、途中で打ち切ると終わりの塊を
+    /// 送らずに接続を閉じる——**成功の顔をした途中までの本文**を見分けるのがこの欄である。
+    pub complete: bool,
 }
 
 impl RawResponse {
@@ -284,15 +292,38 @@ pub fn request_raw(
     stream.flush()?;
 
     let mut response: Vec<u8> = Vec::new();
-    stream.read_to_end(&mut response)?;
+    if let Err(err) = stream.read_to_end(&mut response) {
+        // 流して返す口が途中で打ち切ると、送り手は終わりの塊を送らずに接続を閉じる。
+        // そのとき読み手には `ConnectionReset` 等で届くことがある。**それまでに受け取った
+        // バイトがあれば**そこで読み終えたことにする（途中で切れたかは `complete` が言う）
+        let cut = matches!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+        );
+        if !(cut && !response.is_empty()) {
+            return Err(err.into());
+        }
+    }
+    parse_raw_response(&response)
+}
 
-    // ヘッダと本文の境目は空行。チャンク転送は使われない想定（Content-Length 応答のみ）
+/// 受け取ったバイト列を、状態・ヘッダ・本文に分ける。
+///
+/// **チャンク転送を解く**。流して返す口（`ファイル閲覧の上限を設定から変え、大きいものは
+/// 流し読みする` 設計§5-4）は `Content-Length` を持たず、チャンク転送で返るためである。
+/// 解かずに返すと、本文にチャンクの見出し（16進の長さ＋CRLF）が混ざり、本文の一致を見る
+/// 検査が1つも書けない。自分でソケットを開いて途中で止まる試験も、読み終えたバイト列を
+/// ここへ通す。
+pub fn parse_raw_response(response: &[u8]) -> anyhow::Result<RawResponse> {
+    // ヘッダと本文の境目は空行
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| anyhow::anyhow!("ヘッダの終わりが見つかりません"))?;
     let headers = String::from_utf8_lossy(&response[..split]).into_owned();
-    let body = response[split + 4..].to_vec();
+    let rest = &response[split + 4..];
 
     let status = headers
         .split_whitespace()
@@ -300,11 +331,62 @@ pub fn request_raw(
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| anyhow::anyhow!("HTTPステータス行を読めません: {headers:?}"))?;
 
-    Ok(RawResponse {
+    let mut raw = RawResponse {
         status,
         headers,
-        body,
-    })
+        body: Vec::new(),
+        complete: true,
+    };
+    let chunked = raw
+        .header("transfer-encoding")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"));
+    if chunked {
+        let (body, complete) = dechunk(rest);
+        raw.body = body;
+        raw.complete = complete;
+    } else {
+        raw.body = rest.to_vec();
+        if let Some(length) = raw
+            .header("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            raw.complete = raw.body.len() == length;
+        }
+    }
+    Ok(raw)
+}
+
+/// チャンク転送の本文を解く。返すのは（中身, 終わりの塊まで届いたか）。
+///
+/// 途中で尽きたら、そこまでの中身と `false` を返す（途中で切れた応答を読むため）。
+/// チャンク拡張（`5;name=value`）は読み飛ばす。
+fn dechunk(mut rest: &[u8]) -> (Vec<u8>, bool) {
+    let mut body = Vec::new();
+    loop {
+        let Some(line_end) = rest.windows(2).position(|window| window == b"\r\n") else {
+            return (body, false);
+        };
+        let line = String::from_utf8_lossy(&rest[..line_end]);
+        let size_text = line.split(';').next().unwrap_or("").trim();
+        let Ok(size) = usize::from_str_radix(size_text, 16) else {
+            return (body, false);
+        };
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return (body, true);
+        }
+        if rest.len() < size {
+            body.extend_from_slice(rest);
+            return (body, false);
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest = &rest[size..];
+        // 中身の後ろの CRLF
+        if rest.len() < 2 {
+            return (body, false);
+        }
+        rest = &rest[2..];
+    }
 }
 
 /// 1往復ぶんを組み立てて送る。**Cookie を運べる**のがこれまでとの違い。
@@ -340,6 +422,7 @@ pub fn request_with(
         status,
         headers,
         body,
+        ..
     } = raw;
     let body = String::from_utf8_lossy(&body).into_owned();
 
@@ -357,4 +440,66 @@ pub fn request_with(
         body,
         cookie,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_lengthの応答はいまどおり解ける() {
+        let raw = parse_raw_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello",
+        )
+        .unwrap();
+        assert_eq!(raw.status, 200);
+        assert_eq!(raw.body, b"hello");
+        assert!(raw.complete);
+        assert_eq!(raw.header("content-type").as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn content_lengthより短ければ途中で切れたと言う() {
+        let raw =
+            parse_raw_response(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello").unwrap();
+        assert_eq!(raw.body, b"hello");
+        assert!(!raw.complete);
+    }
+
+    #[test]
+    fn チャンク転送を解くと中身が継がる() {
+        let raw = parse_raw_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(raw.body, b"hello, world");
+        assert!(raw.complete);
+    }
+
+    #[test]
+    fn 終わりの塊が無ければ途中までの中身で切れたと言う() {
+        let raw = parse_raw_response(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, wo",
+        )
+        .unwrap();
+        assert_eq!(raw.body, b"hello, wo");
+        assert!(!raw.complete);
+
+        let raw = parse_raw_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+        )
+        .unwrap();
+        assert_eq!(raw.body, b"hello");
+        assert!(!raw.complete, "長さ0の塊が来ていない");
+    }
+
+    #[test]
+    fn チャンク拡張は読み飛ばす() {
+        let raw = parse_raw_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;x=y\r\nhello\r\n0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(raw.body, b"hello");
+        assert!(raw.complete);
+    }
 }
