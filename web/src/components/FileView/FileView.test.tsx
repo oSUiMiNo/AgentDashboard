@@ -1981,7 +1981,7 @@ describe("大きいファイル（窓で読む面と上限の導線）", () => {
       expect(screen.queryByTestId("file-markdown")).toBeNull();
       expect(screen.queryByTestId("file-editor")).toBeNull();
       expect(screen.getByTestId("file-truncated")).toHaveTextContent(
-        "大きいので（4.0 MB）、生テキストで少しずつ読んでいます。整形と編集はできません。",
+        "このファイルは大きいので（4.0 MB）、生テキストで少しずつ読んでいます。整形と編集はできません。",
       );
       // 天井（32 MB）以下なら「ブラウザで開く」は押せる
       expect(screen.getByTestId("file-open-tab")).toBeInTheDocument();

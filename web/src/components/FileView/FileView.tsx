@@ -1465,7 +1465,7 @@ export function FileView({
           言うと嘘になる（生テキストへ切り替えたときに出る） */}
       {content?.truncated === true && !箱で描いている && (
         <p data-testid="file-truncated" className="text-xs text-amber-300">
-          大きいので（{formatBytes(content.bytes)}）、生テキストで少しずつ読んでいます。整形と編集はできません。
+          このファイルは大きいので（{formatBytes(content.bytes)}）、生テキストで少しずつ読んでいます。整形と編集はできません。
         </p>
       )}
 
