@@ -355,7 +355,7 @@ async fn ファイル閲覧の上限の一式が返り_変えると残り_defaul
     assert_eq!(view["editable"], true, "{view}");
     assert_eq!(view["whole_text_bytes"], 3_145_728, "{view}");
     assert_eq!(view["window_bytes"], 262_144, "{view}");
-    assert_eq!(view["preview_max_bytes"], 33_554_432, "{view}");
+    assert_eq!(view["preview_max_bytes"], 12_582_912, "{view}");
     assert_eq!(view["image_max_bytes"], 8_388_608, "{view}");
 
     // 選択肢は16個。値は protocol の表と、名前は要件の16個と1つずつ一致する

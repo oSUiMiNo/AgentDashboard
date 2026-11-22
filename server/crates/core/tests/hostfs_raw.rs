@@ -678,26 +678,38 @@ async fn 流す途中でファイルが変わったら打ち切る() {
     // 設計§5-4。読んでいる間にファイルが変わったら、**成功の顔で全文と偽らない**。
     //
     // 製品コードに試験のための待ちを作らず、**受け手がわざと読むのを止める**。その間に
-    // 送り手が進めるのは、同じ機械の TCP の受け渡し（受け 最大 6 MiB＋送り 最大 4 MiB、
-    // このPCの `sysctl` で確かめた）と手元の1窓ぶんだけ。それを大きく超える大きさなら、
+    // 送り手が先へ進めるのは「送り手の送信の箱（`tcp_wmem` の最大まで育つ）＋受け手の受信の
+    // 箱＋送り手の手元の窓（読んだ1窓と、書き込みを待つ1窓）」だけ。受信の箱は既定では
+    // `tcp_rmem` の最大（この PC で 6 MiB）まで育つので、**接続の前に小さく決めて**育たない
+    // ようにする（`testkit::connect_with_recv_buffer`）。その量を大きさが十分に超えるなら、
     // 止まっている間に書き換えた後の窓を、送り手は必ず読む
     let size = (server_core::file_view::PREVIEW_MAX_BYTES - MIB) as usize;
-    assert!(
-        size as u64 >= 24 * MIB,
-        "前提が崩れた：TCP の受け渡し（約 12 MiB）を大きく超える大きさでないと、書き換える前に読み終わりうる。プレビューの天井（{}）を下げたならこの試験の作りを見直すこと",
-        server_core::file_view::PREVIEW_MAX_BYTES
-    );
     let sandbox = Sandbox::new("htmlabort");
     let text = 混ぜた本文(size);
     let path = sandbox.file("育つ.html", text.as_bytes());
     let server = common::TestServer::start_with(config_for("htmlabort")).await;
 
     let (addr, cookie) = (server.addr, server.cookie.clone());
+    let (stream, recv_buffer) = testkit::connect_with_recv_buffer(addr, 64 * 1024)
+        .await
+        .expect("受信の箱を小さくして繋がること");
+    // 送り手の箱の最大は機械の設定で決まる（読めない機械では Linux の既定の 4 MiB とみる）
+    let send_buffer_max = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_wmem")
+        .ok()
+        .and_then(|line| line.split_whitespace().nth(2)?.parse::<u64>().ok())
+        .unwrap_or(4 * MIB);
+    let ahead =
+        send_buffer_max + u64::from(recv_buffer) + 2 * protocol::fs::RANGE_MAX_BYTES + 2 * MIB;
+    assert!(
+        size as u64 >= ahead,
+        "前提が崩れた：止めている間に送り手が進める量（送り手の箱 {send_buffer_max}＋受け手の箱 {recv_buffer}＋手元の2窓＋余白 2 MiB＝{ahead} バイト）を、大きさ（{size} バイト＝プレビューの天井 {} − 1 MiB）が超えないと、書き換える前に読み終わりうる。天井を下げたか、この機械の `tcp_wmem` が大きいならこの試験の作りを見直すこと",
+        server_core::file_view::PREVIEW_MAX_BYTES
+    );
     let url = format!("/api/hosts/local/file?path={}&as=raw", escape(&path));
     let file = std::path::PathBuf::from(&path);
     let received = tokio::task::spawn_blocking(move || {
         use std::io::{Read as _, Write as _};
-        let mut stream = std::net::TcpStream::connect(addr).expect("繋がること");
+        let mut stream = stream;
         let cookie_line = cookie
             .map(|value| format!("Cookie: {value}\r\n"))
             .unwrap_or_default();
