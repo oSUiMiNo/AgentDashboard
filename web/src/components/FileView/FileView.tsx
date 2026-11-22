@@ -283,6 +283,8 @@ export function FileView({
   const [窓の世代, set窓の世代] = useState(0)
   /** ファイル閲覧の上限の一式（窓の長さ・プレビューの天井。全部サーバから受け取る） */
   const 上限 = useSettingsStore((state) => state.settings.file_view)
+  // 設定がまだ届いていないか。成功しても失敗しても `false` になる（失敗なら既定の値で決める）
+  const 設定を待つ = useSettingsStore((state) => state.loading)
   const [テキストでない, setテキストでない] = useState(false)
   const [loading, setLoading] = useState(true)
   /**
@@ -582,12 +584,18 @@ export function FileView({
    * 繰り返し読んで流して返す。天井を超えたら箱へは送れない（ブラウザのタブが落ちる）。
    */
   const 箱で描ける = boxed && (!窓で読む || (content?.bytes ?? 0) <= 上限.preview_max_bytes)
+  /**
+   * **大きい HTML ／ SVG は、設定（プレビューの天井）が届くまで描き分けを決めない**。暫定の
+   * 天井で決めると、一瞬だけ窓で読む面が出てから箱に替わる（コードレビュー対応 2026-11-23
+   * 対応6）。Markdown とテキストは天井を見ないので待たない
+   */
+  const 天井を待つ = 窓で読む && boxed && 設定を待つ
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
   // 出しても読めない。代わりに大きさと種別を出す。
   //
   // **窓で読むときは、箱で描ける HTML ／ SVG だけ。** Markdown とテキスト、天井を超えた
   // HTML ／ SVG は、どちらへ切り替えても窓で読む面になる——押して何も変わらないものを置かない
-  const モードを切り替えられる = 窓で読む ? 箱で描ける : markdown || boxed
+  const モードを切り替えられる = 窓で読む ? 箱で描ける && !天井を待つ : markdown || boxed
   /**
    * このファイルを**書き戻せるか**（設計§8）。**決めるのはサーバ**で、画面は受け取るだけ
    * ——効いている根は「設定の `writable_roots` ＋ その口座で引けるプロジェクト全部」で、
@@ -1265,7 +1273,7 @@ export function FileView({
 
               **プレビューの天井を超えた大きいファイルには出さない。** サーバは丸ごと送れない
               大きさを断るので、押せて断られるだけの物になる */}
-          {!(窓で読む && (content?.bytes ?? 0) > 上限.preview_max_bytes) && (
+          {!(窓で読む && (天井を待つ || (content?.bytes ?? 0) > 上限.preview_max_bytes)) && (
             <Button asChild variant="ghost" size="icon-sm" className="ml-1.5">
               <a
                 data-testid="file-open-tab"
@@ -1558,7 +1566,13 @@ export function FileView({
         </div>
       )}
 
-      {!loading && content !== null && (
+      {!loading && content !== null && 天井を待つ && (
+        <p data-testid="file-settings-wait" className="text-muted-foreground text-xs">
+          読み込み中…
+        </p>
+      )}
+
+      {!loading && content !== null && !天井を待つ && (
         /* 遡る箱。**印を持っているのは、遡れることが実測でしか言えないため**——
            `file-markdown` と `file-raw` は中身の出し方を指しているので、どちらへ
            切り替えても同じこの箱を掴めるようにしておく（設計§6）。

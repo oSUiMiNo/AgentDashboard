@@ -521,12 +521,18 @@ describe('大きいとき（先頭の窓だけが届いたもの）', () => {
     )
   }
 
+  const 元の読み込み中 = useSettingsStore.getState().loading
+
   beforeEach(() => {
-    useSettingsStore.setState({ settings: { ...settingsFixture(), file_view: fileViewFixture() } })
+    // 読み込み中ではない状態にする（大きい HTML ／ SVG は設定が届くまで描き分けを決めない）
+    useSettingsStore.setState({
+      settings: { ...settingsFixture(), file_view: fileViewFixture() },
+      loading: false,
+    })
   })
 
   afterEach(() => {
-    useSettingsStore.setState({ settings: 元の設定 })
+    useSettingsStore.setState({ settings: 元の設定, loading: 元の読み込み中 })
   })
 
   it('表が、画像を除く種類を1つ残らず覆っている', () => {

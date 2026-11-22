@@ -1877,10 +1877,17 @@ describe("失敗と競合の見せ方", () => {
 describe("大きいファイル（窓で読む面と上限の導線）", () => {
   const MIB = 1024 * 1024;
   const 元の設定 = useSettingsStore.getState().settings;
+  const 元の読み込み中 = useSettingsStore.getState().loading;
 
-  function 上限を置く(overrides: Partial<FileViewSettings> = {}) {
+  /**
+   * 上限の一式を置く。**読み込み中ではない状態にする**——大きい HTML ／ SVG は設定が
+   * 届くまで描き分けを決めない（コードレビュー対応 2026-11-23 対応6）ので、置かないと
+   * 「読み込み中…」のままになる
+   */
+  function 上限を置く(overrides: Partial<FileViewSettings> = {}, loading = false) {
     useSettingsStore.setState({
       settings: { ...settingsFixture(), file_view: fileViewFixture(overrides) },
+      loading,
     });
   }
 
@@ -1889,7 +1896,7 @@ describe("大きいファイル（窓で読む面と上限の導線）", () => {
   });
 
   afterEach(() => {
-    useSettingsStore.setState({ settings: 元の設定 });
+    useSettingsStore.setState({ settings: 元の設定, loading: 元の読み込み中 });
   });
 
   const encoder = new TextEncoder();
@@ -1952,6 +1959,66 @@ describe("大きいファイル（窓で読む面と上限の導線）", () => {
       expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
       expect(screen.getByTestId("file-toggle-mode")).toHaveAttribute("aria-label", "描いた形で見る");
       expect(screen.getByTestId("file-truncated")).toBeInTheDocument();
+    });
+
+    it("設定の読み込み中に天井以下の大きい HTML が届いても、どちらの面も出さずに待つ", async () => {
+      // コードレビュー対応 2026-11-23 対応6。暫定の天井で決めると、一瞬だけ窓で読む面が出る
+      上限を置く({}, true);
+      const path = `${ROOT}/まとめ.html`;
+      大きいのを出す(path, { bytes: 5 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-settings-wait")).toHaveTextContent("読み込み中…");
+      expect(screen.queryByTestId("file-frame")).toBeNull();
+      expect(screen.queryByTestId("file-window")).toBeNull();
+      expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
+      expect(screen.queryByTestId("file-open-tab")).toBeNull();
+    });
+
+    it("設定が届いたら箱で描き、窓で読む面を一度も出さない", async () => {
+      上限を置く({}, true);
+      const path = `${ROOT}/まとめ.html`;
+      大きいのを出す(path, { bytes: 5 * MIB });
+      let 窓で読む面が出た = false;
+      const observer = new MutationObserver(() => {
+        if (document.querySelector('[data-testid="file-window"]') !== null) {
+          窓で読む面が出た = true;
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      try {
+        show(path);
+        await screen.findByTestId("file-settings-wait");
+        act(() => {
+          useSettingsStore.setState({ loading: false });
+        });
+        expect(await screen.findByTestId("file-frame")).toBeInTheDocument();
+        expect(screen.queryByTestId("file-settings-wait")).toBeNull();
+        expect(窓で読む面が出た).toBe(false);
+      } finally {
+        observer.disconnect();
+      }
+    });
+
+    it("設定の読み込みに失敗したら既定の値で描き分ける", async () => {
+      // 失敗しても `loading` は false になり、暫定の値（天井 3 MB）で決める。待ち続けない
+      上限を置く({ preview_max_bytes: 3 * MIB });
+      const path = `${ROOT}/まとめ.html`;
+      大きいのを出す(path, { bytes: 5 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
+      expect(screen.queryByTestId("file-settings-wait")).toBeNull();
+    });
+
+    it("HTML でない大きいファイルは設定を待たない", async () => {
+      上限を置く({}, true);
+      const path = `${ROOT}/計画.md`;
+      大きいのを出す(path, { bytes: 4 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
+      expect(screen.queryByTestId("file-settings-wait")).toBeNull();
     });
 
     it("天井を超えた HTML は窓で読む面だけで、切替もブラウザで開くも出さない", async () => {
