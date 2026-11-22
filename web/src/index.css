@@ -478,6 +478,14 @@
 .file-save[data-unsaved]:not(:disabled):hover {
   background-color: color-mix(in srgb, var(--accent-solid) 30%, var(--background));
 }
+.open-in-opened,
+.open-in-opened:hover {
+  background-color: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
+  color: var(--accent-solid);
+}
+.open-in-opened:hover {
+  background-color: color-mix(in srgb, var(--accent-solid) 30%, var(--background));
+}
 @supports not selector(::-webkit-scrollbar) {
   .file-scroll {
     scrollbar-width: thin;
