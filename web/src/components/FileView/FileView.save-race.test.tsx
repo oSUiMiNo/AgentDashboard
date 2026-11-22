@@ -444,9 +444,11 @@ describe('FileViewの下書き復元と読み直し', () => {
 })
 
 describe('FileViewの保存制限と下書き失敗', () => {
+  // **「部分読込」の行はここから外した**（仕様変更：`ファイル閲覧の上限を設定から変え、
+  // 大きいものは流し読みする` 設計§10-2）。先頭の窓しか届いていないものは窓で読む面に出て、
+  // 下書きを重ねない（競合の選択も出ない）。その振る舞いは下の独立の試験が見る
   it.each([
     ['書けない', { writable: false }],
-    ['部分読込', { truncated: true }],
     ['stampなし', { stamp: undefined }],
     ['stampが空', { stamp: '' }],
   ] as const)('%sは復元した編集があっても再取得で保存制限を回避できない', async (_label, invalid) => {
@@ -464,6 +466,24 @@ describe('FileViewの保存制限と下書き失敗', () => {
       fireEvent.keyDown(screen.getByTestId('file-editor'), { key: 's', metaKey: true })
       expect(api.writes).toHaveLength(0)
     }
+  })
+
+  it('先頭の窓しか届かないものには下書きを重ねず、下書きは消さずに残す', async () => {
+    /*
+      **全文が無いものに下書きを重ねると、比べても書き戻しても嘘になる**（設計§10-2）。
+      窓で読む面に出し、「大きくなったので編集できません」と言う。**下書きはこのブラウザに
+      残す**——ファイルが小さく戻れば、また重ねられる。
+    */
+    putEdit('local', A, '復元した編集', null, 'old')
+    const api = network({ ...file(), truncated: true })
+    render(<Viewer />)
+    expect(await screen.findByTestId('file-window-text')).toHaveTextContent('元の本文')
+    expect(screen.getByTestId('file-draft-error')).toHaveTextContent('大きくなったので編集できません（下書きは残してあります）')
+    expect(screen.queryByTestId('file-conflict-choice')).toBeNull()
+    expect(screen.queryByTestId('file-editor')).toBeNull()
+    expect(screen.queryByTestId('file-save')).toBeNull()
+    expect(readEdit('local', A, null)).toBe('復元した編集')
+    expect(api.writes).toHaveLength(0)
   })
 
   it.each([

@@ -5,6 +5,8 @@ import { resolve } from 'node:path'
 import { type ComponentProps } from 'react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileView } from '@/components/FileView/FileView'
+import { useSettingsStore } from '@/stores/settings'
+import { fileViewFixture, settingsFixture } from '@/test/fixtures'
 
 /**
  * **種類 × 帯の機能の総当たり**（利用者の指定・2026-09-08）。
@@ -53,6 +55,9 @@ const 器から取る印 = {
   'file-raw': 'file-raw',
   'file-frame': 'file-frame',
   'file-image': 'file-image',
+  // **大きいファイルの窓で読む面**（`ファイル閲覧の上限を設定から変え、大きいものは流し読み
+  // する` 設計§10-3）。読み取り専用の生テキストと同じく `file-raw` で器の大きさを取る
+  'file-window-text': 'file-raw',
 } as const
 
 /**
@@ -467,6 +472,104 @@ describe('書けない場所のファイル', () => {
         本体.className.split(/\s+/),
         `${行.kind} の読み取り専用の面に大きさが直書きされている`,
       ).not.toContain(綴り)
+    }
+  })
+})
+
+/**
+ * **大きいとき（一括で読む線を超えて、先頭の窓だけが届いたもの）の総当たり**
+ * （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§10-2・`DESIGN.md` §48.23）。
+ *
+ * 上の表の外で、**窓で読む面**に出る。HTML ／ SVG だけは、プレビューの天井（設定の
+ * `preview_max_bytes`。見本では 32 MB）以下なら箱で描く——天井の内と外で行が分かれる。
+ */
+describe('大きいとき（先頭の窓だけが届いたもの）', () => {
+  const MIB = 1024 * 1024
+  const 元の設定 = useSettingsStore.getState().settings
+
+  interface 大きい行 extends 行 {
+    /** ファイル全体の大きさ（天井の内か外かを決める） */
+    bytes: number
+  }
+
+  const 大きい表: 大きい行[] = [
+    { kind: 'markdown', path: `${ROOT}/計画.md`, bytes: 4 * MIB, 本体: 'file-window-text', モード切替: '意図して出さない', 探す: 'その場で',
+      備考: '整形は全文が要るので、窓で読む面しか無い（切り替える先が無い）' },
+    { kind: 'text', path: `${ROOT}/メモ.txt`, bytes: 4 * MIB, 本体: 'file-window-text', モード切替: '意図して出さない', 探す: 'その場で' },
+    { kind: 'html', path: `${ROOT}/理解.html`, bytes: 5 * MIB, 本体: 'file-frame', モード切替: '出る', 探す: 'その場で',
+      備考: '天井以下。サーバが窓を繰り返し読んで流して返す' },
+    { kind: 'html', path: `${ROOT}/理解.html`, bytes: 40 * MIB, 本体: 'file-window-text', モード切替: '意図して出さない', 探す: 'その場で',
+      備考: '天井超え。箱へは送れないので窓で読む面だけ' },
+    { kind: 'svg', path: `${ROOT}/図.svg`, bytes: 5 * MIB, 本体: 'file-frame', モード切替: '出る', 探す: '切り替えて' },
+    { kind: 'svg', path: `${ROOT}/図.svg`, bytes: 40 * MIB, 本体: 'file-window-text', モード切替: '意図して出さない', 探す: 'その場で' },
+    // **画像は対象外**——窓にできない（全体が無いと描けない）ので、別の上限（8 MB）で断る
+  ]
+
+  function 大きく出す(bytes: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        // 窓読みは「テキストではない」で止めて、並びを先頭の窓1つに保つ
+        if (url.includes('as=range')) {
+          return new Response('テキストではありません', { status: 415 })
+        }
+        return new Response(
+          JSON.stringify({ path: 'x', text: '本文\nあか', truncated: true, bytes, writable: false, stamp: 's' }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: { ...settingsFixture(), file_view: fileViewFixture() } })
+  })
+
+  afterEach(() => {
+    useSettingsStore.setState({ settings: 元の設定 })
+  })
+
+  it('表が、画像を除く種類を1つ残らず覆っている', () => {
+    const 種類 = new Set(大きい表.map((r) => r.kind))
+    expect([...種類].sort()).toEqual(表.map((r) => r.kind).filter((k) => k !== 'image').sort())
+  })
+
+  it.each(大きい表)('$kind（$bytes バイト）：大きさが本体へ届いている', async (行) => {
+    大きく出す(行.bytes)
+    render(<Viewer host="local" root={ROOT} path={行.path} />)
+
+    const 本体 = await screen.findByTestId(行.本体)
+    expect(本体.className.split(/\s+/), `${行.kind} の本体が、その種類の印を持っていない`).toContain(器から取る印[行.本体])
+    for (const 綴り of 直書き) {
+      expect(本体.className.split(/\s+/), `${行.kind} の本体に大きさが直書きされている`).not.toContain(綴り)
+    }
+  })
+
+  it.each(大きい表)('$kind（$bytes バイト）：切替は表のとおりに出る／出ない、保存は出ない', async (行) => {
+    大きく出す(行.bytes)
+    render(<Viewer host="local" root={ROOT} path={行.path} />)
+    await screen.findByTestId(行.本体)
+
+    if (行.モード切替 === '出る') {
+      expect(screen.getByTestId('file-toggle-mode')).toBeInTheDocument()
+    } else {
+      expect(screen.queryByTestId('file-toggle-mode')).toBeNull()
+    }
+    expect(screen.queryByTestId('file-save')).toBeNull()
+  })
+
+  it.each(大きい表)('$kind（$bytes バイト）：探す入口は表のとおりに振る舞う', async (行) => {
+    大きく出す(行.bytes)
+    render(<Viewer host="local" root={ROOT} path={行.path} />)
+    await screen.findByTestId(行.本体)
+
+    await userEvent.click(screen.getByTestId('file-find-open'))
+    if (行.探す === 'その場で') {
+      expect(screen.getByTestId('file-find')).toBeInTheDocument()
+      expect(screen.getByTestId(行.本体)).toBeInTheDocument()
+    } else {
+      expect(screen.getByTestId('file-find-confirm')).toHaveTextContent('生テキストは読み込んだ範囲だけを探します')
+      expect(screen.queryByTestId('file-find')).toBeNull()
     }
   })
 })

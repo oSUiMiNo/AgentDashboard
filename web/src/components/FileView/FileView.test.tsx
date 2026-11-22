@@ -9,9 +9,13 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { type ComponentProps } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router";
 import { FileView } from "@/components/FileView/FileView";
 import { putEdit, readEdit, WRITE_DEBOUNCE_MS } from "@/lib/fileEdits";
 import { previewUrl, rawUrl } from "@/lib/hostfs";
+import { useSettingsStore } from "@/stores/settings";
+import { fileViewFixture, settingsFixture } from "@/test/fixtures";
+import type { FileViewSettings } from "@/stores/settings";
 
 const ROOT = "/home/me/dev/app";
 
@@ -40,15 +44,18 @@ function Viewer({
   onReorderTabCommit,
   ...rest
 }: ViewerProps) {
+  // **導線（`FileLimitHint`）が `Link` を持つ**ので、本物の画面と同じく router の中で描く
   return (
-    <FileView
-      {...rest}
-      tabs={tabs ?? [rest.path]}
-      onSelectTab={onSelectTab ?? (() => {})}
-      onCloseTab={onCloseTab ?? (() => {})}
-      onReorderTab={onReorderTab ?? (() => {})}
-      onReorderTabCommit={onReorderTabCommit ?? (() => {})}
-    />
+    <MemoryRouter>
+      <FileView
+        {...rest}
+        tabs={tabs ?? [rest.path]}
+        onSelectTab={onSelectTab ?? (() => {})}
+        onCloseTab={onCloseTab ?? (() => {})}
+        onReorderTab={onReorderTab ?? (() => {})}
+        onReorderTabCommit={onReorderTabCommit ?? (() => {})}
+      />
+    </MemoryRouter>
   );
 }
 
@@ -1551,10 +1558,15 @@ describe("編集と保存", () => {
     expect(readEdit("local", コード, null)).toBeNull();
   });
 
-  it("切れている中身は保存させない", async () => {
+  it("切れている中身は編集面に出さず、保存の入口も出さない", async () => {
     /*
       **一部しか読んでいないものを書くと、ファイルを切り詰めて上書きする**（設計§9）。
-      いまは上限超えを丸ごと断る作りなので `truncated` は立たないが、**備えは先に置く。**
+
+      **仕様変更（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§10-2）。**
+      一括で読む線（3 MB）を超えたファイルは、サーバが先頭の窓だけを `truncated: true` で
+      返すようになった。前は「編集面は出るが保存が押せない」を見ていたが、いまは
+      **窓で読む面（読むだけ）に出て、編集面も保存の入口も出さない**——書き戻させない
+      という狙いは強くなる。`writable: true` を渡しても（古いサーバの答えを真似ても）同じ。
     */
     vi.stubGlobal(
       "fetch",
@@ -1575,10 +1587,9 @@ describe("編集と保存", () => {
     );
     render(<Viewer host="local" root={ROOT} path={コード} />);
 
-    const 欄 = await screen.findByTestId("file-editor");
-    await userEvent.type(欄, "い");
-
-    expect(screen.getByTestId("file-save")).toBeDisabled();
+    expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭だけ");
+    expect(screen.queryByTestId("file-editor")).toBeNull();
+    expect(screen.queryByTestId("file-save")).toBeNull();
   });
 
   it("印が無ければ保存させない", async () => {
@@ -1853,5 +1864,218 @@ describe("失敗と競合の見せ方", () => {
 
     expect(await screen.findByTestId("file-raw")).toHaveTextContent("# 計画");
     expect(screen.queryByTestId("file-editor")).toBeNull();
+  });
+});
+
+/**
+ * 大きいファイル（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§10-2）。
+ *
+ * サーバは一括で読む線（3 MB）を超えたファイルに**先頭の窓だけ**を `truncated: true` で返し、
+ * 設定の上限を超えたものは 413 で断る。ここでは、画面がその答えを**どの面に出すか**と、
+ * **断られたときにどこを押せばよいかまで言うか**を見る。
+ */
+describe("大きいファイル（窓で読む面と上限の導線）", () => {
+  const MIB = 1024 * 1024;
+  const 元の設定 = useSettingsStore.getState().settings;
+
+  function 上限を置く(overrides: Partial<FileViewSettings> = {}) {
+    useSettingsStore.setState({
+      settings: { ...settingsFixture(), file_view: fileViewFixture(overrides) },
+    });
+  }
+
+  beforeEach(() => {
+    上限を置く();
+  });
+
+  afterEach(() => {
+    useSettingsStore.setState({ settings: 元の設定 });
+  });
+
+  const encoder = new TextEncoder();
+  const バイト数 = (text: string) => encoder.encode(text).length;
+
+  /**
+   * 先頭の窓だけを返すサーバ。窓読み（`as=range`）は、末尾の窓（`tail`）を頼まれたらそれを、
+   * それ以外は「テキストではない」（415）で断る——**読み足しが止まる**ので、並びが決まる。
+   */
+  function 大きいのを出す(path: string, opts: { bytes: number; head?: string; tail?: string; status?: number; body?: string }) {
+    const head = opts.head ?? "先頭の行\n";
+    const tail = opts.tail ?? "末尾の行\n";
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = new URL(input, "http://test");
+        calls.push(url.pathname + url.search);
+        if (url.pathname === "/api/settings") {
+          return new Response(JSON.stringify(useSettingsStore.getState().settings), { status: 200 });
+        }
+        if (opts.status !== undefined) {
+          return new Response(opts.body ?? "断りました", { status: opts.status });
+        }
+        if (url.searchParams.get("as") === "range") {
+          const offset = Number(url.searchParams.get("offset"));
+          const 窓 = useSettingsStore.getState().settings.file_view.window_bytes;
+          if (offset >= opts.bytes - 窓) {
+            const start = opts.bytes - バイト数(tail);
+            return new Response(
+              JSON.stringify({ path, start, end: opts.bytes, bytes: opts.bytes, text: tail, stamp: "s", at_line_start: true }),
+              { status: 200 },
+            );
+          }
+          return new Response(`${path} の ${offset} バイト目からはテキストではありません`, { status: 415 });
+        }
+        return new Response(
+          JSON.stringify({ path, text: head, truncated: true, bytes: opts.bytes, writable: false, stamp: "s" }),
+          { status: 200 },
+        );
+      }),
+    );
+    return calls;
+  }
+
+  describe("描き分け", () => {
+    it("天井以下の大きい HTML は箱で描き、生テキストへ切り替えると窓で読む面になる", async () => {
+      const path = `${ROOT}/まとめ.html`;
+      大きいのを出す(path, { bytes: 5 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-frame")).toHaveAttribute("src", previewUrl("local", path));
+      // **描いた形は全部届いているので「途中まで」とは言わない**
+      expect(screen.queryByTestId("file-truncated")).toBeNull();
+      const 切替 = screen.getByTestId("file-toggle-mode");
+      expect(切替).toHaveAttribute("aria-label", "生テキストで見る");
+      expect(screen.getByTestId("file-open-tab")).toBeInTheDocument();
+
+      await userEvent.click(切替);
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
+      expect(screen.getByTestId("file-toggle-mode")).toHaveAttribute("aria-label", "描いた形で見る");
+      expect(screen.getByTestId("file-truncated")).toBeInTheDocument();
+    });
+
+    it("天井を超えた HTML は窓で読む面だけで、切替もブラウザで開くも出さない", async () => {
+      const path = `${ROOT}/まとめ.html`;
+      大きいのを出す(path, { bytes: 40 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
+      expect(screen.queryByTestId("file-frame")).toBeNull();
+      // **押して何も変わらないもの・押せて断られるだけのものを置かない**
+      expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
+      expect(screen.queryByTestId("file-open-tab")).toBeNull();
+    });
+
+    it.each([
+      ["Markdown", "計画.md"],
+      ["テキスト", "app.log"],
+    ])("大きい%sは窓で読む面に出し、整形・編集・保存を出さない", async (_label, name) => {
+      const path = `${ROOT}/${name}`;
+      大きいのを出す(path, { bytes: 4 * MIB });
+      show(path);
+
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("先頭の行");
+      expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
+      expect(screen.queryByTestId("file-save")).toBeNull();
+      expect(screen.queryByTestId("file-heavy")).toBeNull();
+      expect(screen.queryByTestId("file-markdown")).toBeNull();
+      expect(screen.queryByTestId("file-editor")).toBeNull();
+      expect(screen.getByTestId("file-truncated")).toHaveTextContent(
+        "大きいので（4.0 MB）、生テキストで少しずつ読んでいます。整形と編集はできません。",
+      );
+      // 天井（32 MB）以下なら「ブラウザで開く」は押せる
+      expect(screen.getByTestId("file-open-tab")).toBeInTheDocument();
+    });
+  });
+
+  describe("上限で断られたときの導線", () => {
+    it("変えてよい人には、いまの上限と設定のカードへの導線を出し、設定を読み直す", async () => {
+      const path = `${ROOT}/大きい.log`;
+      const calls = 大きいのを出す(path, { bytes: 0, status: 413, body: "大きい.log は 6.0 GB で、上限の 5.0 GB を超えています" });
+      show(path);
+
+      expect(await screen.findByTestId("file-error")).toHaveTextContent("上限の 5.0 GB を超えています");
+      expect(screen.getByTestId("file-limit-hint")).toHaveTextContent("設定の『ファイル閲覧の上限』から変えられます（いま 5 GB）。");
+      expect(screen.getByTestId("file-limit-open-settings")).toHaveAttribute("href", "/settings#file-view-limit");
+      // **「いま {上限}」を古い値で出さない**——413 を受けたら設定を1回読み直す
+      await waitFor(() => expect(calls.filter((c) => c === "/api/settings")).toHaveLength(1));
+    });
+
+    it("サーバモードで管理者でない人には、誰が決めているかを言い、導線を出さない", async () => {
+      上限を置く({ editable: false, via_server: true, max_bytes: 3 * MIB });
+      const path = `${ROOT}/大きい.log`;
+      大きいのを出す(path, { bytes: 0, status: 413 });
+      show(path);
+
+      expect(await screen.findByTestId("file-limit-hint")).toHaveTextContent(
+        "上限はサーバの管理者が決めています（いま 3 MB）。管理者に上げてもらってください。",
+      );
+      expect(screen.queryByTestId("file-limit-open-settings")).toBeNull();
+    });
+
+    it("ローカルで変えられない人（LAN の向こう）には、この PC のブラウザからだけと言う", async () => {
+      上限を置く({ editable: false, via_server: false });
+      const path = `${ROOT}/大きい.log`;
+      大きいのを出す(path, { bytes: 0, status: 413 });
+      show(path);
+
+      expect(await screen.findByTestId("file-limit-hint")).toHaveTextContent(
+        "上限はこの PC のブラウザ（127.0.0.1）からだけ変えられます（いま 5 GB）。",
+      );
+      expect(screen.queryByTestId("file-limit-open-settings")).toBeNull();
+    });
+
+    it("設定がまだ読めていなければ（古いサーバ）、導線だけを出す", async () => {
+      上限を置く({ choices: [] });
+      const path = `${ROOT}/大きい.log`;
+      大きいのを出す(path, { bytes: 0, status: 413 });
+      show(path);
+
+      expect(await screen.findByTestId("file-limit-hint")).toHaveTextContent("設定の『ファイル閲覧の上限』から変えられます。");
+      expect(screen.getByTestId("file-limit-open-settings")).toBeInTheDocument();
+    });
+
+    it("古い PC の断り（501）には、導線を出さない", async () => {
+      const path = `${ROOT}/大きい.log`;
+      大きいのを出す(path, { bytes: 0, status: 501, body: "この PC のセッションホストは版が古いので、3.0 MB より大きいファイルは開けません" });
+      show(path);
+
+      expect(await screen.findByTestId("file-error")).toHaveTextContent("版が古いので");
+      expect(screen.queryByTestId("file-limit-hint")).toBeNull();
+    });
+
+    it("画像の断り（413）には、導線を出さない（画像は別の上限で、この設定では変わらない）", async () => {
+      const path = `${ROOT}/大きい.png`;
+      const calls = 大きいのを出す(path, { bytes: 0, status: 413, body: "画像が大きすぎます" });
+      show(path);
+
+      expect(await screen.findByTestId("file-error")).toHaveTextContent("画像が大きすぎます");
+      expect(screen.queryByTestId("file-limit-hint")).toBeNull();
+      expect(calls.filter((c) => c === "/api/settings")).toHaveLength(0);
+    });
+  });
+
+  describe("探す", () => {
+    it("読み込んだ範囲だけを探し、窓が入れ替わったら探し直す。帯の字は当たりに数えない", async () => {
+      const path = `${ROOT}/大きい.log`;
+      大きいのを出す(path, { bytes: 4 * MIB, tail: "末尾にだけある語\n" });
+      show(path);
+      await screen.findByTestId("file-window-text");
+
+      await userEvent.click(await screen.findByTestId("file-find-open"));
+      const 入力 = screen.getByTestId("file-find-input");
+      await userEvent.type(入力, "末尾にだけ");
+      await waitFor(() => expect(screen.getByTestId("file-find-count")).toHaveTextContent("見つかりません"));
+
+      await userEvent.click(screen.getByTestId("file-window-end"));
+      expect(await screen.findByTestId("file-window-text")).toHaveTextContent("末尾にだけある語");
+      // **窓の世代が変わったので探し直した**（探す窓は打ち直していない）
+      await waitFor(() => expect(screen.getByTestId("file-find-count")).toHaveTextContent("1 / 1"));
+
+      // 帯の字（`data-file-find-skip`）は当たりに数えない
+      await userEvent.clear(入力);
+      await userEvent.type(入力, "末尾へ");
+      await waitFor(() => expect(screen.getByTestId("file-find-count")).toHaveTextContent("見つかりません"));
+    });
   });
 });

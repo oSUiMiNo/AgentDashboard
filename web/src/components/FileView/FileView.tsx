@@ -42,7 +42,9 @@ import type { FileSearchAdapter } from '@/lib/fileSearch'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import { FileEditor, type 打つ層の印 as 打つ層の印型 } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
+import { FileLimitHint } from '@/components/FileView/FileLimitHint'
 import { FileTabs } from '@/components/FileView/FileTabs'
+import { FileWindowView } from '@/components/FileView/FileWindowView'
 import { Button } from '@/components/ui/button'
 import {
   ChevronGlyph,
@@ -270,6 +272,17 @@ export function FileView({
   /** 拡張子は画像なのに、中身が画像として読めなかった（設計§7-2） */
   const [broken, setBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * テキストが**設定の上限**で断られたか（413）。断り文の下に設定への導線を出す。
+   *
+   * **画像の 413 では立てない**——画像は別の上限（8 MB）で断られ、この設定では変わらない。
+   * 501（古い PC）でも立てない。どちらも、導線を押した先で何も解決しない。
+   */
+  const [上限で断られた, set上限で断られた] = useState(false)
+  /** 窓で読む面の窓の並びが変わった回数。探す窓に「探し直せ」と伝える */
+  const [窓の世代, set窓の世代] = useState(0)
+  /** ファイル閲覧の上限の一式（窓の長さ・プレビューの天井。全部サーバから受け取る） */
+  const 上限 = useSettingsStore((state) => state.settings.file_view)
   const [テキストでない, setテキストでない] = useState(false)
   const [loading, setLoading] = useState(true)
   /**
@@ -432,6 +445,8 @@ export function FileView({
     let made: string | null = null
     setLoading(true)
     setError(null)
+    set上限で断られた(false)
+    set窓の世代(0)
     setテキストでない(false)
     setMode(既定のモード(kind, path, 見せ方の控え.current))
     set書きかけ(null)
@@ -475,7 +490,13 @@ export function FileView({
             対象.stamp = result.stamp
             setContent(result)
             const 残り = readEditDetails(host, path, account)
-            if (残り !== null && 残り.text !== result.text) {
+            if (result.truncated === true) {
+              // **大きくて先頭の窓しか届いていないものには、下書きを重ねない**（設計§10-2）。
+              // 全文が無いので、重ねても比べても嘘になる。**下書きは消さない**——
+              // 復元の2つの分岐をどちらも飛ばせば `対象.pending` は触られず、保存した
+              // 下書きはこのブラウザに残る
+              if (残り !== null) set下書きの断り('大きくなったので編集できません（下書きは残してあります）')
+            } else if (残り !== null && 残り.text !== result.text) {
               対象.text = 残り.text
               対象.stamp = 残り.baseStamp ?? undefined
               対象.conflict = 残り.baseStamp === null || 残り.baseStamp !== result.stamp
@@ -517,6 +538,11 @@ export function FileView({
         if (読込中か()) {
           if (err instanceof HostFsError && err.status === 415) setテキストでない(true)
           else setError(err instanceof Error ? err.message : '読めませんでした')
+          if (err instanceof HostFsError && err.status === 413 && kind !== 'image') {
+            set上限で断られた(true)
+            // **「いま {上限}」を古い値で出さない。** 別のタブで上限を変えた直後に当たる
+            void useSettingsStore.getState().load()
+          }
           // **`if (読込中か())` の中で呼ぶ。** 外で呼ぶと、既に外れた古い `FileView` が
           // 親へ「読めなかった」を報告し、いま開いている列を巻き添えに畳む
           知らせ先.current?.(err instanceof HostFsError ? err.status : null)
@@ -546,9 +572,22 @@ export function FileView({
 
   const markdown = kind === 'markdown'
   const boxed = needsSandbox(kind)
+  /**
+   * **大きくて先頭の窓だけが届いたか**（一括で読む線を超え、設定の上限以下）。届いたら
+   * 生テキストを窓で少しずつ読む面へ出す（設計§10-2・`DESIGN.md` §48.23）。
+   */
+  const 窓で読む = content?.truncated === true
+  /**
+   * 箱（`iframe`）で描けるか。**大きくてもプレビューの天井以下なら描ける**——サーバが窓を
+   * 繰り返し読んで流して返す。天井を超えたら箱へは送れない（ブラウザのタブが落ちる）。
+   */
+  const 箱で描ける = boxed && (!窓で読む || (content?.bytes ?? 0) <= 上限.preview_max_bytes)
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
-  // 出しても読めない。代わりに大きさと種別を出す
-  const モードを切り替えられる = markdown || boxed
+  // 出しても読めない。代わりに大きさと種別を出す。
+  //
+  // **窓で読むときは、箱で描ける HTML ／ SVG だけ。** Markdown とテキスト、天井を超えた
+  // HTML ／ SVG は、どちらへ切り替えても窓で読む面になる——押して何も変わらないものを置かない
+  const モードを切り替えられる = 窓で読む ? 箱で描ける : markdown || boxed
   /**
    * このファイルを**書き戻せるか**（設計§8）。**決めるのはサーバ**で、画面は受け取るだけ
    * ——効いている根は「設定の `writable_roots` ＋ その口座で引けるプロジェクト全部」で、
@@ -560,7 +599,8 @@ export function FileView({
    */
   const 書ける = content?.writable === true
   /** トグルの言葉。**書けないファイルで「編集する」と言わない**（嘘になる） */
-  const 切替の言葉 = markdown && 書ける ? (mode === 'editor' ? 'ブロック編集に切り替える' : 'Markdownソースに切り替える')
+  const 切替の言葉 = 窓で読む ? (mode === 'viewer' ? '生テキストで見る' : '描いた形で見る')
+    : markdown && 書ける ? (mode === 'editor' ? 'ブロック編集に切り替える' : 'Markdownソースに切り替える')
     : mode === 'editor' ? '見る' : 書ける ? '編集する' : '生テキスト'
   useEffect(() => {
     if (!markdown || loading) return
@@ -577,10 +617,11 @@ export function FileView({
    * **書けないファイルはペンにしない。** `切替の言葉` が「編集する」と言わないのと
    * 同じ理由で、保存できないのにペンを出すと嘘になる。
    */
-  const 切替の印 = markdown && mode === 'viewer' ? <CodeGlyph />
+  const 切替の印 = 窓で読む ? (mode === 'viewer' ? <CodeGlyph /> : <EyeGlyph />)
+    : markdown && mode === 'viewer' ? <CodeGlyph />
     : mode === 'editor' ? <EyeGlyph /> : 書ける ? <PencilGlyph /> : <CodeGlyph />
   /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
-  const 箱で描いている = boxed && mode === 'viewer'
+  const 箱で描いている = boxed && mode === 'viewer' && 箱で描ける
   /**
    * いま中を探せるか。**探せるのはテキストとして出している2つだけで、これは選択では
    * なく制約である**（`ファイルビュアの中を Ctrl+F で探せるようにする` 要件）。
@@ -662,7 +703,7 @@ export function FileView({
    * 今までどおりで、**どの道で探すか**だけがモードで変わる。
    */
   const 打つ層で探せる =
-    探せる && picture === null && !(markdown && mode === 'viewer')
+    探せる && picture === null && !(markdown && mode === 'viewer') && !窓で読む
   const 探す入口 = !loading && content !== null
 
   /**
@@ -1193,7 +1234,7 @@ export function FileView({
 
               **押せる条件は `保存できる` 1つ**（設計§6-7）——ボタンと、のちに足す
               鍵盤の道が**同じ述語を読む**。別々に書くと食い違う。 */}
-          {(mode === 'editor' || markdown) && 書ける && (
+          {(mode === 'editor' || markdown) && 書ける && !窓で読む && (
             <Button
               type="button"
               variant="ghost"
@@ -1220,19 +1261,24 @@ export function FileView({
               ようになったので、押して意味の無い相手でも字か理由のどちらかは必ず出る。
 
               **ここでいう「タブ」はブラウザのタブである**——左のタブ帯（アプリの中の
-              タブ）とは別物なので、同じ帯に2つの意味の「タブ」が並ぶ */}
-          <Button asChild variant="ghost" size="icon-sm" className="ml-1.5">
-            <a
-              data-testid="file-open-tab"
-              href={rawUrl(host, path)}
-              target="_blank"
-              rel="noopener"
-              aria-label="ブラウザで開く"
-              title="ブラウザで開く"
-            >
-              <ExternalLinkGlyph />
-            </a>
-          </Button>
+              タブ）とは別物なので、同じ帯に2つの意味の「タブ」が並ぶ
+
+              **プレビューの天井を超えた大きいファイルには出さない。** サーバは丸ごと送れない
+              大きさを断るので、押せて断られるだけの物になる */}
+          {!(窓で読む && (content?.bytes ?? 0) > 上限.preview_max_bytes) && (
+            <Button asChild variant="ghost" size="icon-sm" className="ml-1.5">
+              <a
+                data-testid="file-open-tab"
+                href={rawUrl(host, path)}
+                target="_blank"
+                rel="noopener"
+                aria-label="ブラウザで開く"
+                title="ブラウザで開く"
+              >
+                <ExternalLinkGlyph />
+              </a>
+            </Button>
+          )}
           {onClose !== undefined && (
             <Button
               type="button"
@@ -1257,6 +1303,10 @@ export function FileView({
           {error}
         </p>
       )}
+
+      {/* **断り文は PC が作った事実として残し、導線は画面が足す**（設計§10-2）。
+          どこを押せば読めるようになるかまで言う */}
+      {上限で断られた && <FileLimitHint />}
 
       {外で読み直した && (
         <p
@@ -1290,9 +1340,11 @@ export function FileView({
           <span>
             この見せ方のままでは中を探せません。生テキストに切り替えて探しますか（表示が
             変わります
-            {content !== null && content.bytes > FORMAT_DEFAULT_LIMIT
-              ? `。大きいので時間がかかります：${content.bytes} バイト`
-              : ''}
+            {窓で読む
+              ? '。生テキストは読み込んだ範囲だけを探します'
+              : content !== null && content.bytes > FORMAT_DEFAULT_LIMIT
+                ? `。大きいので時間がかかります：${content.bytes} バイト`
+                : ''}
             ）。
           </span>
           <Button
@@ -1409,16 +1461,18 @@ export function FileView({
         </p>
       )}
 
-      {content?.truncated === true && (
+      {/* **箱で描いているときは出さない。** 描いた形は全部届いているので、「途中まで」と
+          言うと嘘になる（生テキストへ切り替えたときに出る） */}
+      {content?.truncated === true && !箱で描いている && (
         <p data-testid="file-truncated" className="text-xs text-amber-300">
-          長すぎるので途中までしか出していません（全体は {content.bytes} バイト）。
+          大きいので（{formatBytes(content.bytes)}）、生テキストで少しずつ読んでいます。整形と編集はできません。
         </p>
       )}
 
       {/* **なぜ整形されていないのかを言う**（`FORMAT_DEFAULT_LIMIT`）。
           黙って生テキストで出すと、整形が壊れたように見える。
           禁じてはいないので、押せば整形する——待つと決めるのは利用者 */}
-      {markdown && mode === 'viewer' && content !== null && content.bytes > FORMAT_DEFAULT_LIMIT && (
+      {markdown && mode === 'viewer' && content !== null && content.bytes > FORMAT_DEFAULT_LIMIT && !窓で読む && (
         <p data-testid="file-heavy" className="text-xs text-amber-300">
           大きいので整形に時間がかかります（{content.bytes} バイト）。「編集する」に
           切り替えると、整形せずに出します。
@@ -1525,8 +1579,9 @@ export function FileView({
           */}
           {find && (探せる || 箱の中で探せる) && (
             <FileFind
-              /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
-              contentKey={`${path}:${mode}:${markdownRevision}`}
+              /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す。
+                 **窓で読む面は窓が入れ替わるたびに中身が変わる**ので、その回数も混ぜる */
+              contentKey={`${path}:${mode}:${markdownRevision}:${窓で読む ? 窓の世代 : 0}`}
               合図={探す合図}
               bodyRef={bodyRef}
               本文={本文}
@@ -1552,9 +1607,11 @@ export function FileView({
           <div
             ref={bodyRef}
             data-testid="file-body"
-            className="file-scroll min-h-0 flex-1 overflow-auto"
+            /* **窓で読むときはブラウザの錨を切る**（`overflow-anchor: none`）。窓で読む面が
+               残る窓を基準に自分で位置を保つので、Chromium の錨と二重に動かさない */
+            className={`file-scroll min-h-0 flex-1 overflow-auto${窓で読む ? ' [overflow-anchor:none]' : ''}`}
           >
-          {boxed && mode === 'viewer' ? (
+          {箱で描いている ? (
             /* **隔離した箱**（設計§6-1）。鍵は二重で、ここに書く `sandbox` 属性と、
                応答に付く CSP の `sandbox` 指令。後者は**URL を直接開かれたときにも
                効く**唯一の鍵になる。
@@ -1580,7 +1637,11 @@ export function FileView({
                直すなら「先にテキストを取りに行かず、押されたときに初めて取る」だが、
                それは**断りの理由と生テキストの中身が1回で揃う**という上の作法を
                手放すことになる。**上限の話とは別の判断**なので、ここでは事実だけ
-               残す */
+               残す。
+
+               **一括で読む線（3 MB）を超えた HTML ／ SVG は、サーバが窓を繰り返し読んで
+               流して返す**（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`）。
+               上の `readFile` が運ぶのは先頭の窓だけで、箱へ運ぶ量はプレビューの天井まで */
             /* **箱ごと拡大縮小する**（`index.css` の `.file-frame`）。中へ触れないので、
                `iframe` そのものを `transform` で拡大し、寸法を逆数で伸ばして打ち消す。
                外側の `file-frame-box` は**はみ出しを隠すため**に要る */
@@ -1596,6 +1657,22 @@ export function FileView({
                 className="file-frame border-0 bg-white"
               />
             </div>
+          ) : 窓で読む ? (
+            /* **大きいファイルは、窓で少しずつ読む面へ出す**（設計§10-3・`DESIGN.md` §48.23）。
+               整形も編集もしない（全文が無い）。
+
+               **`key` に印を混ぜる。** 読み直して中身が変わったら、窓の並びを一から作り直す
+               ——古い窓と新しい窓を継ぐと、継ぎ目で別の版が混ざる */
+            <FileWindowView
+              key={`${path}:${content.stamp ?? ''}`}
+              host={host}
+              path={path}
+              initial={content}
+              windowBytes={上限.window_bytes}
+              scrollRef={bodyRef}
+              onGeneration={set窓の世代}
+              limitHint={<FileLimitHint />}
+            />
           ) : markdown && 書ける ? (
             <>
               {(mode === 'viewer' || blockOpened) && <div hidden={mode !== 'viewer'} data-testid="file-markdown" className="file-prose flex min-h-full flex-col">
