@@ -324,6 +324,36 @@ pub fn request_raw(
     parse_raw_response(&response)
 }
 
+/// 受信の箱（`SO_RCVBUF`）を小さく決めてから繋ぎ、読み書きできる素のソケットを返す。
+///
+/// # なぜ要るのか
+///
+/// 受け手がわざと読むのを止めている間に、送り手が先へ進める量は「送り手の送信の箱＋受け手の
+/// 受信の箱」で決まる。受信の箱は既定では自分で育つ（`tcp_rmem` の最大まで。この PC で
+/// 6 MiB）ので、止めている間に送り手がどこまで進むかが機械しだいで大きく揺れる。**接続の
+/// 前に**箱の大きさを決めると、その接続では育たなくなり、進める量を「送り手の箱＋この小さい
+/// 箱」に抑えられる（接続の後に決めても、窓の大きさは最初の握手で決まっているので効かない）。
+/// 流して返す口の打ち切りの試験（`ファイル閲覧の上限を設定から変え、大きいものは流し
+/// 読みする` 設計§5-4）が、書き換えた後の窓を送り手に必ず読ませるために使う。
+///
+/// 返す2つ目は OS が実際に取った箱の大きさ（Linux は頼んだ値の2倍を取り、`rmem_max` で
+/// 頭を抑える）。進める量の見積もりには、頼んだ値ではなくこちらを使うこと。
+pub async fn connect_with_recv_buffer(
+    addr: SocketAddr,
+    recv_buffer: u32,
+) -> anyhow::Result<(std::net::TcpStream, u32)> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_recv_buffer_size(recv_buffer)?;
+    let actual = socket.recv_buffer_size()?;
+    let stream = socket.connect(addr).await?.into_std()?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, actual))
+}
+
 /// 受け取ったバイト列を、状態・ヘッダ・本文に分ける。
 ///
 /// **チャンク転送を解く**。流して返す口（`ファイル閲覧の上限を設定から変え、大きいものは
