@@ -33,6 +33,7 @@ const 鍵の内側: &[&str] = &[
     "crates/core/src/settings_api.rs",
     "crates/core/src/versions_api.rs",
     "crates/core/src/compact_api.rs",
+    "crates/core/src/open_api.rs",
     "crates/server-core/src/account.rs",
 ];
 
@@ -88,7 +89,10 @@ const WS_VARIANTS: usize = 21;
 // 2026-09-13：ファイルを書き戻す口を1つ増やした（`ファイルビュアにエディタ機能を追加`
 // 設計§2-1）。**鍵の内側**——利用者の機械へ書く口なので、帰属を必ず通す。読む口
 // （`GET /api/hosts/{host}/file`）と同じパスに動詞を足した形で、資源は同じ・向きが逆
-const INSIDE_DOORS: usize = 40;
+// 2026-11-23：エクスプローラ・VSCode で開く口で2口増やした（`サイドバーにエクスプローラで
+// 開くボタンが欲しい` 設計§4）。**鍵の内側**——親PC の画面に窓を出す口なので、鍵を通った
+// 相手にだけ許す
+const INSIDE_DOORS: usize = 42;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。

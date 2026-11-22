@@ -90,6 +90,11 @@ command = "logs --host"
 
 [[entry]]
 kind = "rest"
+target = "GET /api/hosts/{host}/open"
+command = "host opened"
+
+[[entry]]
+kind = "rest"
 target = "GET /api/hosts/{host}/resources"
 command = "host resources"
 
@@ -179,6 +184,11 @@ command = "host compact run"
 kind = "rest"
 target = "POST /api/hosts/{host}/compact/pause"
 command = "host compact pause"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/hosts/{host}/open"
+command = "host open"
 
 [[entry]]
 kind = "rest"
