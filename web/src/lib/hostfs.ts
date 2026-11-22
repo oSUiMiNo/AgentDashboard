@@ -13,6 +13,8 @@
  * 本文がそのまま画面に出る文になっているので、素通しする。
  */
 
+import { formatBytes } from '@/lib/format'
+
 /** 一覧の1行。Rust 側の `protocol::fs::DirEntry` と同じ綴り。 */
 export interface DirEntry {
   name: string
@@ -66,14 +68,20 @@ export function sameListing(
 /**
  * ファイル1つの中身。Rust 側の `protocol::fs::FileContent` と同じ綴り。
  *
- * 読めるのは**テキストだけ**で、上限を超えたものは中身ごと断られる（設計§9）。
- * したがってここへ届いた時点で「読めた」ことは確定しており、`truncated` は
- * **上限の内側で切った**ことだけを意味する。
+ * 読めるのは**テキストだけ**で、**設定の上限**を超えたものは中身ごと断られる（413。
+ * `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-3）。
+ *
+ * `truncated` は、**一括で読む線**（サーバの `whole_text_bytes`。いまは 3 MiB）を超え、
+ * 設定の上限以下だったことを意味する。そのとき `text` は**先頭の窓**（`window_bytes`
+ * まで、文字の境目で切ったもの）で、続きは [`readFileRange`] で取る。
+ *
+ * **全文として解釈する呼び手は [`readWholeFile`] を使う。** 先頭の窓を全文と取り違えると、
+ * 壊れた JSON を読めたと扱うか、途中までの中身で判定してしまう（設計§10-1）。
  */
 export interface FileContent {
   path: string
   text: string
-  /** 上限の内側で切ったか。**隠さない**（設計§9・§15） */
+  /** 一括で読む線を超え、`text` が先頭の窓だけか。**隠さない**（設計§2-3・§10） */
   truncated: boolean
   /** 元のファイルの大きさ */
   bytes: number
@@ -99,6 +107,25 @@ export interface FileContent {
    * 見せるより、書けるのに読むだけの姿を見せるほうが害が小さい。
    */
   writable?: boolean
+}
+
+/**
+ * 窓1つ（位置を指定して読んだテキストの一部。設計§2-3・§10-1）。
+ * Rust の `protocol::fs::FileChunk` と同じ綴り。
+ */
+export interface FileChunk {
+  path: string
+  /** 実際に読んだ先頭（UTF-8 の文字の境目。行頭へ寄せたならその位置） */
+  start: number
+  /** 実際に読んだ終わり（排他。文字の境目）。次の窓はここから頼めば、継ぎ目に欠けも重なりも無い */
+  end: number
+  /** ファイル全体の大きさ（読んだ時点） */
+  bytes: number
+  text: string
+  /** 読んだ時点の印（`FileContent.stamp` と同じ作り。不透明。比べるだけ） */
+  stamp: string
+  /** 行頭へ寄せられたか */
+  at_line_start: boolean
 }
 
 /** 引けなかったときに投げるもの。`message` はそのまま画面へ出す。 */
@@ -149,6 +176,61 @@ export async function readFile(
     throw new HostFsError(response.status, await reason(response))
   }
   return (await response.json()) as FileContent
+}
+
+/**
+ * 全文が要る呼び手のための口（設計§10-1）。JSON・設定・コマンドの定義のように、
+ * **中身を全文として解釈する**ものはこれを使う。
+ *
+ * 先頭の窓しか返らなかった（`truncated`）ら、読めなかったものとして 413 で投げる。
+ * 先頭の窓を全文と取り違えると、壊れた JSON を読めたと扱うか、途中までの中身で
+ * 判定してしまう。**途中までを見せたい呼び手（`slashCommandFile.ts`）は
+ * [`readFile`] のまま使う。**
+ */
+export async function readWholeFile(
+  host: string,
+  path: string,
+): Promise<FileContent> {
+  const content = await readFile(host, path)
+  if (content.truncated) {
+    throw new HostFsError(
+      413,
+      `大きすぎて全体を読めません（${formatBytes(content.bytes)}）`,
+    )
+  }
+  return content
+}
+
+/**
+ * 位置を指定して、窓1つを読む（設計§5・§10-1）。
+ *
+ * **長さはサーバが切り詰める**（1回最大 1 MiB）。`length` を省くとサーバの窓の
+ * 大きさになる。`offset` がファイルの末尾以上なら**空の窓**が返る（断られない）。
+ * `alignLine` を立てると、先頭を次の行頭へ寄せて返す（位置へ飛んだとき、行の途中から
+ * 見せないため）。途中の窓が NUL や壊れた UTF-8 なら 415、設定の上限を超えていれば
+ * 413 で断られる。
+ */
+export async function readFileRange(
+  host: string,
+  path: string,
+  {
+    offset,
+    length,
+    alignLine = false,
+  }: { offset: number; length?: number; alignLine?: boolean },
+): Promise<FileChunk> {
+  let url = `/api/hosts/${encodeURIComponent(host)}/file?path=${encodeURIComponent(path)}&as=range&offset=${offset}`
+  if (length !== undefined) {
+    url += `&length=${length}`
+  }
+  if (alignLine) {
+    url += '&align=line'
+  }
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new HostFsError(response.status, await reason(response))
+  }
+  return (await response.json()) as FileChunk
 }
 
 /**

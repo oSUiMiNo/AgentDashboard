@@ -8,10 +8,15 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  type FileChunk,
+  type FileContent,
+  HostFsError,
   childOf,
   crumbsOf,
   isUnder,
   readBlob,
+  readFileRange,
+  readWholeFile,
   relativeOf,
   sameListing,
   uploadAttachment,
@@ -206,5 +211,111 @@ describe('sameListing', () => {
 
   it('打ち切りの有無が変わったら違う（隠さない）', () => {
     expect(sameListing(並び(['a.md']), { ...並び(['a.md']), truncated: true })).toBe(false)
+  })
+})
+
+describe('窓で読む口（readFileRange）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const 窓: FileChunk = {
+    path: '/w/big.log',
+    start: 262144,
+    end: 524288,
+    bytes: 4 * 1024 * 1024,
+    text: 'あいう\n',
+    stamp: 's1',
+    at_line_start: true,
+  }
+
+  /** 叩かれた URL を控えて、窓を返す `fetch`。 */
+  function 窓を返す(): string[] {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(url)
+        return new Response(JSON.stringify(窓), { status: 200 })
+      }),
+    )
+    return urls
+  }
+
+  it('位置と長さと行頭の寄せを、問い合わせの引数で頼む', async () => {
+    const urls = 窓を返す()
+    const got = await readFileRange('local', '/w/big log.txt', {
+      offset: 262144,
+      length: 1000,
+      alignLine: true,
+    })
+    expect(urls).toEqual([
+      '/api/hosts/local/file?path=%2Fw%2Fbig%20log.txt&as=range&offset=262144&length=1000&align=line',
+    ])
+    // 答えは手を加えずにそのまま返す（継ぎ目の位置は PC が決めたものを使う）
+    expect(got).toEqual(窓)
+  })
+
+  it('長さと寄せを省けば、どちらも付けない（長さはサーバの窓の大きさになる）', async () => {
+    const urls = 窓を返す()
+    await readFileRange('local', '/w/big.log', { offset: 0 })
+    expect(urls).toEqual(['/api/hosts/local/file?path=%2Fw%2Fbig.log&as=range&offset=0'])
+  })
+
+  it('断られたら、状態コードとサーバの言い分をそのまま持ち上げる', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('/w/big.log の 262144 バイト目からはテキストではありません', {
+            status: 415,
+          }),
+      ),
+    )
+    const err = await readFileRange('local', '/w/big.log', { offset: 262144 }).catch(
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(HostFsError)
+    expect((err as HostFsError).status).toBe(415)
+    expect((err as HostFsError).message).toContain('262144 バイト目から')
+  })
+})
+
+describe('全文が要る口（readWholeFile）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function 中身を返す(content: FileContent) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(content), { status: 200 })),
+    )
+  }
+
+  it('全文が届いたら、そのまま返す', async () => {
+    const content: FileContent = {
+      path: '/w/a.json',
+      text: '{"a":1}',
+      truncated: false,
+      bytes: 7,
+    }
+    中身を返す(content)
+    await expect(readWholeFile('local', '/w/a.json')).resolves.toEqual(content)
+  })
+
+  it('先頭の窓しか届かなければ、読めなかったものとして 413 で投げる', async () => {
+    // **全文として解釈する呼び手のための口。** 先頭の窓を全文と取り違えると、
+    // 途中で切れた JSON を「読めた」と扱ってしまう
+    中身を返す({
+      path: '/w/big.json',
+      text: '{"a":',
+      truncated: true,
+      bytes: 4 * 1024 * 1024,
+    })
+    const err = await readWholeFile('local', '/w/big.json').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(HostFsError)
+    expect((err as HostFsError).status).toBe(413)
+    expect((err as HostFsError).message).toBe('大きすぎて全体を読めません（4.0 MB）')
   })
 })

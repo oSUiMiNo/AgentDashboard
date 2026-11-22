@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { parseStats } from '@/lib/stats'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { loadStats, parseStats } from '@/lib/stats'
 
 /**
  * Stats の解析（テスト計画 フェーズ6）。
@@ -169,5 +169,44 @@ describe('Stats の解析', () => {
     // **非公開の内部ファイルなので、型が変わりうる。** 0 へ倒して出し続ける
     expect(stats?.totalSessions).toBe(0)
     expect(stats?.dailyActivity[0].messageCount).toBe(0)
+  })
+})
+
+describe('PC から読む（loadStats）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** 読む口の答えを決める `fetch`。`truncated` だけを変えて対で試す。 */
+  function 答える(truncated: boolean) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: '/home/me/.claude/stats-cache.json',
+              text: 材料(),
+              truncated,
+              bytes: truncated ? 4 * 1024 * 1024 : 1000,
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+  }
+
+  it('全文が届けば解析する', async () => {
+    // **対照。** これが通らないと、下の「読まない」は何も確かめていない
+    答える(false)
+    const stats = await loadStats('local')
+    expect(stats?.lastComputedDate).toBe('2026-09-08')
+  })
+
+  it('先頭の窓しか届かなければ、読めなかったことにする', async () => {
+    // **全文でない JSON を解析しない。** 先頭の窓が偶然 JSON として読めても、
+    // 途中までの数字を出すことになる（設計§10-1 の `readWholeFile`）
+    答える(true)
+    await expect(loadStats('local')).resolves.toBeNull()
   })
 })

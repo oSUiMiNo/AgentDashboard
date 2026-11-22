@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FRONT_MATTER_FOLD_LINES,
   commandCandidates,
   commandNameOf,
   isSafeCommandName,
+  loadCommandFile,
   splitFrontMatter,
 } from './slashCommandFile'
 
@@ -156,5 +157,40 @@ describe('フロントマターを割る', () => {
     const { front, body } = splitFrontMatter('---\n---\n本文')
     expect(front).toEqual([])
     expect(body).toBe('本文')
+  })
+})
+
+describe('大きいコマンドの定義も、途中まで見せる', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('先頭の窓しか届かなくても、途中までの本文を返し、途中までだと伝える', async () => {
+    // **ここは `readFile` のまま使う呼び手である。** 途中までを見せて「（上限まで
+    // 読みました）」と添える作りなので、全文が要る口（`readWholeFile`）へ替えられると
+    // 先頭の窓が「読めなかった」扱いになり、この試験は「見つかりませんでした」で落ちる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/dir')) {
+          return new Response(
+            JSON.stringify({ path: '/home/me', entries: [], truncated: false }),
+            { status: 200 },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            path: '/home/me/.claude/commands/big.md',
+            text: '本文の先頭',
+            truncated: true,
+            bytes: 4 * 1024 * 1024,
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+    const got = await loadCommandFile('local', '/big')
+    expect(got.body).toBe('本文の先頭')
+    expect(got.truncated).toBe(true)
   })
 })

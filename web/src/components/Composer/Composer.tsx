@@ -81,7 +81,7 @@ import {
 import { report } from '@/lib/clientLogs'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
-import { listDir, readFile, uploadAttachment } from '@/lib/hostfs'
+import { listDir, readWholeFile, uploadAttachment } from '@/lib/hostfs'
 import { isCandidateAccept, isCandidateMove, isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
@@ -310,7 +310,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     void (async () => {
       const fs = {
         listDir: (path?: string) => listDir(host, path),
-        readFile: (path: string) => readFile(host, path),
+        readFile: (path: string) => readWholeFile(host, path),
       }
       try {
         const got = await harvestCandidates(fs, project)

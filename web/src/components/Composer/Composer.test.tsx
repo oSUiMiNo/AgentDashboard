@@ -1204,3 +1204,38 @@ describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7
   })
 
 })
+
+describe('候補を集める口は全文を読む（ファイル閲覧の上限 設計§10-1）', () => {
+  it('先頭の窓しか届かない大きいファイルは、読めなかったものとして渡す', async () => {
+    // **継ぎ目を見る。** 集める側（`harvestCandidates`）は設定やコマンドの定義を
+    // 全文として解釈するので、渡す口が `readFile` のままだと、途中で切れた JSON を
+    // 読めたと扱う。渡された口を取り出して、先頭の窓だけの答えで叩く
+    const harvest = vi.spyOn(slashCandidates, 'harvestCandidates').mockResolvedValue({
+      candidates: [],
+      hidden: 0,
+      unreadable: 0,
+      truncated: false,
+    })
+    置く()
+    await waitFor(() => expect(harvest).toHaveBeenCalled())
+    const fs = harvest.mock.calls[0][0]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: '/home/me/.claude/settings.json',
+              text: '{"permissions":',
+              truncated: true,
+              bytes: 4 * 1024 * 1024,
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+    const err = await fs.readFile('/home/me/.claude/settings.json').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(hostfs.HostFsError)
+    expect((err as hostfs.HostFsError).status).toBe(413)
+  })
+})

@@ -57,6 +57,10 @@ export interface CandidateHarvest {
 /** ディスクを読む口。**引数で受け取るので、ここは `hostfs` を import しない**。 */
 export interface FsPort {
   listDir: (path?: string) => Promise<DirListing>
+  /**
+   * **全文を読む口。** ここで読むのは設定とコマンドの定義で、全文として解釈するので、
+   * 本番では `readWholeFile` を渡す（先頭の窓だけが返る大きいものは、読めなかった扱い）
+   */
   readFile: (path: string) => Promise<FileContent>
 }
 

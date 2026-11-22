@@ -1,4 +1,4 @@
-import { readFile } from '@/lib/hostfs'
+import { readWholeFile } from '@/lib/hostfs'
 
 /**
  * `~/.claude/stats-cache.json` を読んで画面に出せる形へ直す
@@ -152,7 +152,8 @@ export function parseStats(text: string): Stats | null {
  */
 export async function loadStats(host: string): Promise<Stats | null> {
   try {
-    const content = await readFile(host, STATS_PATH)
+    // **全文として解析するので `readWholeFile`。** 先頭の窓だけの JSON を読めたと扱わない
+    const content = await readWholeFile(host, STATS_PATH)
     return parseStats(content.text)
   } catch {
     return null
