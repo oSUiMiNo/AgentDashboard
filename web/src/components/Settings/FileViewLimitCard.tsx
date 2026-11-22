@@ -279,7 +279,7 @@ function FileViewLimitConfirm({
         data-step={段}
         role="dialog"
         aria-label={見出し}
-        className="bg-background fixed inset-0 z-50 flex flex-col gap-3 overflow-y-auto p-4 sm:inset-x-auto sm:inset-y-16 sm:left-1/2 sm:w-[min(34rem,90vw)] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:shadow-xl"
+        className="bg-background fixed inset-0 z-50 flex flex-col gap-3 overflow-y-auto p-4 sm:inset-x-auto sm:top-16 sm:bottom-auto sm:max-h-[calc(100dvh-8rem)] sm:left-1/2 sm:w-[min(34rem,90vw)] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:shadow-xl"
       >
         <header className="flex shrink-0 items-center gap-2">
           <h2 className="text-sm font-semibold">{見出し}</h2>
