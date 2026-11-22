@@ -712,6 +712,48 @@ async fn 設定の変更は触った項目だけが変わる() {
 }
 
 #[tokio::test]
+async fn ファイル閲覧の上限は_CLI_から変えられ_ローカルでは警告が出ず_選択肢外は送らない() {
+    // `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` テスト計画フェーズ5。
+    // 設定の口は `start_with_settings` でだけ生える（`start` の器には無い）
+    let dir = work_dir("settings-file-view");
+    let fake_global = dir.join("claude-settings.json");
+    std::fs::write(&fake_global, "{}").expect("偽のグローバル設定を書けること");
+    let server = TestServer::start_with_settings(Config::default(), fake_global).await;
+    let target = target_of(&server);
+
+    let before = client::file_view_limit_before(&target)
+        .await
+        .expect("いまの上限を読めること");
+    assert_eq!(before, 5 * 1024 * 1024 * 1024, "ローカルの既定は 5 GB");
+
+    let body = client::settings_update_body("file_view_max_bytes", "1MB").expect("組めること");
+    let raw = client::settings_set(&target, body)
+        .await
+        .expect("変えられること");
+    let view: serde_json::Value = serde_json::from_str(&raw).expect("応答を読めること");
+    assert_eq!(view["file_view"]["max_bytes"], 1_048_576, "{raw}");
+    assert_eq!(view["file_view"]["configured"], true, "{raw}");
+    assert!(
+        client::file_view_warning_lines(before, &raw).is_empty(),
+        "ローカル・クラウド無し・下げるときは警告が出ないこと"
+    );
+
+    let body = client::settings_update_body("file_view_max_bytes", "default").expect("組めること");
+    let raw = client::settings_set(&target, body)
+        .await
+        .expect("既定へ戻せること");
+    let view: serde_json::Value = serde_json::from_str(&raw).expect("応答を読めること");
+    assert_eq!(view["file_view"]["configured"], false, "{raw}");
+    assert_eq!(view["file_view"]["max_bytes"], 5_368_709_120u64, "{raw}");
+
+    // 選択肢外は送る前に断る（サーバの値は動かない）
+    client::settings_update_body("file_view_max_bytes", "2MB").expect_err("選択肢外は断ること");
+    let raw = client::settings_raw(&target).await.expect("読めること");
+    let view: serde_json::Value = serde_json::from_str(&raw).expect("応答を読めること");
+    assert_eq!(view["file_view"]["max_bytes"], 5_368_709_120u64, "{raw}");
+}
+
+#[tokio::test]
 async fn 受けられない設定はサーバの断りがそのまま伝わる() {
     // LAN のパスワードは **127.0.0.1 からだけ**変えられる（設計§8-3）。LAN の向こうの
     // ふりで叩き、断りの理由（次の一手）が CLI の言葉に残ることを見る

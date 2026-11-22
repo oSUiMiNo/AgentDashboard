@@ -2024,7 +2024,7 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
         server_core::db::settings::MEMO_RETENTION_DAYS,
         server_core::db::settings::MEMO_MAX_BYTES,
     ];
-    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines / memo_retention_days / memo_max_bytes（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）、file_modes（md=editor,html=editor の並び）、writable_roots（絶対パスの並び）";
+    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines / memo_retention_days / memo_max_bytes（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）、file_modes（md=editor,html=editor の並び）、writable_roots（絶対パスの並び）、file_view_max_bytes（3MB・5GB のような書き方かバイト数。default で既定へ）";
     let json_value = if BOOL_KEYS.contains(&key) {
         match value {
             "true" => serde_json::Value::Bool(true),
@@ -2050,6 +2050,8 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
             ));
         }
         serde_json::Value::String(value.to_string())
+    } else if key == server_core::db::settings::FILE_VIEW_MAX_BYTES {
+        file_view_limit_value(value)?
     } else if key == server_core::db::settings::FILE_MODES {
         serde_json::Value::Object(file_modes_map(value)?)
     } else if key == server_core::db::settings::WRITABLE_ROOTS {
@@ -2060,6 +2062,115 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
         return Err(format!("`{key}` というキーは知りません。{listing}"));
     };
     Ok(serde_json::json!({ key: json_value }).to_string())
+}
+
+/// `settings set file_view_max_bytes <値>` の値を読む
+/// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-2）。
+///
+/// 受けるのは「`3MB`・`5GB` のような書き方（**2進**で読む。大小文字と空白は問わない）」
+/// 「バイト数」「`default`（既定へ戻す）」。**選択肢に無い値はここで断る**——`motion_quiet` と
+/// 同じく、サーバまで往復すると 400 になり通信の失敗と見分けが付かない（exit 2 の族に収める）。
+/// 選択肢の綴りは `FILE_VIEW_LIMIT_CHOICES` と `limit_label` から組む（直書きしない）。
+fn file_view_limit_value(value: &str) -> Result<serde_json::Value, String> {
+    use protocol::fs::{FILE_VIEW_LIMIT_CHOICES, limit_label};
+    let key = server_core::db::settings::FILE_VIEW_MAX_BYTES;
+    let squeezed: String = value
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if squeezed == "default" {
+        return Ok(serde_json::Value::String("default".to_string()));
+    }
+    let scaled = |digits: &str, unit: u64| digits.parse::<u64>().ok()?.checked_mul(unit);
+    let bytes = if let Some(digits) = squeezed.strip_suffix("gb") {
+        scaled(digits, 1024 * 1024 * 1024)
+    } else if let Some(digits) = squeezed.strip_suffix("mb") {
+        scaled(digits, 1024 * 1024)
+    } else {
+        scaled(&squeezed, 1)
+    };
+    match bytes {
+        Some(bytes) if FILE_VIEW_LIMIT_CHOICES.contains(&bytes) => {
+            Ok(serde_json::Value::Number(bytes.into()))
+        }
+        _ => {
+            let choices = FILE_VIEW_LIMIT_CHOICES
+                .iter()
+                .map(|bytes| format!("{}（{bytes}）", limit_label(*bytes)))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            Err(format!(
+                "`{key}` の値は次のどれかです：{choices}、または default（既定へ戻す）。\
+                 3MB・5GB のような書き方かバイト数で指定します（`{value}` は読めません）"
+            ))
+        }
+    }
+}
+
+/// `settings set file_view_max_bytes` の前に、いま効いている上限を1回読む（設計§8-2）。
+///
+/// **答えに `file_view` が無ければ送らずに断る。** 古いサーバは知らない欄を黙って捨てて
+/// 200 を返すので、確かめずに送ると「変えました」と嘘をつく。
+pub async fn file_view_limit_before(target: &Target) -> Result<u64, ClientError> {
+    let raw = settings_raw(target).await?;
+    let view: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|err| ClientError::BadUrl(format!("答えを読めません: {err}")))?;
+    view["file_view"]["max_bytes"]
+        .as_u64()
+        .ok_or_else(|| ClientError::Refused {
+            status: 200,
+            message: "接続先のダッシュボードは版が古く、ファイル閲覧の上限を持っていません。\
+                      サーバを新しくしてください"
+                .to_string(),
+        })
+}
+
+/// 上限を変えた後に標準エラーへ出す警告の行（設計§8-2。**保存の後**に出す）。
+///
+/// 新しい値は PUT の答え（`after_raw`）の `file_view.max_bytes` から取る——`default` で
+/// 戻したときも、実際に効いた値で判定できる。規則は `server_core::file_view::warnings_for`
+/// （画面と同じ1か所）。答えの欄が読めなければ何も出さない。
+pub fn file_view_warning_lines(before: u64, after_raw: &str) -> Vec<String> {
+    use server_core::file_view::{WARN_FROM_BYTES, Warning, warnings_for};
+    let Ok(view) = serde_json::from_str::<serde_json::Value>(after_raw) else {
+        return Vec::new();
+    };
+    let file_view = &view["file_view"];
+    let Some(after) = file_view["max_bytes"].as_u64() else {
+        return Vec::new();
+    };
+    let via_server = file_view["via_server"].as_bool().unwrap_or(false);
+    let cloud = file_view["cloud"].as_object();
+    warnings_for(after, before, via_server, cloud.is_some())
+        .into_iter()
+        .map(|warning| match warning {
+            Warning::ViaServer => format!(
+                "警告：サーバを介す構成で上限を {} 以上にしました。開いたファイルの転送量が増えます。\
+                 モバイル回線で見るときは通信量に注意してください",
+                protocol::fs::limit_label(WARN_FROM_BYTES)
+            ),
+            Warning::MeteredCloud => {
+                let name = cloud
+                    .and_then(|cloud| cloud.get("name"))
+                    .and_then(|name| name.as_str())
+                    .unwrap_or("クラウド");
+                let source = match cloud
+                    .and_then(|cloud| cloud.get("source"))
+                    .and_then(|source| source.as_str())
+                {
+                    Some("dmi") => "DMI",
+                    Some("config") => "設定ファイル",
+                    Some(other) => other,
+                    None => "判定",
+                };
+                format!(
+                    "警告：このサーバは {name} の上で動いていると判定しています（{source}）。\
+                     従量課金の契約なら、転送量が請求に乗ります"
+                )
+            }
+        })
+        .collect()
 }
 
 /// `settings set`（`PUT /api/settings`）。応答は更新後の設定（解釈せずそのまま返す）。
@@ -2486,6 +2597,97 @@ mod tests {
             assert_eq!(object.len(), 1, "触っていない項目が混ざっている: {body}");
             assert!(object.contains_key(key), "キーが違う: {body}");
         }
+    }
+
+    // --- ファイル閲覧の上限（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§8-2） ---
+
+    fn 上限の本文(value: &str) -> Result<serde_json::Value, String> {
+        let body = settings_update_body("file_view_max_bytes", value)?;
+        let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        let object = value.as_object().expect("オブジェクトであること");
+        assert_eq!(object.len(), 1, "触っていない項目が混ざっている: {body}");
+        Ok(object["file_view_max_bytes"].clone())
+    }
+
+    #[test]
+    fn 上限は2進の書き方とバイト数とdefaultを受ける() {
+        assert_eq!(上限の本文("3MB").unwrap(), 3_145_728u64);
+        assert_eq!(上限の本文("5gb").unwrap(), 5_368_709_120u64);
+        assert_eq!(上限の本文(" 1 GB ").unwrap(), 1_073_741_824u64);
+        assert_eq!(上限の本文("3145728").unwrap(), 3_145_728u64);
+        assert_eq!(上限の本文("default").unwrap(), "default");
+        // 16個は全部、バイト数でも選択肢の名前（"20 GB"）でも通る
+        for bytes in protocol::fs::FILE_VIEW_LIMIT_CHOICES {
+            assert_eq!(上限の本文(&bytes.to_string()).unwrap(), bytes);
+            let label = protocol::fs::limit_label(bytes);
+            assert_eq!(
+                上限の本文(&label).unwrap(),
+                bytes,
+                "選択肢の名前 {label} を読めること"
+            );
+        }
+    }
+
+    #[test]
+    fn 上限は選択肢に無い値を送る前に断る() {
+        for bad in ["2MB", "21GB", "0", "3.5MB", "3KB", "abc", ""] {
+            let err = 上限の本文(bad).expect_err(&format!("`{bad}` は断ること"));
+            assert!(
+                err.contains("`file_view_max_bytes` の値は次のどれか"),
+                "理由が読めない: {err}"
+            );
+            assert!(
+                err.contains("20 GB（21474836480）"),
+                "選択肢の一覧が無い: {err}"
+            );
+        }
+        // 知らないキーの断り文の一覧にも載る
+        let err = settings_update_body("no_such_key", "1").expect_err("知らないキーは断る");
+        assert!(err.contains("file_view_max_bytes"), "一覧に無い: {err}");
+    }
+
+    fn 上限の答え(max_bytes: u64, via_server: bool, cloud: serde_json::Value) -> String {
+        serde_json::json!({
+            "file_view": { "max_bytes": max_bytes, "via_server": via_server, "cloud": cloud }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn 上限の警告は上げるときだけ_サーバからクラウドの順に出る() {
+        const MB: u64 = 1024 * 1024;
+        let none = serde_json::Value::Null;
+        let ec2 = serde_json::json!({ "name": "Amazon EC2", "source": "dmi" });
+        let config = serde_json::json!({ "name": "設定で指定", "source": "config" });
+
+        // ① サーバ・クラウド無し・3 MB → 10 MB で1行
+        let lines = file_view_warning_lines(3 * MB, &上限の答え(10 * MB, true, none.clone()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("サーバを介す"), "{lines:?}");
+        assert!(lines[0].contains("5 MB 以上"), "{lines:?}");
+        // ② サーバ・クラウドあり（DMI）で2行、順はサーバ→クラウド
+        let lines = file_view_warning_lines(3 * MB, &上限の答え(10 * MB, true, ec2));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("サーバを介す"), "{lines:?}");
+        assert!(
+            lines[1].contains("Amazon EC2") && lines[1].contains("（DMI）"),
+            "{lines:?}"
+        );
+        // ③ ローカル・クラウドあり（設定ファイル）でクラウドの1行だけ
+        let lines = file_view_warning_lines(3 * MB, &上限の答え(10 * MB, false, config.clone()));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("（設定ファイル）"), "{lines:?}");
+        // ④ ローカル・クラウド無しは出ない
+        assert!(
+            file_view_warning_lines(3 * MB, &上限の答え(10 * MB, false, none.clone())).is_empty()
+        );
+        // ⑤ 下げるときは出ない
+        assert!(file_view_warning_lines(10 * MB, &上限の答え(5 * MB, true, config)).is_empty());
+        // ⑥ 5 MB 未満へ上げるときは出ない
+        assert!(file_view_warning_lines(MB, &上限の答え(3 * MB, true, none)).is_empty());
+        // ⑦ `file_view` の無い答え（古いサーバ）でも落ちない
+        assert!(file_view_warning_lines(MB, "{}").is_empty());
+        assert!(file_view_warning_lines(MB, "読めない").is_empty());
     }
 
     #[test]

@@ -547,6 +547,98 @@ async fn サーバモードは起動の形とクラウドの指定を設定の�
     .await;
 }
 
+/// サーバモードの実行ファイルで `settings set file_view_max_bytes` を叩くと、当たる警告が
+/// **保存の後で標準エラーに**出る（ファイル閲覧の上限 設計§8-2、テスト計画 フェーズ5
+/// 「警告に当たる値を入れたら、保存の後で標準エラーに警告を出す」）。
+///
+/// **`--yes` を付けずに通ること**が、そのまま「確認を求めない」の確かめになる。
+#[tokio::test]
+async fn サーバモードのcliは上限を上げると警告を標準エラーに出し_下げると出さない() {
+    let (pair, _token) =
+        Pair::start_server_only_with("cli-warn", "metered_cloud = \"yes\"\n").await;
+    let config_path = pair.dir.join("config.toml");
+
+    // 管理者（`setup_admin` が同名のアカウントを管理者にしている）の CLI 用の札
+    let issued = Command::new(testkit::binary_path("agentdashboard"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("pair-token")
+        .arg("--account")
+        .arg(ACCOUNT)
+        .arg("--kind")
+        .arg("cli")
+        .output()
+        .expect("札を発行できること");
+    assert!(
+        issued.status.success(),
+        "発行に失敗しました: {}",
+        String::from_utf8_lossy(&issued.stderr)
+    );
+    let token = String::from_utf8_lossy(&issued.stdout).trim().to_string();
+    assert!(token.starts_with("adp_"), "実際: {token}");
+
+    let server_url = format!("http://{}", pair.addr);
+    let settings_set = |value: &str| {
+        Command::new(testkit::binary_path("agentdashboard"))
+            .arg("--server")
+            .arg(&server_url)
+            .arg("--token")
+            .arg(&token)
+            .arg("settings")
+            .arg("set")
+            .arg("file_view_max_bytes")
+            .arg(value)
+            .output()
+            .expect("CLI を実行できること")
+    };
+    let max_bytes = || async {
+        let (status, body) = pair.get("/api/settings").await.expect("設定を読めること");
+        assert_eq!(status, 200, "{body}");
+        let view: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        view["file_view"]["max_bytes"].as_u64().expect("上限の数")
+    };
+
+    // 上げる：3 MB → 10 MB。サーバ→クラウドの順に1回ずつ
+    let raised = settings_set("10MB");
+    let stderr = String::from_utf8_lossy(&raised.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&raised.stdout).into_owned();
+    assert!(raised.status.success(), "変えられない: {stderr}");
+    assert!(
+        stdout.contains("file_view_max_bytes を変えました"),
+        "標準出力: {stdout}"
+    );
+    let via_server = stderr.find("警告：サーバを介す");
+    let cloud = stderr.find("警告：このサーバは");
+    assert!(
+        via_server.is_some() && cloud.is_some() && via_server < cloud,
+        "サーバ→クラウドの順に警告が出ていない: {stderr}"
+    );
+    assert_eq!(stderr.matches("警告：").count(), 2, "{stderr}");
+    assert!(
+        stderr.contains("（設定ファイル）"),
+        "判定の出どころ: {stderr}"
+    );
+    assert!(
+        !stdout.contains("警告："),
+        "警告は標準出力に混ぜない: {stdout}"
+    );
+    assert_eq!(max_bytes().await, 10 * 1024 * 1024);
+
+    // 下げる：10 MB → 5 MB。警告は出ない
+    let lowered = settings_set("5MB");
+    let stderr = String::from_utf8_lossy(&lowered.stderr).into_owned();
+    assert!(lowered.status.success(), "変えられない: {stderr}");
+    assert_eq!(stderr.matches("警告：").count(), 0, "{stderr}");
+    assert_eq!(max_bytes().await, 5 * 1024 * 1024);
+
+    // 選択肢に無い値は送る前に断る（引数の誤り＝終了コード 2）。サーバの値は動かない
+    let refused = settings_set("2MB");
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert_eq!(refused.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("次のどれか"), "{stderr}");
+    assert_eq!(max_bytes().await, 5 * 1024 * 1024);
+}
+
 /// `<state_dir>/logs/` の全行のうち、`kind` が合うもの。
 fn 行を探す(state_dir: &Path, kind: &str) -> Vec<serde_json::Value> {
     let mut found = Vec::new();

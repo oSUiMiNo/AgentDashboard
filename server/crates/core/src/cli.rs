@@ -715,9 +715,11 @@ enum SettingsCmd {
     Set {
         /// キー（always_bypass_permissions / project_autostart_session /
         /// sync_interval_secs / screen_interval_ms / scrollback_lines /
-        /// motion_quiet / memo_retention_days / memo_max_bytes / lan_password）
+        /// motion_quiet / memo_retention_days / memo_max_bytes / lan_password /
+        /// file_modes / writable_roots / file_view_max_bytes）
         key: String,
-        /// 値（トグルは true・false、間隔は数値、静けさは lively・calm・still）
+        /// 値（トグルは true・false、間隔は数値、静けさは lively・calm・still、
+        /// ファイル閲覧の上限は 3MB・5GB のような書き方かバイト数、既定へ戻すなら default）
         value: String,
         #[command(flatten)]
         out: OutputArgs,
@@ -1789,12 +1791,26 @@ async fn client_settings(
             // 全般の受け皿で、終了コードの写像（§10-3）がそのままここにも当てはまる
             let body =
                 client::settings_update_body(&key, &value).map_err(client::ClientError::BadUrl)?;
+            // ファイル閲覧の上限だけは、送る前にいまの値を読む（警告は「上げるとき」だけなので
+            // 前の値が要る。古いサーバならここで送らずに断る。設計§8-2）
+            let before = if key == server_core::db::settings::FILE_VIEW_MAX_BYTES {
+                Some(client::file_view_limit_before(target).await?)
+            } else {
+                None
+            };
             let raw = client::settings_set(target, body).await?;
             if out.json {
                 println!("{raw}");
             } else {
                 println!("{key} を変えました。いまの設定：");
                 println!("{}", prettify(&raw));
+            }
+            // **確認は挟まず、保存の後で何が起きたかを人の読める形で残す**（`--yes` は求めない）。
+            // `--json` でも標準エラーへ出す——標準出力は答えの JSON だけのまま
+            if let Some(before) = before {
+                for line in client::file_view_warning_lines(before, &raw) {
+                    eprintln!("{line}");
+                }
             }
         }
         SettingsCmd::Export => {
