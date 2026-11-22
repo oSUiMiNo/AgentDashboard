@@ -305,11 +305,49 @@ pub trait SessionHost: Send + Sync + 'static {
     /// ない**——[`SessionHost::write_blob`] を別に足したときと同じ作法である。
     ///
     /// パスは必須。中身の読み取りに「始まり」は無いので、省略できる形にしない。
+    ///
+    /// **一括で読む線（3 MiB）で読む既定の中身つき**にしてある（`ファイル閲覧の上限を
+    /// 設定から変え、大きいものは流し読みする` 設計§4-1）。呼び手と試験は「3 MiB で断る」を
+    /// 見ているので、意味を保ったまま、設定の上限が要る口だけを
+    /// [`SessionHost::read_file_within`] へ移せる。**実装側で上書きしない**——上書きすると
+    /// 道が2本並び、片方だけ直す壊れ方が残る。
     async fn read_file(
         &self,
         request: HostAskRequest,
         path: &str,
+    ) -> Result<FileContent, HostAskError> {
+        self.read_file_within(request, path, protocol::fs::WHOLE_TEXT_BYTES)
+            .await
+    }
+
+    /// ファイル1つの中身を、**渡された上限で**読む（`ファイル閲覧の上限を設定から変え、
+    /// 大きいものは流し読みする` 設計§4-1）。
+    ///
+    /// - 上限は**呼ぶ側（サーバ）が設定から決めて渡す**。読む側（PC）がこれで守る——
+    ///   ブラウザの言い値を通さない
+    /// - 上限を超えたら**中身を読まずに**断る（`HostFailure::TooLarge`）
+    /// - 一括で読む線（`protocol::fs::WHOLE_TEXT_BYTES`）を超えて上限以下なら、先頭の窓だけを
+    ///   返し `truncated: true`。続きは [`SessionHost::read_file_range`] で取る
+    /// - ローカルモードも同じ口を通す（片側だけ速くすると、もう片側だけが壊れる）
+    async fn read_file_within(
+        &self,
+        request: HostAskRequest,
+        path: &str,
+        limit: u64,
     ) -> Result<FileContent, HostAskError>;
+
+    /// 位置を指定して**窓1つ**を読む（同 設計§4-1）。
+    ///
+    /// 窓読みでも上限を越えさせない（超えたら `TooLarge`）。開始と終わりは UTF-8 の文字の
+    /// 境目へ寄せてあるので、返った `end` から次を頼めば継ぎ目に欠けも重なりも出ない。
+    /// 名乗り（`supports_file_range`）の無い PC には投げずに `HostAskError::Unsupported`。
+    async fn read_file_range(
+        &self,
+        request: HostAskRequest,
+        path: &str,
+        range: protocol::fs::FileRange,
+        limit: u64,
+    ) -> Result<protocol::fs::FileChunk, HostAskError>;
 
     /// ファイル1つを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-3）。
     ///

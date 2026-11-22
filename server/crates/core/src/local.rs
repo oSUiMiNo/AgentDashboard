@@ -385,14 +385,35 @@ impl SessionHost for LocalSessionHost {
         blocking_ask(move || session_host_core::hostfs::list_dir_from(start.as_deref())).await
     }
 
-    async fn read_file(
+    /// この機械のファイルを、**渡された上限で**読む（`ファイル閲覧の上限を設定から変え、
+    /// 大きいものは流し読みする` 設計§4-2）。
+    ///
+    /// `read_file`（3 MiB で読む口）は trait の既定の中身に任せ、ここでは上書きしない——
+    /// 残すと道が2本並ぶ。**ローカルモードでも同じ道を通す**（セルフホストでは PC 側が
+    /// 同じ `hostfs::read_file_from_within` を通る）。
+    async fn read_file_within(
         &self,
         request: server_core::session_host::HostAskRequest,
         path: &str,
+        limit: u64,
     ) -> Result<protocol::fs::FileContent, server_core::session_host::HostAskError> {
         reject_target(&request)?;
         let path = path.to_string();
-        blocking_ask(move || session_host_core::hostfs::read_file_from(&path)).await
+        blocking_ask(move || session_host_core::hostfs::read_file_from_within(&path, limit)).await
+    }
+
+    /// この機械のファイルを、位置を指定して**窓1つ**読む（同 設計§4-2）。
+    async fn read_file_range(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        path: &str,
+        range: protocol::fs::FileRange,
+        limit: u64,
+    ) -> Result<protocol::fs::FileChunk, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let path = path.to_string();
+        blocking_ask(move || session_host_core::hostfs::read_file_range_from(&path, range, limit))
+            .await
     }
 
     /// この機械のファイルを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-4）。

@@ -105,6 +105,84 @@ async fn ローカルモードでも境界を通って一覧と中身が取れ�
     assert_eq!(content.bytes, body.len() as u64);
 }
 
+/// 試験で渡す「設定の上限」。選択肢の 5 GB（ローカルの既定）
+const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
+
+/// trait の既定の `read_file` は**いまどおり一括で読む線（3 MiB）で断り**、上限つきの口は
+/// 渡された上限で先頭の窓を返す（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+/// 設計§4-1）。
+///
+/// 既存の呼び手は 3 MiB を超えるファイルを読んでいないので、「既定の `read_file` は 3 MiB で
+/// 断る」を見ている試験がほかに無い。**ローカルの実装が `read_file` を上書きして既定の中身を
+/// 素通りしても**、ここで分かる。
+#[tokio::test]
+async fn ローカルの既定の読みは一括で読む線で断り上限つきなら先頭の窓を返す() {
+    let sandbox = Sandbox::new();
+    let size = protocol::fs::WHOLE_TEXT_BYTES as usize + 1;
+    let path = sandbox.path().join("大きい.log");
+    std::fs::write(&path, "a".repeat(size)).expect("ファイルを作れること");
+    let path_text = path.display().to_string();
+
+    let host = host();
+    let err = host
+        .read_file(ask(), &path_text)
+        .await
+        .expect_err("既定の読みは一括で読む線で断ること");
+    assert!(
+        matches!(
+            err,
+            server_core::session_host::HostAskError::Failed {
+                reason: protocol::a2s::HostFailure::TooLarge,
+                ..
+            }
+        ),
+        "大きすぎるとして断ること：{err:?}"
+    );
+
+    let content = host
+        .read_file_within(ask(), &path_text, FIVE_GIB)
+        .await
+        .expect("上限つきなら読めること");
+    assert!(
+        content.truncated,
+        "一括で読む線を超えたら先頭の窓だけを返すこと"
+    );
+    assert_eq!(content.bytes, size as u64);
+    assert!(content.text.len() as u64 <= protocol::fs::WINDOW_BYTES);
+}
+
+/// ローカルでも**窓読みが境界を通る**（設計§4-2）。
+#[tokio::test]
+async fn ローカルでも窓読みが境界を通る() {
+    let sandbox = Sandbox::new();
+    let size = protocol::fs::WHOLE_TEXT_BYTES as usize + 1;
+    let mut body = "a".repeat(size - 11);
+    body.push_str("0123456789\n");
+    assert_eq!(body.len(), size);
+    let path = sandbox.path().join("大きい.log");
+    std::fs::write(&path, &body).expect("ファイルを作れること");
+
+    let start = protocol::fs::WHOLE_TEXT_BYTES - 10;
+    let chunk = host()
+        .read_file_range(
+            ask(),
+            &path.display().to_string(),
+            protocol::fs::FileRange {
+                offset: start,
+                length: 100,
+                align_line: false,
+            },
+            FIVE_GIB,
+        )
+        .await
+        .expect("窓が読めること");
+    // ASCII なので寄せない。ファイルの終わりで止まる
+    assert_eq!(chunk.start, start);
+    assert_eq!(chunk.end, size as u64);
+    assert_eq!(chunk.bytes, size as u64);
+    assert_eq!(chunk.text, &body[start as usize..]);
+}
+
 #[tokio::test]
 async fn 読めないときは理由が説明として返る() {
     let host = host();

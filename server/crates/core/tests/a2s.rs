@@ -2020,6 +2020,250 @@ async fn 上限いっぱいのテキストが線を往復する() {
     let _ = std::fs::remove_file(&path);
 }
 
+// --- 設定の上限と窓読み（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+// 設計§4。テスト計画フェーズ2）------------------------------------------------------
+
+/// 試験で渡す「設定の上限」。選択肢の 5 GB（ローカルの既定）
+const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
+
+/// 窓読みだけを名乗らない PC の名乗り（`supports_host_fs` は真のまま、
+/// `supports_file_range` だけを欠く）。**全部の欄が無い古い名乗りにすると
+/// `Need::HostFs` で先に 409 になり、窓読みの判定まで届かない**
+fn 窓読みを名乗らない名乗り() -> serde_json::Value {
+    serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.160",
+        "supports_host_fs": true,
+        "supports_log_read": true,
+        "supports_blob_read": true,
+        "supports_file_write": true,
+    })
+}
+
+/// サーバが渡した設定の上限が**線を渡って PC まで届き、PC がそれで断る**。
+///
+/// PC の既定（3 MiB）なら 2 MiB は読めるので、1 MiB で断られたなら上限が線を渡っている。
+#[tokio::test]
+async fn 設定の上限が_PC_まで届きそれで断られる() {
+    let a2s = A2s::start("file-limit").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    let size = 2 * 1024 * 1024usize;
+    let unit = "abcあいう\n";
+    let mut body = String::with_capacity(size + unit.len());
+    while body.len() + unit.len() <= size {
+        body.push_str(unit);
+    }
+    while body.len() < size {
+        body.push('z');
+    }
+    let path = root.join("中くらい.txt");
+    std::fs::write(&path, &body).expect("置けること");
+    let path_text = path.display().to_string();
+
+    let err = a2s
+        .browser
+        .read_file_within(ask(a2s.account_id, Some(target)), &path_text, 1024 * 1024)
+        .await
+        .expect_err("1 MiB の上限で断ること");
+    let server_core::session_host::HostAskError::Failed { reason, detail } = err else {
+        panic!("PC の断りとして返ること：{err:?}");
+    };
+    assert_eq!(reason, protocol::a2s::HostFailure::TooLarge);
+    assert!(
+        detail.contains(&size.to_string()),
+        "実際の大きさの数字が入ること：{detail}"
+    );
+
+    // 同じファイルを大きい上限で読むと、一括で読む線の内側なので全文が届く
+    let content = a2s
+        .browser
+        .read_file_within(ask(a2s.account_id, Some(target)), &path_text, FIVE_GIB)
+        .await
+        .expect("大きい上限なら読めること");
+    assert!(!content.truncated, "一括で読む線の内側では切らないこと");
+    assert_eq!(content.text, body, "1バイトも化けていないこと");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 一括で読む線を超えるファイルが、**先頭の窓＋窓読みの繰り返しで線を往復し**、継ぐと
+/// 元と1バイトも違わない。
+#[tokio::test]
+async fn 窓読みが線を往復し継ぐと元と一致する() {
+    let a2s = A2s::start("file-range").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // `上限いっぱいのテキストが線を往復する` と同じく、JSON で膨らむ字と多バイト字を混ぜる
+    let size = (protocol::fs::WHOLE_TEXT_BYTES + 1024 * 1024) as usize;
+    let unit = "あ\"\\\n行\t";
+    let mut body = String::with_capacity(size + unit.len());
+    while body.len() + unit.len() <= size {
+        body.push_str(unit);
+    }
+    while body.len() < size {
+        body.push('a');
+    }
+    let path = root.join("大きすぎる.txt");
+    std::fs::write(&path, &body).expect("置けること");
+    let path_text = path.display().to_string();
+
+    let head = a2s
+        .browser
+        .read_file_within(ask(a2s.account_id, Some(target)), &path_text, FIVE_GIB)
+        .await
+        .expect("上限の内側なら読めること");
+    assert!(
+        head.truncated,
+        "一括で読む線を超えたら先頭の窓だけを返すこと"
+    );
+    assert_eq!(head.bytes, size as u64);
+    assert!(head.text.len() as u64 <= protocol::fs::WINDOW_BYTES);
+    assert!(
+        body.starts_with(&head.text),
+        "先頭の窓が本文の先頭であること"
+    );
+
+    let mut joined = head.text.clone();
+    let mut end = head.text.len() as u64;
+    let mut slowest = Duration::ZERO;
+    while end < size as u64 {
+        let started = std::time::Instant::now();
+        let chunk = a2s
+            .browser
+            .read_file_range(
+                ask(a2s.account_id, Some(target)),
+                &path_text,
+                protocol::fs::FileRange {
+                    offset: end,
+                    length: protocol::fs::RANGE_MAX_BYTES,
+                    align_line: false,
+                },
+                FIVE_GIB,
+            )
+            .await
+            .expect("窓が線を往復すること（時間切れにならないこと）");
+        slowest = slowest.max(started.elapsed());
+        assert_eq!(chunk.start, end, "前の窓の終わりから続くこと");
+        assert!(chunk.end > chunk.start, "進むこと");
+        assert_eq!(chunk.bytes, size as u64);
+        joined.push_str(&chunk.text);
+        end = chunk.end;
+    }
+    // 全文を比べる。**長さだけ見ると、継ぎ目が欠けても重なっても通ることがある**
+    assert_eq!(joined, body, "継ぐと1バイトも違わないこと");
+    eprintln!("窓1つの往復で最も遅かったもの：{slowest:?}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 窓読みを名乗らない PC へは**窓読みを投げずに 409 で返し、待ち続けない**（設計§4-3）。
+///
+/// 本物の古い PC は知らない種別を黙って無視するので、投げると答えが永遠に返らない。
+/// 試験の PC は実物の新しい版なので、投げてしまえば答えが返って `Ok` になる——
+/// どちらの壊れ方でも、時間切れで包んだこの試験は赤になる。
+#[tokio::test]
+async fn 窓読みを名乗らない_PC_へは窓読みを投げずに断る() {
+    let a2s = A2s::start("range-old").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    pairing::save_capabilities(a2s.hub.db(), target, 窓読みを名乗らない名乗り())
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(10),
+        a2s.browser.read_file_range(
+            ask(a2s.account_id, Some(target)),
+            &root.join("計画.md").display().to_string(),
+            protocol::fs::FileRange {
+                offset: 0,
+                length: protocol::fs::WINDOW_BYTES,
+                align_line: false,
+            },
+            FIVE_GIB,
+        ),
+    )
+    .await
+    .expect("待ち続けないこと（固まらずに答えが出ること）");
+    let err = answer.expect_err("名乗らない PC には投げずに断ること");
+    assert_eq!(err, server_core::session_host::HostAskError::Unsupported);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+    // 接続は無事
+    assert!(!a2s.hub.online_of(a2s.account_id).await.is_empty());
+}
+
+/// 窓読みを名乗らない PC で一括で読む線を超えるファイルを開くと、**501 と「PC 側が古い」の文**
+/// になる（設計§4-3）。「設定から変えられる」とは言わない——その PC では上げても開けない。
+///
+/// 試験の PC は実物の新しい版。サーバが上限を `WHOLE_TEXT_BYTES` に切って渡すので PC が
+/// `TooLarge` を返し、言い換えの道を通る。切って渡していないと PC は先頭の窓を返して
+/// `Ok` になり、この試験が落ちる——それ自体が設計§4-3 の守り。
+#[tokio::test]
+async fn 窓読みを名乗らない_PC_で大きいファイルを開くと古い版だと言う() {
+    let a2s = A2s::start("large-old").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    pairing::save_capabilities(a2s.hub.db(), target, 窓読みを名乗らない名乗り())
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let path = root.join("大きい.log");
+    std::fs::write(
+        &path,
+        "a".repeat(protocol::fs::WHOLE_TEXT_BYTES as usize + 1),
+    )
+    .expect("置けること");
+
+    let err = a2s
+        .browser
+        .read_file_within(
+            ask(a2s.account_id, Some(target)),
+            &path.display().to_string(),
+            FIVE_GIB,
+        )
+        .await
+        .expect_err("古い PC では開けないこと");
+    let server_core::session_host::HostAskError::Failed { reason, detail } = err else {
+        panic!("PC の断りとして返ること：{err:?}");
+    };
+    assert_eq!(reason, protocol::a2s::HostFailure::Unavailable);
+    assert!(
+        detail.contains("版が古い"),
+        "PC 側が古いと言うこと：{detail}"
+    );
+    assert!(
+        detail.contains(&protocol::fs::human_bytes(protocol::fs::WHOLE_TEXT_BYTES)),
+        "一括で読む線の大きさを言うこと：{detail}"
+    );
+    assert!(
+        !detail.contains("設定"),
+        "設定から変えられるとは言わないこと：{detail}"
+    );
+
+    // 同じ PC・同じ上限でも、一括で読む線の内側のファイルは今までどおり読める
+    let content = a2s
+        .browser
+        .read_file_within(
+            ask(a2s.account_id, Some(target)),
+            &root.join("計画.md").display().to_string(),
+            FIVE_GIB,
+        )
+        .await
+        .expect("小さいファイルは今までどおり読めること");
+    assert!(content.text.contains("- [x] 済み"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
     // 言い分けると、IDを総当たりして他人の PC の存在を調べられる（設計§18）

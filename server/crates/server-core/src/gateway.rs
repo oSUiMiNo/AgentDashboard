@@ -1530,6 +1530,19 @@ fn reply_kind(reply: &HostReply) -> &'static str {
     }
 }
 
+/// 窓読みを名乗らない PC で、一括で読む線を超えるファイルを開いたときの文
+/// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§4-3）。
+///
+/// **「設定から変えられる」と言わない。** この PC では上限を上げても開けないので、
+/// そう言うと嘘になる。直す道は PC 側の更新だけである。`human_bytes` が実行時の関数
+/// なので、定数ではなく関数で組む。
+fn old_host_large_file() -> String {
+    format!(
+        "この PC のセッションホストは版が古いので、{} より大きいファイルは開けません。PC 側のセッションホストを新しくしてください",
+        protocol::fs::human_bytes(protocol::fs::WHOLE_TEXT_BYTES)
+    )
+}
+
 /// 頼んだものと違う答えが返ってきた。**黙って空を返さない。**
 ///
 /// 実装の食い違いなので利用者には直せないが、**何が返ったか**は残す——
@@ -2017,23 +2030,76 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         }
     }
 
-    async fn read_file(
+    async fn read_file_within(
         &self,
         request: crate::session_host::HostAskRequest,
         path: &str,
+        limit: u64,
     ) -> Result<protocol::fs::FileContent, crate::session_host::HostAskError> {
+        use crate::session_host::HostAskError;
+        let whole = protocol::fs::WHOLE_TEXT_BYTES;
+        // **窓読みを名乗らない PC には、一括で読む線より大きい上限を渡さない**
+        // （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§4-3）。
+        // 渡すと「先頭の窓だけ」が返り、画面は続きを頼めずに止まる。切って渡せば、
+        // その PC では 3 MiB を超えたものが必ず断られ、下の言い換えの道に揃う
+        let ranged = match request.target {
+            Some(target) => {
+                self.supports(Need::FileRange, request.account_id, target)
+                    .await
+            }
+            // 宛先が無ければ `ask` が「知らない」で断る。ここでは判断しない
+            None => false,
+        };
+        let sent = if ranged { limit } else { limit.min(whole) };
         let path = path.to_string();
         match self
             .ask(request, Need::HostFs, move |request_id| {
                 ServerToAgent::ReadFile {
                     request_id,
                     path,
-                    max_bytes: None,
+                    max_bytes: Some(sent),
                 }
             })
             .await?
         {
             HostReply::File(content) => Ok(content),
+            // 古い PC が 3 MiB で断った。上限を上げても開けないので、**PC 側が古い**と言う
+            // （「設定から変えられる」と言うと、変えても開けないので嘘になる）
+            HostReply::Failed {
+                reason: protocol::a2s::HostFailure::TooLarge,
+                ..
+            } if !ranged && limit > whole => Err(HostAskError::Failed {
+                reason: protocol::a2s::HostFailure::Unavailable,
+                detail: old_host_large_file(),
+            }),
+            HostReply::Failed { reason, detail } => Err(HostAskError::Failed { reason, detail }),
+            other => Err(wrong_answer(other)),
+        }
+    }
+
+    async fn read_file_range(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        path: &str,
+        range: protocol::fs::FileRange,
+        limit: u64,
+    ) -> Result<protocol::fs::FileChunk, crate::session_host::HostAskError> {
+        let path = path.to_string();
+        match self
+            // **`Need::HostFs` ではない。** 名乗らない PC へ投げると、黙って答えが返らない
+            .ask(request, Need::FileRange, move |request_id| {
+                ServerToAgent::ReadFileRange {
+                    request_id,
+                    path,
+                    offset: range.offset,
+                    length: range.length,
+                    align_line: range.align_line,
+                    max_bytes: Some(limit),
+                }
+            })
+            .await?
+        {
+            HostReply::FileRange(chunk) => Ok(chunk),
             HostReply::Failed { reason, detail } => {
                 Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
@@ -2193,6 +2259,12 @@ enum Need {
     /// **`Blob`／`BlobWrite` と別にしてある**——添付を置く道は既に配ったホストが
     /// 持っているが、任意のファイルを書き戻す道は持っていない
     FileWrite,
+    /// 位置を指定して**窓で読める**か（`ファイル閲覧の上限を設定から変え、大きいものは
+    /// 流し読みする` 設計§4-3）。
+    ///
+    /// **`HostFs` に相乗りさせない**——古い PC でも 3 MiB までのテキストは読めるので、
+    /// まとめると「テキストも読めません」と嘘をつく
+    FileRange,
     /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-3）。
     ///
     /// **これだけは答えを待たない頼み**（`request_id` を持たない）にも関わらず名乗りを
@@ -2373,6 +2445,7 @@ impl RemoteSessionHost {
                 Need::Resources => capabilities.supports_resources,
                 Need::AttachmentSweep => capabilities.supports_attachment_sweep,
                 Need::FileWrite => capabilities.supports_file_write,
+                Need::FileRange => capabilities.supports_file_range,
             })
     }
 }
