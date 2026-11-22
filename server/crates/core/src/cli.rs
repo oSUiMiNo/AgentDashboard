@@ -676,6 +676,25 @@ enum HostCmd {
         #[command(subcommand)]
         cmd: CompactCmd,
     },
+    /// エクスプローラか VSCode で開く（**親PC の上からだけ**。サイドバーのボタンと同じ口）
+    Open {
+        /// どの PC か。**この機械（`local`）にだけ効く**
+        host: String,
+        /// 開くパス。相対パスは手元の作業フォルダからの絶対パスに直して送る
+        path: String,
+        /// どの道具で開くか
+        #[arg(long, value_enum)]
+        app: client::open_in::OpenApp,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// エクスプローラ・VSCode で開けるか・いま VSCode で開いているもの
+    Opened {
+        /// どの PC か。この機械なら `local`
+        host: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 /// `host compact` の中身（縮小設計§9）。
@@ -1684,6 +1703,25 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
                 );
             }
         },
+        HostCmd::Open {
+            host,
+            path,
+            app,
+            out,
+        } => {
+            let cwd = std::env::current_dir().map_err(|err| {
+                client::ClientError::Config(format!("作業フォルダを読めません: {err}"))
+            })?;
+            let (result, raw) =
+                client::open_in::open(target, &host, &path, app.into(), &cwd).await?;
+            let human = client::open_in::render_open_result(&result);
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        HostCmd::Opened { host, out } => {
+            let (view, raw) = client::open_in::status(target, &host).await?;
+            let human = client::open_in::render_opened(&view, now_ms());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
     }
     Ok(())
 }
@@ -2150,5 +2188,58 @@ mod tests {
             ],
             "session 群の口が増減している。生バイトの直送を作っていないか、台帳（フェーズ5）と照合すること"
         );
+    }
+
+    #[test]
+    fn ホスト群に開く口と様子の口がある() {
+        // `サイドバーにエクスプローラで開くボタンが欲しい` 設計§6-1。台帳（cli_surface.toml）の
+        // `host open`・`host opened` と綴りが一致すること
+        use clap::CommandFactory as _;
+        let command = Cli::command();
+        let host = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "host")
+            .expect("host 群があること");
+        let names: Vec<&str> = host
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect();
+        assert!(names.contains(&"open"), "host open が無い: {names:?}");
+        assert!(names.contains(&"opened"), "host opened が無い: {names:?}");
+
+        for app in ["explorer", "vscode"] {
+            assert!(
+                Cli::try_parse_from([
+                    "agentdashboard",
+                    "host",
+                    "open",
+                    "local",
+                    "/x",
+                    "--app",
+                    app
+                ])
+                .is_ok(),
+                "--app {app} が通ること"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "agentdashboard",
+                "host",
+                "open",
+                "local",
+                "/x",
+                "--app",
+                "nope"
+            ])
+            .is_err(),
+            "知らない道具は断る"
+        );
+        assert!(
+            Cli::try_parse_from(["agentdashboard", "host", "open", "local", "/x"]).is_err(),
+            "--app は省けない"
+        );
+        // 比較対象（これも落ちたら試験の作りが壊れている）
+        assert!(Cli::try_parse_from(["agentdashboard", "host", "opened", "local"]).is_ok());
     }
 }

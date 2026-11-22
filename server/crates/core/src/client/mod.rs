@@ -11,6 +11,7 @@
 
 pub mod http;
 pub mod keys;
+pub mod open_in;
 pub mod output;
 pub mod render;
 pub mod wait;

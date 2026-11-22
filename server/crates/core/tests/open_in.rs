@@ -582,3 +582,165 @@ async fn 鍵の内側にある() {
     let (status, body) = get(here, OPEN, &here.to_string()).await;
     assert_eq!(status, 200, "{body}");
 }
+
+// ---------------------------------------------------------------------------
+// CLI（TP4）。CLI の関数を直に呼ぶ（実行ファイルは起こさない）
+
+fn target_of(addr: SocketAddr) -> agentdashboard_core::client::Target {
+    agentdashboard_core::client::Target::from_url(&format!("http://{addr}")).unwrap()
+}
+
+#[tokio::test]
+async fn CLIで様子を読むと人の読む形と生のJSONが出る() {
+    use agentdashboard_core::client::open_in;
+    let scratch = Scratch::new();
+    let fake = Fake::new();
+    let addr = start(state_with(fake.clone()), None, false).await;
+    let target = target_of(addr);
+
+    open_in::open(
+        &target,
+        "local",
+        &scratch.dir(),
+        App::Vscode,
+        std::path::Path::new("/"),
+    )
+    .await
+    .expect("VSCode で開けること");
+    let (view, raw) = open_in::status(&target, "local")
+        .await
+        .expect("様子を読めること");
+    let text = open_in::render_opened(&view, i64::MAX / 2);
+    assert!(text.contains("この端末：親PC（ボタンが出ます）"), "{text}");
+    assert!(text.contains("エクスプローラ：使えます"), "{text}");
+    assert!(text.contains("VSCode：使えます"), "{text}");
+    assert!(
+        text.contains(&format!("- {}（フォルダ）", scratch.dir())),
+        "{text}"
+    );
+    assert!(json(&raw).get("same_machine").is_some(), "{raw}");
+    fake.close_all();
+}
+
+#[tokio::test]
+async fn CLIで開くと3つの結果の文が出る() {
+    use agentdashboard_core::client::open_in;
+    let scratch = Scratch::new();
+    let fake = Fake::new();
+    let addr = start(state_with(fake.clone()), None, false).await;
+    let target = target_of(addr);
+    let root = std::path::Path::new("/");
+
+    // 200 で返ること自体が、CLI の POST に Content-Type: application/json が付いている証拠
+    // （付いていなければ 415）
+    let (result, _) = open_in::open(&target, "local", &scratch.dir(), App::Explorer, root)
+        .await
+        .expect("エクスプローラで開けること");
+    assert_eq!(
+        open_in::render_open_result(&result),
+        "エクスプローラで開きました"
+    );
+    let (result, _) = open_in::open(&target, "local", &scratch.dir(), App::Vscode, root)
+        .await
+        .expect("VSCode で開けること");
+    assert_eq!(
+        open_in::render_open_result(&result),
+        "VSCode で開きました。閉じるまで印が付きます"
+    );
+    let (result, _) = open_in::open(&target, "local", &scratch.dir(), App::Vscode, root)
+        .await
+        .expect("二度目も通ること");
+    assert_eq!(
+        open_in::render_open_result(&result),
+        "もう VSCode で開いていたので、窓を前に出しました"
+    );
+    fake.close_all();
+}
+
+#[tokio::test]
+async fn CLIの相対パスは作業フォルダからの絶対パスで届く() {
+    use agentdashboard_core::client::open_in;
+    let scratch = Scratch::new();
+    let fake = Fake::new();
+    let addr = start(state_with(fake.clone()), None, false).await;
+
+    open_in::open(&target_of(addr), "local", "dir", App::Explorer, &scratch.0)
+        .await
+        .expect("相対パスでも開けること");
+    assert_eq!(
+        fake.calls(),
+        vec![(App::Explorer, scratch.path("dir"), false)],
+        "作業フォルダからの絶対パスで届くこと"
+    );
+}
+
+#[tokio::test]
+async fn CLIの断りは本文がそのまま出て終了コードが0でない() {
+    use agentdashboard_core::client::open_in;
+    let scratch = Scratch::new();
+    let root = std::path::Path::new("/");
+
+    // 404
+    let addr = start(state_with(Fake::new()), None, false).await;
+    let missing = scratch.path("無い").to_string_lossy().into_owned();
+    let err = open_in::open(&target_of(addr), "local", &missing, App::Explorer, root)
+        .await
+        .expect_err("無いパスは断られること");
+    assert!(err.to_string().contains("そのパスは在りません"), "{err}");
+    assert_ne!(err.exit_code(), 0);
+
+    // 503：本文の理由をそのまま（DB の断の文に置き換えない）
+    let addr = start(state_with(Arc::new(BlockedLauncher)), None, false).await;
+    let err = open_in::open(&target_of(addr), "local", &scratch.dir(), App::Vscode, root)
+        .await
+        .expect_err("塞いだ起こし口は断られること");
+    assert!(
+        err.to_string().contains("AGENTDASHBOARD_OPEN_IN=off"),
+        "理由がそのまま出ること: {err}"
+    );
+    assert!(
+        !err.to_string().contains("記録"),
+        "DB の断の文ではないこと: {err}"
+    );
+    assert_ne!(err.exit_code(), 0);
+
+    // 409
+    let fake = Fake::new();
+    let addr = start(state_with(fake.clone()), None, false).await;
+    for n in 0..OPENED_CAP {
+        let dir = scratch.path(&format!("d{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        open_in::open(
+            &target_of(addr),
+            "local",
+            &dir.to_string_lossy(),
+            App::Vscode,
+            root,
+        )
+        .await
+        .expect("上限までは開けること");
+    }
+    let err = open_in::open(&target_of(addr), "local", &scratch.dir(), App::Vscode, root)
+        .await
+        .expect_err("上限を超えると断られること");
+    assert!(err.to_string().contains("8 件"), "{err}");
+    assert_ne!(err.exit_code(), 0);
+    fake.close_all();
+
+    // 403：LAN の端末から
+    let addr = start(state_with(Fake::new()), Some(lan_peer()), false).await;
+    let err = open_in::open(
+        &target_of(addr),
+        "local",
+        &scratch.dir(),
+        App::Explorer,
+        root,
+    )
+    .await
+    .expect_err("親PC でない接続は断られること");
+    assert!(
+        err.to_string().contains("親PC の上で開かれていない"),
+        "{err}"
+    );
+    assert_ne!(err.exit_code(), 0);
+}
