@@ -394,12 +394,18 @@ pub fn routes(state: VersionsState) -> Router {
 ///
 /// あちらは**誰でも来られる**。合言葉を通ったことすら言えない相手に開ける操作ではない。
 fn may_operate(auth: &AuthContext, identity: &Identity) -> bool {
-    may_operate_in(auth.mode, identity)
+    may_operate_server_wide(auth.mode, identity)
 }
 
-/// 判定そのもの。**材料だけを受け取る純関数**にしてあるのは、線を引き直したときに
+/// 判定そのもの。**サーバ全体に効く操作**（版の切り替え・ファイル閲覧の上限）を
+/// してよいかを決める。**材料だけを受け取る純関数**にしてあるのは、線を引き直したときに
 /// 3通りとも単体で固められるようにするため。
-fn may_operate_in(mode: AuthMode, identity: &Identity) -> bool {
+///
+/// ファイル閲覧の上限（`settings_api`）もこの線を使う。転送の費用を払うのはサーバの
+/// 持ち主なので、版と同じく「その機械全体に効く操作」として扱う（イシュー
+/// `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§6-2。
+/// 【エージェントの仮置き（利用者未承認）】）。
+pub(crate) fn may_operate_server_wide(mode: AuthMode, identity: &Identity) -> bool {
     match mode {
         AuthMode::Account => identity.is_admin,
         // ここへ来た時点で、手元か合言葉のどちらかを通っている（`auth::identify`）
@@ -797,16 +803,31 @@ mod tests {
     #[test]
     fn 版を押せる相手はモードで決まる() {
         // 複数人で使う構成では管理者だけ。**ここは変えていない**
-        assert!(may_operate_in(AuthMode::Account, &相手(true, false)));
-        assert!(!may_operate_in(AuthMode::Account, &相手(false, true)));
+        assert!(may_operate_server_wide(
+            AuthMode::Account,
+            &相手(true, false)
+        ));
+        assert!(!may_operate_server_wide(
+            AuthMode::Account,
+            &相手(false, true)
+        ));
 
         // 合言葉の構成では、通っていれば押せる。**手元かどうかは問わない**——
         // WSL でサーバを動かし Windows のブラウザで見る構成は、手元を満たせない
-        assert!(may_operate_in(AuthMode::LanPassword, &相手(false, false)));
-        assert!(may_operate_in(AuthMode::LanPassword, &相手(false, true)));
+        assert!(may_operate_server_wide(
+            AuthMode::LanPassword,
+            &相手(false, false)
+        ));
+        assert!(may_operate_server_wide(
+            AuthMode::LanPassword,
+            &相手(false, true)
+        ));
 
         // 合言葉が無い構成は**誰でも来られる**ので、手元に限る
-        assert!(may_operate_in(AuthMode::Open, &相手(false, true)));
-        assert!(!may_operate_in(AuthMode::Open, &相手(false, false)));
+        assert!(may_operate_server_wide(AuthMode::Open, &相手(false, true)));
+        assert!(!may_operate_server_wide(
+            AuthMode::Open,
+            &相手(false, false)
+        ));
     }
 }
