@@ -16,6 +16,7 @@
 //! | **過去のセッションの一覧** | `GET /api/sessions/past` に他人のぶんが混ざらない |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
 //! | 別の PC のログを引く口 | 他人の PC を宛先に `GET /api/hosts/{id}/logs` する（ログ設計§13-1） |
+//! | ファイルの窓読み | 他人の PC を宛先に `GET /api/hosts/{id}/file?as=range` する（ファイル閲覧の上限 設計§12-2） |
 //! | ブラウザのログの受け口 | 他人の card_id を名乗って `POST /api/client-logs` する（ログ設計§12-5） |
 //! | CLI の札（CLI設計§5-2・§5-3） | `cli` の札で REST と `/ws` を通し、見えるのは自分のカードだけ／他人のカードは名指しでも知らないカードと同じ言葉／`agent` の札・失効した札・用途違いの札は通らない／**札が通らないとき Cookie へ落ちない** |
 //!
@@ -1566,6 +1567,122 @@ async fn 他人の_PC_のファイルは生でも引けない() {
             .expect("HTTPスレッドが落ちないこと")
             .expect("応答を読めること");
         assert_eq!(own.status, 200, "[{}] {}", backend.name, own.body);
+
+        backend.finish().await;
+    }
+}
+
+/// **窓読み（`as=range`）でも、他人の PC のファイルは引けない**（`ファイル閲覧の上限を設定から
+/// 変え、大きいものは流し読みする` 設計§12-2）。
+///
+/// 肯定側では、**サーバが設定から決めた上限を PC へ運んでいる**ことも見る（サーバモードの
+/// 既定＝3 MiB。`AppState::new` の既定）。ブラウザは上限を1バイトも決めない。
+#[tokio::test]
+async fn 他人の_PC_のファイルは窓読みでも引けない() {
+    for backend in common::backends("tenancy-range").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser
+            .get(&format!(
+                "/api/hosts/{}/file?path=%2Ftmp%2Fa.txt&as=range&offset=0",
+                their_agent_id.0
+            ))
+            .await;
+
+        // **他人の PC と知らない PC を言い分けない**（他の口と同じ言葉）
+        assert_eq!(status, 404, "[{}] {body}", backend.name);
+        assert!(
+            body.contains("繋がっていません"),
+            "[{}] 存在が分かる断り方になっている: {body}",
+            backend.name
+        );
+
+        let (unknown_status, unknown_body) = browser
+            .get(&format!(
+                "/api/hosts/{}/file?path=%2Ftmp%2Fa.txt&as=range&offset=0",
+                uuid::Uuid::new_v4()
+            ))
+            .await;
+        assert_eq!(unknown_status, status, "[{}]", backend.name);
+        assert_eq!(unknown_body, body, "[{}]", backend.name);
+
+        // **肯定側の裏取り。** 全部断っているだけの実装でも上は通ってしまう
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+        let (addr, cookie) = (browser.addr, browser.cookie.clone());
+        let path = format!(
+            "/api/hosts/{}/file?path=%2Ftmp%2Fa.txt&as=range&offset=0",
+            my_agent_id.0
+        );
+        let asking = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, Some(&cookie))
+        });
+
+        let message = mine_agent
+            .wait_for("自分の PC へ届く窓読みの問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::ReadFileRange { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ReadFileRange {
+            request_id,
+            offset,
+            length,
+            align_line,
+            max_bytes,
+            ..
+        } = message
+        else {
+            panic!("[{}] 窓読みの問いであること", backend.name);
+        };
+        assert_eq!(
+            max_bytes,
+            Some(3 * 1024 * 1024),
+            "[{}] サーバが決めた上限（サーバモードの既定 3 MiB）を PC へ運ぶこと",
+            backend.name
+        );
+        assert_eq!(offset, 0, "[{}]", backend.name);
+        assert_eq!(length, protocol::fs::WINDOW_BYTES, "[{}]", backend.name);
+        assert!(!align_line, "[{}]", backend.name);
+
+        mine_agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::FileRange(protocol::fs::FileChunk {
+                    path: "/tmp/a.txt".to_string(),
+                    start: 0,
+                    end: 3,
+                    bytes: 3,
+                    text: "abc".to_string(),
+                    stamp: "s".to_string(),
+                    at_line_start: true,
+                }),
+            })
+            .await;
+        let own = asking
+            .await
+            .expect("HTTPスレッドが落ちないこと")
+            .expect("応答を読めること");
+        assert_eq!(own.status, 200, "[{}] {}", backend.name, own.body);
+        assert!(
+            own.body.contains("\"abc\""),
+            "[{}] {}",
+            backend.name,
+            own.body
+        );
 
         backend.finish().await;
     }
