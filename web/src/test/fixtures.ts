@@ -12,7 +12,7 @@
  */
 
 import type { ModelAliasSeen, ModelCatalogEntry } from '@/lib/models'
-import type { AgentInfo, Settings } from '@/stores/settings'
+import type { AgentInfo, FileViewSettings, Settings } from '@/stores/settings'
 
 /** ローカルモードの設定（実機と同じ形）。 */
 export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
@@ -36,6 +36,41 @@ export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
     // **既定は空。** 行を持った状態を既定にすると、「設定が無いときの見せ方」を
     // 確かめられなくなる（要件③の「設定無しの拡張子はエディタ」がそれ）
     file_modes: {},
+    file_view: fileViewFixture(),
+    ...overrides,
+  }
+}
+
+const MIB = 1024 * 1024
+const GIB = 1024 * MIB
+
+/**
+ * ファイル閲覧の上限の一式（設計§6-2）。既定は**ローカルの姿**（実機と同じ形）。
+ *
+ * 選択肢の名前はサーバの `limit_label` が作るものと同じ綴り。サーバモード・クラウド・
+ * 管理者でない人を見たいテストだけが上書きする。
+ */
+export function fileViewFixture(
+  overrides: Partial<FileViewSettings> = {},
+): FileViewSettings {
+  const mib = [1, 3, 5, 10, 15, 20, 30, 50, 100, 300, 500]
+  const gib = [1, 3, 5, 10, 20]
+  return {
+    max_bytes: 5 * GIB,
+    configured: false,
+    default_bytes: 5 * GIB,
+    choices: [
+      ...mib.map((n) => ({ bytes: n * MIB, label: `${n} MB` })),
+      ...gib.map((n) => ({ bytes: n * GIB, label: `${n} GB` })),
+    ],
+    via_server: false,
+    cloud: null,
+    warn_from_bytes: null,
+    editable: true,
+    whole_text_bytes: 3 * MIB,
+    window_bytes: 256 * 1024,
+    preview_max_bytes: 32 * MIB,
+    image_max_bytes: 8 * MIB,
     ...overrides,
   }
 }

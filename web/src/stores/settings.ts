@@ -159,6 +159,16 @@ export interface Settings {
    */
   file_modes: Record<string, 'viewer' | 'editor'>
   /**
+   * ファイル閲覧の上限の一式（ファイル閲覧の上限を設定から変え、大きいものは流し読みする
+   * 設計§6-2・§9-3）。
+   *
+   * **画面は定数の写しを持たない。** 選択肢・既定・一括で読む線・窓・プレビューの天井・
+   * 画像の上限は全部ここから受け取る（設計§1・§6-2）——写しを持つと、Rust と TS の
+   * 2か所で値が食い違いうる。**古いサーバは返さないので、`欠けを埋める` が `FALLBACK`
+   * で埋める。**
+   */
+  file_view: FileViewSettings
+  /**
    * **この機械**の使用上限（status設計）。まだ1本も届いていなければ無い。
    *
    * # `agents[].rate_limits` とは出し分けで、同時には出ない
@@ -183,6 +193,46 @@ export interface MemoLimits {
   retention_days: number
   /** 画像を含めた合計の上限。既定は 1 GiB */
   max_bytes: number
+}
+
+/** ファイル閲覧の上限の選択肢1つ（設計§6-2）。名前はサーバが作る（画面は定数の写しを持たない） */
+export interface FileViewChoice {
+  bytes: number
+  label: string
+}
+
+/** クラウドの判定（設計§7）。出どころは DMI か設定ファイルの指定 */
+export interface FileViewCloud {
+  name: string
+  source: 'dmi' | 'config'
+}
+
+/** ファイル閲覧の上限の一式（設計§6-2・§9-3）。全部サーバから受け取る */
+export interface FileViewSettings {
+  /** いま効いている上限 */
+  max_bytes: number
+  /** 値を入れてあるか（false＝起動の形の既定のまま） */
+  configured: boolean
+  /** 起動の形の既定（ローカル 5 GiB ／ サーバ 3 MiB） */
+  default_bytes: number
+  /** 16個の選択肢。**空なら、この版のサーバは上限を変えられない** */
+  choices: FileViewChoice[]
+  /** サーバモードか */
+  via_server: boolean
+  /** クラウドの判定。クラウドでなければ null */
+  cloud: FileViewCloud | null
+  /** 警告を出し始める値。サーバモードかクラウドのときだけ数、どちらでもなければ null */
+  warn_from_bytes: number | null
+  /** この人が変えてよいか。**画面は出し分けにだけ使い、弾くのはサーバ** */
+  editable: boolean
+  /** 一括で読む線（これを超えると先頭の窓だけを運ぶ） */
+  whole_text_bytes: number
+  /** 窓の大きさ（窓で読む面が頼む長さ） */
+  window_bytes: number
+  /** プレビューの天井（HTML・SVG を描いた形で見せてよい大きさ） */
+  preview_max_bytes: number
+  /** 画像の上限（この設定では変わらない） */
+  image_max_bytes: number
 }
 
 /** 触った項目だけを送る（他のタブの変更を巻き戻さないため）。 */
@@ -222,6 +272,12 @@ export type SettingsPatch = Partial<{
    * **「設定したのに効かない」だけに見える。**
    */
   file_modes: Record<string, 'viewer' | 'editor'>
+  /**
+   * ファイル閲覧の上限（設計§6-3）。選択肢のどれか。`'default'` は起動の形の既定へ戻す。
+   *
+   * **`null` で戻す形にしない**——触っていない（送らない）のと区別できない。
+   */
+  file_view_max_bytes: number | 'default'
 }>
 
 interface SettingsState {
@@ -293,6 +349,51 @@ const FALLBACK: Settings = {
   // **読めるまでは空。** 空でも困らない——載っていない拡張子は種別から導くので、
   // **既定の見せ方はそのまま出る**（`writable_roots` と違って、倒し方で危なくならない）
   file_modes: {},
+  // **古いサーバでも画面が壊れない値**（設計§9-3）。選択肢を空にするのは、選べない版で
+  // 選べる顔をしないため（カードは「この版のサーバは上限を変えられません」だけを出す）。
+  // 上限はいまの固定値（3 MiB）と同じにして、嘘を言わない
+  file_view: {
+    max_bytes: 3 * 1024 * 1024,
+    configured: false,
+    default_bytes: 3 * 1024 * 1024,
+    choices: [],
+    via_server: false,
+    cloud: null,
+    warn_from_bytes: null,
+    editable: false,
+    whole_text_bytes: 3 * 1024 * 1024,
+    window_bytes: 256 * 1024,
+    preview_max_bytes: 3 * 1024 * 1024,
+    image_max_bytes: 8 * 1024 * 1024,
+  },
+}
+
+/**
+ * 古いサーバの答えで欠けた欄を、暫定値で埋める。
+ *
+ * **読み込み（`load`）と保存の応答（`update`）の両方がここを通る。** 保存の応答も
+ * `GET` と同じ形の全部入りなので、旧版のサーバ（`version select` で巻き戻した場合など）
+ * で別の項目を保存すると、**応答に無い欄が `undefined` のまま入り、それを読む面が
+ * 丸ごと落ちる**——ファイル閲覧の上限を必須の欄にした瞬間に生まれる落ち方なので、
+ * 埋める場所を1か所にした（設計に無い。ファイル閲覧の上限 フェーズ6）。
+ */
+function fillMissing(settings: Settings): Settings {
+  // 古いサーバはこれらのキーを返さない。undefined のまま持つと画面が落ちる
+  settings.model_tables ??= {}
+  settings.agents ??= []
+  settings.intervals ??= FALLBACK.intervals
+  settings.lan_password ??= FALLBACK.lan_password
+  // **メモの保持も5つ目として埋める**（レビュー対応5）。`version select` は実在
+  // する道なので、**旧版へ巻き戻すとメモの面が丸ごと落ちる**
+  settings.memo_limits ??= FALLBACK.memo_limits
+  // **旧版のサーバはこのキーを知らない。** undefined のまま持つと、
+  // 保存ボタンの判定が例外で落ちる
+  settings.writable_roots ??= FALLBACK.writable_roots
+  // 見せ方の対応も同じ形に落ちる（旧版は返さない）
+  settings.file_modes ??= FALLBACK.file_modes
+  // **ファイル閲覧の上限も旧版は返さない。** 無いまま持つと、設定のカードが落ちる
+  settings.file_view ??= FALLBACK.file_view
+  return settings
 }
 
 /** ローカルモードのモデル表のキー（設計§13-4）。 */
@@ -346,18 +447,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         set({ loading: false })
         return
       }
-      const settings = (await response.json()) as Settings
-      // 古いサーバはこれらのキーを返さない。undefined のまま持つと画面が落ちる
-      settings.model_tables ??= {}
-      settings.agents ??= []
-      settings.intervals ??= FALLBACK.intervals
-      settings.lan_password ??= FALLBACK.lan_password
-      // **メモの保持も5つ目として埋める**（レビュー対応5）。`version select` は実在
-      // する道なので、**旧版へ巻き戻すとメモの面が丸ごと落ちる**
-      settings.memo_limits ??= FALLBACK.memo_limits
-      // **旧版のサーバはこのキーを知らない。** undefined のまま持つと、
-      // 保存ボタンの判定が例外で落ちる
-      settings.writable_roots ??= FALLBACK.writable_roots
+      const settings = fillMissing((await response.json()) as Settings)
       set({ settings, loading: false })
     } catch {
       // 読めなくても画面は出す。既定値のまま（＝スキップしない側）で動く
@@ -409,7 +499,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         fail(await response.text())
         return false
       }
-      set({ settings: (await response.json()) as Settings, lastError: null })
+      // 保存の応答も旧版なら欄が欠ける（`fillMissing` の doc）
+      set({
+        settings: fillMissing((await response.json()) as Settings),
+        lastError: null,
+      })
       return true
     } catch (error) {
       fail(String(error))

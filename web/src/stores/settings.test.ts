@@ -78,6 +78,73 @@ describe('設定ストア', () => {
     expect(limits.max_bytes).toBeGreaterThan(0)
   })
 
+  /*
+    **ファイル閲覧の上限も、旧版は返さない**（ファイル閲覧の上限 テスト計画フェーズ6
+    「古いサーバ（欄が無い答え）でも壊れない」）。
+
+    選択肢を空で埋めるのは、選べない版で選べる顔をしないため。変えてよいとも言わない。
+  */
+  it('file_view を返さない旧版でも、暫定値で埋めて設定のカードを落とさない', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              always_bypass_permissions: false,
+              available_modes: ['default'],
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+
+    await useSettingsStore.getState().load()
+
+    const fileView = useSettingsStore.getState().settings.file_view
+    expect(fileView).toBeDefined()
+    expect(fileView.choices).toEqual([])
+    expect(fileView.editable).toBe(false)
+    expect(fileView.max_bytes).toBe(3 * 1024 * 1024)
+    // 見せ方の対応も同じ形に落ちる（旧版は返さない）
+    expect(useSettingsStore.getState().settings.file_modes).toEqual({})
+  })
+
+  /*
+    **保存の応答も旧版なら欄が欠ける**（設計に無い。フェーズ6 で塞いだ落ち方）。
+
+    以前は `load()` だけが欠けを埋め、`update()` は応答を**そのまま**入れていた。旧版の
+    サーバで別の項目（ここではメモの保持）を保存すると、応答に `file_view` が無いまま入り、
+    設定のカードが `undefined.choices` で落ちる。
+  */
+  it('保存の応答に file_view が無くても（旧版）、保存の後に埋まっている', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              always_bypass_permissions: false,
+              available_modes: ['default'],
+              memo_limits: { retention_days: 30, max_bytes: 1024 },
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+
+    const saved = await useSettingsStore
+      .getState()
+      .update({ memo_retention_days: 30 })
+
+    expect(saved).toBe(true)
+    const settings = useSettingsStore.getState().settings
+    expect(settings.memo_limits.retention_days).toBe(30)
+    expect(settings.file_view).toBeDefined()
+    expect(settings.file_view.choices).toEqual([])
+    expect(settings.file_modes).toEqual({})
+  })
+
   it('読めなくても既定値のまま動く', async () => {
     // サーバが居なくても画面は出す。既定は**スキップしない側**（設計§9）
     vi.stubGlobal(
