@@ -9,6 +9,14 @@
 import { formatBytes } from '@/lib/format'
 import type { FileViewChoice } from '@/stores/settings'
 
+/**
+ * 設定画面の「ファイル閲覧の上限」のカードへ送るハッシュ（カードの外枠の `id` と同じ綴り）。
+ *
+ * **ファイルビュアの断り文の導線の行き先**（設計§10-2）。綴りを1か所に置き、カードと導線で
+ * 食い違わせない。
+ */
+export const FILE_VIEW_LIMIT_HASH = '#file-view-limit'
+
 /** 警告の段。設定のカードの確認の窓が出す `data-step` の綴りと同じ（設計§9-2） */
 export type FileViewWarning = 'server' | 'cloud'
 

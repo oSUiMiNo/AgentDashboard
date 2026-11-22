@@ -35,6 +35,7 @@ import type { MotionQuiet } from '@/stores/settings'
 import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
 import { AboutCard } from '@/components/Settings/AboutCard'
 import { FileModesCard } from '@/components/Settings/FileModesCard'
+import { FileViewLimitCard } from '@/components/Settings/FileViewLimitCard'
 import { MachineCard } from '@/components/Settings/MachineCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { WritableRootsCard } from '@/components/Settings/WritableRootsCard'
@@ -291,6 +292,12 @@ export function SettingsPage() {
           onSelect={(value) => void update({ memo_max_bytes: value })}
         />
       </div>
+
+      {/*
+        ファイル閲覧の上限（ファイル閲覧の上限を設定から変え、大きいものは流し読みする
+        設計§9）。メモの容量の隣に置く——バイト数の選択肢の前例。
+      */}
+      <FileViewLimitCard />
 
       {/*
         一覧の動き（カード設計§9-5-2）。

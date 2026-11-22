@@ -49,7 +49,7 @@ const 閉じる: ReadonlyArray<readonly [string, string]> = [
 ]
 
 /**
- * 操作をやめるもの。**4箇所とも文字のまま**（ダイアログの選択肢と、まとめて復旧の聞き直しを
+ * 操作をやめるもの。**6箇所とも文字のまま**（ダイアログの選択肢と、まとめて復旧の聞き直しを
  * 打ち切る帯のボタン）。帯の他の部品は印だけだが、これは**待っている文の続き**として読む
  */
 const やめる: ReadonlyArray<readonly [string, string]> = [
@@ -57,6 +57,8 @@ const やめる: ReadonlyArray<readonly [string, string]> = [
   ['components/TileGrid/TileGrid.tsx', 'bulk-revive-stop'],
   ['components/Settings/VersionsCard.tsx', 'versions-confirm-cancel'],
   ['components/SessionAdd/SessionAdd.tsx', 'spawn-cancel'],
+  ['components/Settings/MachineCard.tsx', 'machine-compact-cancel'],
+  ['components/Settings/FileViewLimitCard.tsx', 'file-view-limit-confirm-cancel'],
 ]
 
 describe('面を閉じるのは ✕', () => {
