@@ -40,11 +40,22 @@ pub struct DirQuery {
 /// `as` を `Option<String>` で受けるのは [`LogsQuery`] と同じ理由である。列挙で受けると
 /// 読めない綴りで **axum 自身の 400** が出て、[`refuse`] を通らない——同じ失敗が口に
 /// よって違う言葉になり、「断り方を1か所に集める」が破れる。
+///
+/// **窓読み（`as=range`）の `offset`・`length`・`align` も、数を含めて文字列で受ける**——
+/// 型で受けると、読めない値で同じく axum 自身の 400 が出る（`ファイル閲覧の上限を設定から
+/// 変え、大きいものは流し読みする` 設計§5-1）。
+///
+/// **上限を表す引数は持たない。** 知らない引数（`limit`・`max_bytes` など）は serde が
+/// 黙って捨てるので、ブラウザの言い値は上限に1バイトも効かない。上限はサーバが設定から
+/// 決めて PC へ運ぶ（設計§5-2）。
 #[derive(Debug, serde::Deserialize)]
 pub struct PathQuery {
     pub path: String,
     #[serde(rename = "as")]
     pub shape: Option<String>,
+    pub offset: Option<String>,
+    pub length: Option<String>,
+    pub align: Option<String>,
 }
 
 /// `?path=…&stamp=…`。**印は問い合わせ引数で渡す**——本文はファイルの中身そのものなので
@@ -136,12 +147,19 @@ pub async fn api_dir(
 ///
 /// | `as` | 返すもの |
 /// |---|---|
-/// | 省略 | JSON の [`protocol::fs::FileContent`]（**いままでどおり**） |
+/// | 省略 | JSON の [`protocol::fs::FileContent`]。一括で読む線（3 MiB）を超えたら先頭の窓だけ＋`truncated` |
 /// | `raw` | 生のバイト列 ＋ 4つのヘッダ。`<img>` と**「ブラウザで開く」**の宛先になる |
 /// | `preview` | `raw` と同じ。**ただし HTML には探す係（[`FINDER_JS`]）を末尾へ足す** |
+/// | `range` | 窓1つ（[`protocol::fs::FileChunk`]）。続きは返った `end` から頼む |
 ///
 /// **`preview` を分けたのは、足す相手を1つに絞るためである。** 「ブラウザで開く」は
 /// 利用者がファイルそのものを見に行く道なので、こちらの都合で中身を変えない。
+///
+/// # 上限はどの形でも同じ1つ
+///
+/// 設定の上限（[`crate::file_view::effective_limit`]）を**ここで1回だけ**読み、PC へ運ぶ
+/// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§5-2）。守るのは
+/// 読む側（PC）で、ブラウザの言い値は使わない。
 pub async fn api_file(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Identity>,
@@ -153,14 +171,28 @@ pub async fn api_file(
         account_id: identity.account_id,
         target,
     };
+    // 窓の引数は窓読みのときだけ。**受けたふりをしない**（読みもしない引数で頼み方が
+    // 変わったように見えると、呼んだ側が誤りに気づけない）
+    if query.shape.as_deref() != Some("range")
+        && (query.offset.is_some() || query.length.is_some() || query.align.is_some())
+    {
+        return Err(refuse(HostAskError::BadRequest(
+            "`offset`・`length`・`align` は `as=range` のときだけ使えます".to_string(),
+        )));
+    }
+    let limit = crate::file_view::effective_limit(state.registry.db(), &state.file_view).await;
+    let refused = |err: HostAskError| {
+        note_refused(&err, limit, &host, identity.account_id);
+        refuse(err)
+    };
 
     match query.shape.as_deref() {
         None => {
             let mut content = state
                 .agent
-                .read_file(ask(), &query.path)
+                .read_file_within(ask(), &query.path, limit)
                 .await
-                .map_err(refuse)?;
+                .map_err(refused)?;
             // **書けるかを決めるのはここだけ**（設計§8）。根を知っているのはサーバで、
             // PC は自分がどの口座に見えているかを知らない。**打てない相手に打てる姿を
             // 見せない**ために、読むときに一緒に返す。
@@ -170,15 +202,107 @@ pub async fn api_file(
             // **だから `書けるか` を通す**（中で `..` を畳む）。畳まずに照合すると
             // `/dev/app/../../etc/passwd` が根の内側に見え、読みでは通って保存で断られる。
             let roots = writable_roots_for(&state, &identity, &host).await?;
-            content.writable = 書けるか(&query.path, &roots);
+            // 【エージェントの仮置き（利用者未承認）】先頭の窓だけのものは書き戻せないので、
+            // 答えの側でも閉じる（設計§5-3）。画面も `truncated` で閉じるが、答えが
+            // 「書ける」と言ったまま残ると、別の呼び手が取り違える
+            content.writable = !content.truncated && 書けるか(&query.path, &roots);
             Ok(Json(content).into_response())
         }
-        Some("raw") => raw_file(&state, ask(), &query.path, false).await,
-        Some("preview") => raw_file(&state, ask(), &query.path, true).await,
+        Some("range") => {
+            let range = range_of(&query).map_err(refuse)?;
+            let chunk = state
+                .agent
+                .read_file_range(ask(), &query.path, range, limit)
+                .await
+                .map_err(refused)?;
+            Ok(Json(chunk).into_response())
+        }
+        Some("raw") | Some("preview") => {
+            let 探せるように = query.shape.as_deref() == Some("preview");
+            raw_file(
+                &state,
+                RawAsk {
+                    account_id: identity.account_id,
+                    target,
+                    limit,
+                    host: &host,
+                },
+                &query.path,
+                探せるように,
+            )
+            .await
+        }
         Some(other) => Err(refuse(HostAskError::BadRequest(format!(
-            "`as` を読めません：{other}\n合うのは raw と preview です。"
+            "`as` を読めません：{other}\n合うのは raw と preview と range です。"
         )))),
     }
+}
+
+/// 窓の頼み方を読む（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§5-1）。
+///
+/// **長さはサーバでも切り詰める**（PC も切り詰めるが、言い値をそのまま運ばない）。
+fn range_of(query: &PathQuery) -> Result<protocol::fs::FileRange, HostAskError> {
+    let offset = match query.offset.as_deref() {
+        None => {
+            return Err(HostAskError::BadRequest(
+                "`as=range` には `offset` が要ります（読み始めるバイトの位置）".to_string(),
+            ));
+        }
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|_| HostAskError::BadRequest(format!("`offset` を数として読めません：{v}")))?,
+    };
+    let length = match query.length.as_deref() {
+        None => protocol::fs::WINDOW_BYTES,
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|_| HostAskError::BadRequest(format!("`length` を数として読めません：{v}")))?,
+    };
+    if length == 0 {
+        return Err(HostAskError::BadRequest(
+            "`length` に 0 は指定できません".to_string(),
+        ));
+    }
+    let align_line = match query.align.as_deref() {
+        None => false,
+        Some("line") => true,
+        Some(v) => {
+            return Err(HostAskError::BadRequest(format!(
+                "`align` を読めません：{v}\n合うのは line だけです。"
+            )));
+        }
+    };
+    Ok(protocol::fs::FileRange {
+        offset,
+        length: length.min(protocol::fs::RANGE_MAX_BYTES),
+        align_line,
+    })
+}
+
+/// 上限で断ったことを1行残す（設計§11-1）。
+///
+/// **パスは載せない**【エージェントの仮置き（利用者未承認）】——ファイル名に個人の情報が
+/// 入りうる。断った理由と数で足りる。頼み方の誤り（400）と他人の PC（404）は出さない。
+fn note_refused(err: &HostAskError, limit: u64, host: &str, account_id: uuid::Uuid) {
+    let reason = match err {
+        HostAskError::Failed {
+            reason: HostFailure::TooLarge,
+            ..
+        } => "too_large",
+        HostAskError::Failed {
+            reason: HostFailure::Unavailable,
+            ..
+        } => "old_host",
+        _ => return,
+    };
+    tracing::info!(
+        kind = "file_refused",
+        reason,
+        limit,
+        host,
+        account_id = %account_id,
+        "ファイル閲覧の上限で断った"
+    );
 }
 
 /// `PUT /api/hosts/{host}/file?path=…&stamp=…` — ファイル1つを書き戻す
@@ -434,27 +558,90 @@ pub async fn api_attachment(
 /// （設計§5-3。2026-09-04 に実ブラウザで実測）。
 ///
 /// **読めないものは、読めない理由で断られる。** バイナリ（NUL を含む）と非 UTF-8 は
-/// この下の `read_file` が落とすので、素のエラー画面にはならない（設計§5-4）。
+/// この下の `read_file_within`（と流すときの窓読み）が落とすので、素のエラー画面には
+/// ならない（設計§5-4）。
+///
+/// # 一括で読む線を超えたテキストは流して返す
+///
+/// 3 MiB を超えて設定の上限以下の HTML・SVG・テキストは、**プレビューの天井までなら**
+/// 窓を繰り返し読んで流して返す（`ファイル閲覧の上限を設定から変え、大きいものは流し読み
+/// する` 設計§5-4。[`stream_text`]）。天井を超えたら 413 で断る。
 async fn raw_file(
     state: &AppState,
-    ask: HostAskRequest,
+    ask: RawAsk<'_>,
     path: &str,
     探せるように: bool,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let media_type = protocol::fs::media_type_of(path);
+    let request = || HostAskRequest {
+        account_id: ask.account_id,
+        target: ask.target,
+    };
+    let refused = |err: HostAskError| {
+        note_refused(&err, ask.limit, ask.host, ask.account_id);
+        refuse(err)
+    };
+    let finder = 探せるように && protocol::fs::kind_of(path) == protocol::fs::FileKind::Html;
 
-    // **作り方は種別で分かれる。** HTML と SVG はテキストなので既存の道から作れる
-    // （それぞれの上限がそのまま効く）。画像だけが新設のバイト列の道を通る（設計§5-2）
+    // **作り方は種別で分かれる。** HTML と SVG はテキストなので既存の道から作れる。
+    // 画像だけが新設のバイト列の道を通る（設計§5-2）。**画像は上限の設定に巻き込まない**
+    // （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§9）
     let body = if protocol::fs::kind_of(path) == protocol::fs::FileKind::Image {
-        state.agent.read_blob(ask, path).await.map_err(refuse)?.data
-    } else {
         state
             .agent
-            .read_file(ask, path)
+            .read_blob(request(), path)
             .await
             .map_err(refuse)?
-            .text
-            .into_bytes()
+            .data
+    } else {
+        let head = state
+            .agent
+            .read_file_within(request(), path, ask.limit)
+            .await
+            .map_err(refused)?;
+        if head.truncated {
+            // 一括で読む線を超えた。**丸ごと送ってよい大きさ（プレビューの天井）まで**は、
+            // 窓を繰り返し読んで流して返す——サーバのメモリに載るのは窓1つぶんだけ
+            // （設計§5-4）。天井を超えたら断る（ブラウザのタブが落ちる大きさを送らない）
+            if head.bytes > crate::file_view::PREVIEW_MAX_BYTES {
+                tracing::info!(
+                    kind = "file_refused",
+                    reason = "preview_ceiling",
+                    bytes = head.bytes,
+                    limit = ask.limit,
+                    host = ask.host,
+                    account_id = %ask.account_id,
+                    "ブラウザへ丸ごと送れる大きさを超えたので断った"
+                );
+                return Err(refuse(HostAskError::Failed {
+                    reason: HostFailure::TooLarge,
+                    detail: format!(
+                        "{path} は {}（{} バイト）で、ブラウザへ丸ごと送れる大きさ（{}）を超えています。ファイルビュアの生テキストで少しずつ読んでください",
+                        protocol::fs::human_bytes(head.bytes),
+                        head.bytes,
+                        protocol::fs::human_bytes(crate::file_view::PREVIEW_MAX_BYTES),
+                    ),
+                }));
+            }
+            let stream = stream_text(StreamFrom {
+                agent: std::sync::Arc::clone(&state.agent),
+                account_id: ask.account_id,
+                target: ask.target,
+                path: path.to_string(),
+                head,
+                limit: ask.limit,
+                finder,
+                host: ask.host.to_string(),
+            });
+            // **`Content-Length` を付けない。** 流している間にファイルが変わりうるので、
+            // 長さを先に約束できない（変わったら途中で打ち切る）
+            return Ok((
+                raw_headers(media_type),
+                axum::body::Body::from_stream(stream),
+            )
+                .into_response());
+        }
+        head.text.into_bytes()
     };
 
     /*
@@ -467,30 +654,174 @@ async fn raw_file(
         **SVG には足さない。** あちらは `</svg>` の外に要素を置けないので、同じ手が
         使えない（無理に中へ差すと、文書の構造をこちらが書き換えることになる）。
     */
-    let body = if 探せるように && protocol::fs::kind_of(path) == protocol::fs::FileKind::Html
-    {
+    let body = if finder {
         let mut 継いだ = body;
-        継いだ.extend_from_slice(b"\n<script>");
+        継いだ.extend_from_slice(FINDER_TAIL_OPEN);
         継いだ.extend_from_slice(FINDER_JS.as_bytes());
-        継いだ.extend_from_slice(b"</script>\n");
+        継いだ.extend_from_slice(FINDER_TAIL_CLOSE);
         継いだ
     } else {
         body
     };
 
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, media_type),
-            // 宣言した型と違うものとして解釈させない。壊れた `.png` を HTML として
-            // 読みに行かせないための1行
-            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (axum::http::header::CONTENT_SECURITY_POLICY, RAW_CSP),
-            // 鍵の内側の中身を、ブラウザの控えに残さない
-            (axum::http::header::CACHE_CONTROL, "no-store"),
-        ],
-        body,
-    )
-        .into_response())
+    Ok((raw_headers(media_type), body).into_response())
+}
+
+/// 探す係を継ぐときの前後。**丸ごと返す道と流して返す道で同じ綴り**にする
+const FINDER_TAIL_OPEN: &[u8] = b"\n<script>";
+const FINDER_TAIL_CLOSE: &[u8] = b"</script>\n";
+
+/// 生の口の4つのヘッダ。**丸ごと返す道と流して返す道で同じものを付ける**。
+fn raw_headers(media_type: &'static str) -> [(axum::http::HeaderName, &'static str); 4] {
+    [
+        (axum::http::header::CONTENT_TYPE, media_type),
+        // 宣言した型と違うものとして解釈させない。壊れた `.png` を HTML として
+        // 読みに行かせないための1行
+        (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (axum::http::header::CONTENT_SECURITY_POLICY, RAW_CSP),
+        // 鍵の内側の中身を、ブラウザの控えに残さない
+        (axum::http::header::CACHE_CONTROL, "no-store"),
+    ]
+}
+
+/// 生の口へ渡す、頼む相手と上限。
+///
+/// [`HostAskRequest`] は `Clone` を持たないので、流す繰り返しで毎回組み立てられるように
+/// 2つの欄をばらして持つ。
+struct RawAsk<'a> {
+    account_id: uuid::Uuid,
+    target: Option<AgentId>,
+    limit: u64,
+    host: &'a str,
+}
+
+/// 流して返すための材料（設計§5-4）。
+struct StreamFrom {
+    agent: std::sync::Arc<dyn crate::session_host::SessionHost>,
+    account_id: uuid::Uuid,
+    target: Option<AgentId>,
+    path: String,
+    /// 先頭の窓（`read_file_within` が返したもの。`truncated` が立っている）
+    head: protocol::fs::FileContent,
+    limit: u64,
+    /// 最後に探す係を継ぐか（preview かつ HTML）
+    finder: bool,
+    host: String,
+}
+
+/// 流す繰り返しの段。
+enum StreamStep {
+    /// 先頭の窓をまだ返していない
+    Head(StreamFrom),
+    /// 次に `offset` から窓を読む
+    Next(StreamFrom, u64),
+    /// 本文を流し終えた。探す係を継ぐか決める
+    Finish(StreamFrom),
+    Done,
+}
+
+/// 窓を繰り返し読んで流して返す（設計§5-4）。
+///
+/// - **サーバのメモリに載るのは窓1つぶん**（`RANGE_MAX_BYTES`）
+/// - **ローカルとリモートで同じ1本の道**（trait 越し）。片側だけ速くする近道を作らない
+/// - 窓の印が先頭の印と違ったら（**読んでいる間にファイルが変わった**）、その場で打ち切る。
+///   進まない窓（縮んだ等）も打ち切る——無限の繰り返しを作らない
+/// - 打ち切りは `Err` を流して知らせる。hyper はチャンクの終わりの塊を送らずに接続を
+///   閉じるので、受け手には「途中で切れた」と分かる。**成功の顔で全文と偽らない**
+fn stream_text(
+    from: StreamFrom,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    futures_util::stream::unfold(StreamStep::Head(from), |step| async move {
+        match step {
+            StreamStep::Head(mut from) => {
+                let text = std::mem::take(&mut from.head.text);
+                let next = text.len() as u64;
+                Some((Ok(bytes::Bytes::from(text)), StreamStep::Next(from, next)))
+            }
+            StreamStep::Next(from, offset) => {
+                if offset >= from.head.bytes {
+                    return finish(from);
+                }
+                let answer = from
+                    .agent
+                    .read_file_range(
+                        HostAskRequest {
+                            account_id: from.account_id,
+                            target: from.target,
+                        },
+                        &from.path,
+                        protocol::fs::FileRange {
+                            offset,
+                            length: protocol::fs::RANGE_MAX_BYTES,
+                            align_line: false,
+                        },
+                        from.limit,
+                    )
+                    .await;
+                match answer {
+                    Ok(chunk) if chunk.stamp != from.head.stamp => {
+                        aborted(&from, offset, "changed", None);
+                        Some((
+                            Err(std::io::Error::other(
+                                "読んでいる間にファイルが変わりました",
+                            )),
+                            StreamStep::Done,
+                        ))
+                    }
+                    Ok(chunk) if chunk.end <= offset => {
+                        aborted(&from, offset, "read_failed", Some("窓が進まない"));
+                        Some((
+                            Err(std::io::Error::other("ファイルの続きを読めませんでした")),
+                            StreamStep::Done,
+                        ))
+                    }
+                    Ok(chunk) => {
+                        let next = chunk.end;
+                        Some((
+                            Ok(bytes::Bytes::from(chunk.text)),
+                            StreamStep::Next(from, next),
+                        ))
+                    }
+                    Err(err) => {
+                        let message = err.message();
+                        aborted(&from, offset, "read_failed", Some(&message));
+                        Some((Err(std::io::Error::other(message)), StreamStep::Done))
+                    }
+                }
+            }
+            StreamStep::Finish(from) => finish(from),
+            StreamStep::Done => None,
+        }
+    })
+}
+
+/// 本文を流し終えたあと。探す係を継ぐなら1塊で返して終わる。
+fn finish(from: StreamFrom) -> Option<(Result<bytes::Bytes, std::io::Error>, StreamStep)> {
+    if !from.finder {
+        return None;
+    }
+    let mut tail =
+        Vec::with_capacity(FINDER_TAIL_OPEN.len() + FINDER_JS.len() + FINDER_TAIL_CLOSE.len());
+    tail.extend_from_slice(FINDER_TAIL_OPEN);
+    tail.extend_from_slice(FINDER_JS.as_bytes());
+    tail.extend_from_slice(FINDER_TAIL_CLOSE);
+    let mut from = from;
+    from.finder = false;
+    Some((Ok(bytes::Bytes::from(tail)), StreamStep::Finish(from)))
+}
+
+/// 流すのを打ち切ったことを1行残す（設計§11-1。始まりは出さず、打ち切りだけ）。
+fn aborted(from: &StreamFrom, offset: u64, reason: &'static str, error: Option<&str>) {
+    tracing::warn!(
+        kind = "file_stream_aborted",
+        reason,
+        offset,
+        bytes = from.head.bytes,
+        host = %from.host,
+        account_id = %from.account_id,
+        error = error.unwrap_or(""),
+        "ファイルを流して返す途中で打ち切った"
+    );
 }
 
 /// `GET /api/hosts/{host}/logs?since=…&level=…&card=…&proc=…&grep=…&raw=…&sanitize=…`
@@ -1069,5 +1400,52 @@ mod tests {
     #[test]
     fn localは宛先なしとして読む() {
         assert_eq!(parse_host(LOCAL_HOST).expect("通ること"), None);
+    }
+
+    /// 窓読みの問い合わせ引数を組む
+    fn 窓(offset: Option<&str>, length: Option<&str>, align: Option<&str>) -> PathQuery {
+        PathQuery {
+            path: "/tmp/a.txt".to_string(),
+            shape: Some("range".to_string()),
+            offset: offset.map(str::to_string),
+            length: length.map(str::to_string),
+            align: align.map(str::to_string),
+        }
+    }
+
+    /// 断りの文を取り出す（頼み方の誤りは 400 の `BadRequest` になること）
+    fn 断り(query: &PathQuery) -> String {
+        match range_of(query) {
+            Err(HostAskError::BadRequest(detail)) => detail,
+            other => panic!("BadRequest で断るはず：{other:?}"),
+        }
+    }
+
+    /// **窓の頼み方を読む**（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+    /// 設計§5-1）。長さはサーバでも切り詰め、言い値をそのまま運ばない。
+    #[test]
+    fn 窓の頼み方を読む() {
+        assert!(断り(&窓(None, None, None)).contains("`offset` が要ります"));
+        assert!(断り(&窓(Some("x"), None, None)).contains("`offset` を数として読めません：x"));
+        assert!(断り(&窓(Some("-1"), None, None)).contains("`offset` を数として読めません"));
+        assert!(断り(&窓(Some("0"), Some("y"), None)).contains("`length` を数として読めません：y"));
+        assert!(断り(&窓(Some("0"), Some("0"), None)).contains("`length` に 0 は指定できません"));
+        assert!(断り(&窓(Some("0"), None, Some("word"))).contains("`align` を読めません：word"));
+
+        let range = range_of(&窓(Some("10"), None, None)).expect("通ること");
+        assert_eq!(range.offset, 10);
+        assert_eq!(range.length, protocol::fs::WINDOW_BYTES, "省略は窓の大きさ");
+        assert!(!range.align_line);
+
+        let range = range_of(&窓(Some("0"), Some("2097152"), Some("line"))).expect("通ること");
+        assert_eq!(
+            range.length,
+            protocol::fs::RANGE_MAX_BYTES,
+            "1回の最大を超えた長さは黙って切り詰める"
+        );
+        assert!(range.align_line);
+
+        let range = range_of(&窓(Some("0"), Some("7"), None)).expect("通ること");
+        assert_eq!(range.length, 7, "最大の内側はそのまま");
     }
 }

@@ -354,16 +354,186 @@ async fn 画像の上限は生の口でも効く() {
         String::from_utf8_lossy(&response.body).contains(&size.to_string()),
         "大きさが読めること"
     );
+
+    // **JSON でも開けない**。2026-11-23（`ファイル閲覧の上限を設定から変え、大きいものは
+    // 流し読みする`）から、一括で読む線を超えたものは先頭の窓を読むので、中身0の画像は
+    // 413 ではなく「テキストではない」（415）で断られる。画面は画像を生の口で読むので、
+    // 利用者に見える振る舞いは変わらない
+    let (status, _) = server
+        .get(&format!("/api/hosts/local/file?path={}", escape(&path)))
+        .await;
+    assert_eq!(status, 415, "画像は JSON の道でも開けないこと");
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// 窓の継ぎ目が字の途中に当たるよう、**多バイト字・改行・数字を混ぜた**本文を作る。
+///
+/// 同じ字の繰り返しにすると、窓の境目が必ず字の境目に当たり、終わりの寄せを外しても
+/// 気づけない。`<script>` は含めない（探す係が1つだけ付くことを数えるため）。
+fn 混ぜた本文(at_least: usize) -> String {
+    let mut text = String::with_capacity(at_least + 128);
+    let mut n = 0u64;
+    while text.len() < at_least {
+        text.push_str(&format!("{n:08} 理解ドキュメントの行。表と図🧭 abc\n"));
+        n += 1;
+    }
+    text
+}
+
+/// 先頭に字を書き、残りを**中身を書かずに**伸ばしたファイル（疎なファイル）。
+///
+/// 一括で読む線を超えたファイルは先頭の窓（256 KiB）を読むので、先頭まで NUL だと
+/// 「テキストではない」（415）で断られ、確かめたい判定まで届かない（テスト計画の前提）。
+fn 先頭だけ字のファイル(
+    sandbox: &Sandbox,
+    name: &str,
+    head_bytes: usize,
+    size: u64,
+) -> String {
+    let path = sandbox.0.join(name);
+    std::fs::write(&path, 混ぜた本文(head_bytes)).expect("置けること");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_len(size))
+        .expect("伸ばせること");
+    path.display().to_string()
 }
 
 #[tokio::test]
-async fn htmlにはテキストの上限が効く() {
-    // **種別ごとに別の道を通っている**ことの裏取り（設計§5-2）。
-    // 画像の上限（8 MiB）で判定していたら、この大きさは通ってしまう
-    let sandbox = Sandbox::new("htmllarge");
-    let size = protocol::fs::WHOLE_TEXT_BYTES as usize + 1;
-    let path = sandbox.file("大きい.html", &vec![b'a'; size]);
-    let server = common::TestServer::start_with(config_for("htmllarge")).await;
+async fn 窓読みの頼み方の誤りはこちらの落ち度として断る() {
+    // `ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§5-1。
+    // **PC のせいに見えるコードへ寄せない**（400）。文は画面がそのまま出す
+    let sandbox = Sandbox::new("rangebad");
+    let path = sandbox.file("小さい.txt", "あいう\n".as_bytes());
+    let server = common::TestServer::start_with(config_for("rangebad")).await;
+    let base = format!("/api/hosts/local/file?path={}", escape(&path));
+
+    for (query, expect) in [
+        ("&as=range", "`as=range` には `offset` が要ります"),
+        ("&as=range&offset=x", "`offset` を数として読めません：x"),
+        (
+            "&as=range&offset=0&length=0",
+            "`length` に 0 は指定できません",
+        ),
+        (
+            "&as=range&offset=0&align=word",
+            "`align` を読めません：word",
+        ),
+        // 窓の引数は窓読みのときだけ。**受けたふりをしない**
+        ("&offset=0", "`as=range` のときだけ使えます"),
+        ("&as=raw&length=10", "`as=range` のときだけ使えます"),
+        ("&as=binary", "合うのは raw と preview と range です"),
+    ] {
+        let response = server.get_raw(&format!("{base}{query}")).await;
+        assert_eq!(response.status, 400, "{query} は 400 で断ること");
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(body.contains(expect), "{query} の断り文：{body}");
+    }
+}
+
+#[tokio::test]
+async fn 窓の長さは切り詰め_上限は設定で決まりブラウザの言い値では動かない() {
+    // 設計§5-1（長さはサーバが切り詰める）・§5-2（上限はサーバが設定から決めて PC へ運ぶ）
+    let sandbox = Sandbox::new("rangeclip");
+    let text = 混ぜた本文((2 * MIB + MIB / 2) as usize);
+    let path = sandbox.file("育つ記録.log", text.as_bytes());
+    let server = common::TestServer::start_with(config_for("rangeclip")).await;
+    let file = format!("/api/hosts/local/file?path={}", escape(&path));
+
+    let (status, body) = server
+        .get(&format!("{file}&as=range&offset=0&length=2097152"))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let chunk: protocol::fs::FileChunk = serde_json::from_str(&body).expect("窓の JSON であること");
+    assert_eq!(chunk.start, 0);
+    assert!(
+        chunk.end - chunk.start <= protocol::fs::RANGE_MAX_BYTES,
+        "2 MiB を頼んでも1回の最大（1 MiB）までしか運ばないこと：{}",
+        chunk.end - chunk.start
+    );
+    assert!(chunk.end > 0, "空の窓ではないこと");
+    assert_eq!(
+        chunk.text.as_bytes(),
+        &text.as_bytes()[..chunk.end as usize]
+    );
+
+    // **設定を変えると次の読みから効く**（REST の PUT はフェーズ4。ここでは DB を直に書く）
+    server_core::db::settings::set_file_view_max_bytes(server.registry.db(), Some(MIB))
+        .await
+        .expect("書けること");
+    let (status, body) = server.get(&file).await;
+    assert_eq!(status, 413, "上限 1 MB なら 2.5 MB は断ること：{body}");
+    // ブラウザが上限らしき引数を付けても、1バイトも効かない
+    let (status, _) = server
+        .get(&format!("{file}&limit=21474836480&max_bytes=21474836480"))
+        .await;
+    assert_eq!(status, 413, "ブラウザの言い値で上限が決まらないこと");
+    // 窓読みでも設定の上限を越えさせない
+    let (status, _) = server.get(&format!("{file}&as=range&offset=0")).await;
+    assert_eq!(status, 413, "窓読みでも上限を越えさせないこと");
+
+    server_core::db::settings::set_file_view_max_bytes(server.registry.db(), None)
+        .await
+        .expect("消せること");
+    let (status, body) = server.get(&file).await;
+    assert_eq!(status, 200, "既定（ローカルの 5 GB）へ戻ること：{body}");
+}
+
+#[tokio::test]
+async fn 大きいファイルのjsonは先頭の窓だけを運び書き戻せない() {
+    // 設計§5-3。一括で読む線（3 MiB）を超えたら、先頭の窓だけ＋`truncated`
+    let sandbox = Sandbox::new("jsonwindow");
+    let small = sandbox.file("小さい.md", "# 見出し\n".as_bytes());
+    let text = 混ぜた本文((4 * MIB) as usize);
+    let large = sandbox.file("大きい.md", text.as_bytes());
+    let server = common::TestServer::start_with(config_for("jsonwindow")).await;
+    server_core::db::settings::set_writable_roots(
+        server.registry.db(),
+        server_core::db::LOCAL_ACCOUNT_ID,
+        &[sandbox.0.display().to_string()],
+    )
+    .await
+    .expect("書ける場所を入れられること");
+
+    // **対照**：根の内側の小さいファイルは書ける。これが無いと、下の「書けない」が
+    // 根が無いせいで元から偽なのか、大きいせいなのかを言えない
+    let (status, body) = server
+        .get(&format!("/api/hosts/local/file?path={}", escape(&small)))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let content: protocol::fs::FileContent = serde_json::from_str(&body).expect("JSON");
+    assert!(content.writable, "根の内側の小さいファイルは書けること");
+
+    let (status, body) = server
+        .get(&format!("/api/hosts/local/file?path={}", escape(&large)))
+        .await;
+    assert_eq!(status, 200);
+    let content: protocol::fs::FileContent = serde_json::from_str(&body).expect("JSON");
+    assert!(content.truncated, "先頭の窓だけであること");
+    assert!(content.text.len() as u64 <= protocol::fs::WINDOW_BYTES);
+    assert!(text.starts_with(&content.text), "先頭がそのまま来ること");
+    assert_eq!(content.bytes, text.len() as u64, "全体の大きさを添えること");
+    assert!(!content.writable, "先頭の窓だけのものは書き戻せないこと");
+}
+
+#[tokio::test]
+async fn htmlは画像の上限ではなくテキストの道を通る() {
+    // **種別ごとに別の道を通っている**ことの裏取り（`ファイル閲覧で画像とHTMLも表示する`
+    // 設計§5-2）。画像の上限（8 MiB）で判定していたら、この大きさは断られる。
+    //
+    // 2026-11-23 の仕様変更（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+    // 方針§2）で、3 MiB を超える HTML も**窓を繰り返し読んで流して返す**ようになった。
+    // 以前の `htmlにはテキストの上限が効く`（3 MiB＋1 で 413）をこれと
+    // `htmlにはプレビューの天井が効く` の2本に分けた
+    let sandbox = Sandbox::new("htmlstream");
+    let mut text = String::from("<!doctype html><pre>\n");
+    text.push_str(&混ぜた本文(protocol::fs::MAX_BLOB_BYTES as usize + 1));
+    text.push_str("</pre>\n");
+    assert!(text.len() as u64 > protocol::fs::MAX_BLOB_BYTES);
+    let path = sandbox.file("大きい.html", text.as_bytes());
+    let server = common::TestServer::start_with(config_for("htmlstream")).await;
 
     let response = server
         .get_raw(&format!(
@@ -371,8 +541,181 @@ async fn htmlにはテキストの上限が効く() {
             escape(&path)
         ))
         .await;
+    assert_eq!(response.status, 200, "画像の上限で断らないこと");
+    assert!(response.complete, "終わりまで流れ切ること");
+    assert_eq!(response.body.len(), text.len(), "長さが元と同じであること");
+    assert!(
+        response.body == text.as_bytes(),
+        "中身が元と全部一致すること"
+    );
+    assert_eq!(
+        response.header("content-length"),
+        None,
+        "流して返すので長さを先に約束しない"
+    );
+    assert_eq!(
+        response.header("content-type").as_deref(),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(
+        response.header("x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response.header("cache-control").as_deref(),
+        Some("no-store")
+    );
+    assert!(
+        response
+            .header("content-security-policy")
+            .is_some_and(|csp| csp.starts_with("sandbox allow-scripts;")),
+        "流す道でも同じ隔離のヘッダが付くこと"
+    );
 
+    // プレビューは、**先頭を1バイトも変えずに**末尾へ探す係を1つだけ継ぐ
+    let response = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=preview",
+            escape(&path)
+        ))
+        .await;
+    assert_eq!(response.status, 200);
+    assert!(response.complete);
+    assert!(
+        response.body.starts_with(text.as_bytes()),
+        "先頭が元のままであること"
+    );
+    let rest = &response.body[text.len()..];
+    assert!(rest.starts_with(b"\n<script>"), "末尾に探す係が継がること");
+    assert!(rest.ends_with(b"</script>\n"));
+    // **丸ごと返す道と同じ係が、ちょうど1つ**継がっていること。小さい HTML の
+    // プレビューで付く末尾と、バイト単位で一致することで見る（係の本文自体が
+    // `<script>` の字を含むので、字を数える形では言えない）
+    let 小さい本文 = "<!doctype html><p>小</p>";
+    let small = sandbox.file("小さい.html", 小さい本文.as_bytes());
+    let 小さい係つき = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=preview",
+            escape(&small)
+        ))
+        .await;
+    assert_eq!(小さい係つき.status, 200);
+    assert!(
+        rest == &小さい係つき.body[小さい本文.len()..],
+        "流す道と丸ごと返す道で、継ぐ係が同じ1つであること"
+    );
+}
+
+#[tokio::test]
+async fn htmlにはプレビューの天井が効く() {
+    // 丸ごと送る口（raw／preview）は、ブラウザのタブが落ちる大きさを送らない（設計§5-4）
+    let sandbox = Sandbox::new("htmlceiling");
+    let size = server_core::file_view::PREVIEW_MAX_BYTES + 1;
+    let path = 先頭だけ字のファイル(&sandbox, "天井越え.html", 300 * 1024, size);
+    let server = common::TestServer::start_with(config_for("htmlceiling")).await;
+
+    let response = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=raw",
+            escape(&path)
+        ))
+        .await;
     assert_eq!(response.status, 413);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(body.contains("ブラウザへ丸ごと送れる大きさ"), "{body}");
+    assert!(
+        body.contains(&size.to_string()),
+        "実際の大きさが読めること：{body}"
+    );
+
+    // **対照**：天井は丸ごと送る口だけの線。JSON は先頭の窓を返す
+    let (status, body) = server
+        .get(&format!("/api/hosts/local/file?path={}", escape(&path)))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let content: protocol::fs::FileContent = serde_json::from_str(&body).expect("JSON");
+    assert!(content.truncated);
+    assert_eq!(content.bytes, size);
+}
+
+#[tokio::test]
+async fn 流す途中でファイルが変わったら打ち切る() {
+    // 設計§5-4。読んでいる間にファイルが変わったら、**成功の顔で全文と偽らない**。
+    //
+    // 製品コードに試験のための待ちを作らず、**受け手がわざと読むのを止める**。その間に
+    // 送り手が進めるのは、同じ機械の TCP の受け渡し（受け 最大 6 MiB＋送り 最大 4 MiB、
+    // このPCの `sysctl` で確かめた）と手元の1窓ぶんだけ。それを大きく超える大きさなら、
+    // 止まっている間に書き換えた後の窓を、送り手は必ず読む
+    let size = (server_core::file_view::PREVIEW_MAX_BYTES - MIB) as usize;
+    assert!(
+        size as u64 >= 24 * MIB,
+        "前提が崩れた：TCP の受け渡し（約 12 MiB）を大きく超える大きさでないと、書き換える前に読み終わりうる。プレビューの天井（{}）を下げたならこの試験の作りを見直すこと",
+        server_core::file_view::PREVIEW_MAX_BYTES
+    );
+    let sandbox = Sandbox::new("htmlabort");
+    let text = 混ぜた本文(size);
+    let path = sandbox.file("育つ.html", text.as_bytes());
+    let server = common::TestServer::start_with(config_for("htmlabort")).await;
+
+    let (addr, cookie) = (server.addr, server.cookie.clone());
+    let url = format!("/api/hosts/local/file?path={}&as=raw", escape(&path));
+    let file = std::path::PathBuf::from(&path);
+    let received = tokio::task::spawn_blocking(move || {
+        use std::io::{Read as _, Write as _};
+        let mut stream = std::net::TcpStream::connect(addr).expect("繋がること");
+        let cookie_line = cookie
+            .map(|value| format!("Cookie: {value}\r\n"))
+            .unwrap_or_default();
+        write!(
+            stream,
+            "GET {url} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n{cookie_line}\r\n"
+        )
+        .expect("頼めること");
+
+        // 先頭の 512 KiB ほどを受け取ったところで止まる
+        let mut received = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        while received.len() < 512 * 1024 {
+            let n = stream.read(&mut buf).expect("読めること");
+            assert!(n > 0, "先頭の 512 KiB を受け取る前に切れないこと");
+            received.extend_from_slice(&buf[..n]);
+        }
+        // **その間にファイルの末尾へ1行足す**（大きさと更新時刻が変わる＝印が変わる）
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .and_then(|mut handle| handle.write_all(b"\n<!-- added -->\n"))
+            .expect("書き足せること");
+        // 残りを読み切る（打ち切られると `ConnectionReset` で届くことがある）
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(err) => panic!("読めること：{err}"),
+            }
+        }
+        received
+    })
+    .await
+    .expect("受け手のスレッドが落ちないこと");
+
+    let response = testkit::parse_raw_response(&received).expect("応答として読めること");
+    assert_eq!(response.status, 200, "流し始めてから切れること");
+    assert!(
+        !response.complete,
+        "終わりの塊が来ない＝途中で切れたと分かること"
+    );
+    assert!(
+        response.body.len() < text.len(),
+        "全文が来ていないこと：{} / {}",
+        response.body.len(),
+        text.len()
+    );
+    assert!(
+        text.as_bytes().starts_with(&response.body),
+        "切れたところまでは元と同じであること"
+    );
 }
 
 #[tokio::test]

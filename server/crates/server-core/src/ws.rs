@@ -150,6 +150,12 @@ pub struct AppState {
     /// **接続ごとの入れ物には置けない。** 段取りは接続に紐づかず、押した端末が
     /// 閉じても走り続ける
     pub branching: crate::branch::Branching,
+    /// ファイル閲覧の上限の既定を決める、起動の形とクラウドの判定（`ファイル閲覧の上限を
+    /// 設定から変え、大きいものは流し読みする` 設計§5-2）。
+    ///
+    /// **`new` の既定はサーバ・クラウド無し＝3 MiB**（安全側）。ローカルの器
+    /// （`LocalServer`）とサーバの起動の道が、それぞれ [`AppState::with_file_view`] で差し込む
+    pub file_view: crate::file_view::FileViewPolicy,
     next_client_id: Arc<AtomicU64>,
 }
 
@@ -165,6 +171,7 @@ impl AppState {
             config,
             client_logs: None,
             branching: crate::branch::Branching::default(),
+            file_view: crate::file_view::FileViewPolicy::default(),
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -177,6 +184,16 @@ impl AppState {
     #[must_use]
     pub fn with_client_logs(mut self, sink: Arc<dyn crate::client_logs::ClientLogSink>) -> Self {
         self.client_logs = Some(sink);
+        self
+    }
+
+    /// ファイル閲覧の上限の既定を決める材料（起動の形とクラウドの判定）を差し込む。
+    ///
+    /// [`AppState::with_client_logs`] と同じく **`new` の引数を増やさない**。`new` を直に呼ぶ
+    /// 試験は、差し込まなければサーバの既定（3 MiB）のまま動く
+    #[must_use]
+    pub fn with_file_view(mut self, policy: crate::file_view::FileViewPolicy) -> Self {
+        self.file_view = policy;
         self
     }
 }

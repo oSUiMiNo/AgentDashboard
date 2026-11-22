@@ -1504,10 +1504,11 @@ behavior    = "上限いっぱいの大きさのときでも、テキストが�
 gate        = "unit"
 tests       = [
   { file = "server/crates/core/tests/a2s.rs", name = "上限いっぱいのテキストが線を往復する" },
-  { file = "server/crates/core/tests/hostfs_raw.rs", name = "htmlにはテキストの上限が効く" },
+  { file = "server/crates/core/tests/hostfs_raw.rs", name = "htmlは画像の上限ではなくテキストの道を通る" },
+  { file = "server/crates/core/tests/hostfs_raw.rs", name = "htmlにはプレビューの天井が効く" },
 ]
-breaks_when = "守りの3行を外す（実行レポートの記録：当てると前2本が落ち、3本目は逆側を見張るものなので通ったまま）"
-verified    = false
+breaks_when = "hosts.rs の raw_file で HTML を画像の道（read_blob）へ回すと htmlは画像の上限ではなくテキストの道を通る が、プレビューの天井の判定を外すと htmlにはプレビューの天井が効く が落ちる（2026-11-23 に当てて確かめた）。2026-11-23 の仕様変更（ファイル閲覧の上限を設定から変え、大きいものは流し読みする 方針§2：3 MiB を超える HTML も流して返す）で、旧 htmlにはテキストの上限が効く を2本に差し替えた"
+verified    = true
 
 [[entry]]
 issue       = "クローズ/表示できるテキストの上限を3MBへ上げる"

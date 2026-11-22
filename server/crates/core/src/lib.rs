@@ -85,6 +85,10 @@ pub struct LocalServer {
     /// ブラウザで起きたことの書き出し先（設計§12）。**居なくても動く**ので、
     /// 既存の統合テストはログの口を立てずにセッションの検証だけができる。
     client_logs: Option<Arc<dyn server_core::client_logs::ClientLogSink>>,
+    /// ファイル閲覧の上限の既定を決める材料（`ファイル閲覧の上限を設定から変え、大きいものは
+    /// 流し読みする` 設計§5-2）。**ローカルの器なので既定はローカル（5 GiB）**。
+    /// クラウドの判定は起動の道が [`Self::with_file_view`] で差し込む
+    file_view: server_core::file_view::FileViewPolicy,
 }
 
 /// 版の口が要る、`state_dir` 以外の材料。
@@ -116,6 +120,7 @@ impl LocalServer {
             versions: None,
             compact: None,
             client_logs: None,
+            file_view: server_core::file_view::FileViewPolicy::local(None),
         }
     }
 
@@ -154,6 +159,12 @@ impl LocalServer {
         sink: Arc<dyn server_core::client_logs::ClientLogSink>,
     ) -> Self {
         self.client_logs = Some(sink);
+        self
+    }
+
+    /// ファイル閲覧の上限の既定を決める材料（起動の形とクラウドの判定）を差し込む。
+    pub fn with_file_view(mut self, policy: server_core::file_view::FileViewPolicy) -> Self {
+        self.file_view = policy;
         self
     }
 
@@ -197,6 +208,7 @@ impl LocalServer {
         if let Some(sink) = &self.client_logs {
             ws_state = ws_state.with_client_logs(Arc::clone(sink));
         }
+        ws_state = ws_state.with_file_view(self.file_view.clone());
 
         let settings = server_core::guard(
             settings_api::routes(SettingsState {
@@ -315,7 +327,9 @@ pub async fn serve_server(
     // ブラウザで起きたことの受け皿（設計§12）。**サーバモードでも同じ場所へ落ちる**——
     // PTY は持たないが、ブラウザと話しているのはこちらである
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config))
-        .with_client_logs(client_logs::LoggingSink::open(&config.agent()));
+        .with_client_logs(client_logs::LoggingSink::open(&config.agent()))
+        // ファイル閲覧の上限の既定はサーバ（3 MiB）。クラウドの判定は後のフェーズで差し込む
+        .with_file_view(server_core::file_view::FileViewPolicy::server(None));
     let router = server_core::routes(ws_state, Arc::clone(&auth))
         // セッションホストの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
         // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
