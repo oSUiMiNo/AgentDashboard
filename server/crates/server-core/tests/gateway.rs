@@ -1740,3 +1740,113 @@ async fn 名乗るまで待つ(gateway: &TestGateway, account_id: Uuid) -> proto
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+#[tokio::test]
+async fn 窓読みを名乗らない古い_PC_が上限を超える中身を返したらサーバが断る() {
+    // コードレビュー対応 2026-11-23 対応2。古い PC は `max_bytes` を知らずに自分の 3 MiB で
+    // 読むので、3 MiB 未満の上限はサーバが返ってきた `bytes` で守る。**本物の PC は
+    // `max_bytes` を守ってしまうので、古い PC の振る舞いは偽の PC でしか再現できない**
+    for backend in common::backends("gw-old-pc-limit").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let mut socket = gateway
+            .connect(Some(&token), Some(A2S_PROTOCOL))
+            .await
+            .expect("繋げること");
+        let mut old_hello = hello("古いPC");
+        if let AgentMessage::Hello {
+            supports_file_range,
+            ..
+        } = &mut old_hello
+        {
+            *supports_file_range = false;
+        }
+        socket.send(&old_hello).await;
+        let ServerToAgent::Hello { agent_id, .. } = socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await
+        else {
+            panic!("[{}] 名乗りの応答であること", backend.name);
+        };
+
+        let host = Arc::new(server_core::gateway::RemoteSessionHost::new(Arc::clone(
+            &gateway.hub,
+        )));
+        let limit = 1024 * 1024;
+        for (bytes, refused) in [(2 * 1024 * 1024_u64, true), (500 * 1024_u64, false)] {
+            let asking = {
+                let host = Arc::clone(&host);
+                tokio::spawn(async move {
+                    host.read_file_within(
+                        server_core::session_host::HostAskRequest {
+                            account_id,
+                            target: Some(agent_id),
+                        },
+                        "/tmp/a.txt",
+                        limit,
+                    )
+                    .await
+                })
+            };
+            let ServerToAgent::ReadFile {
+                request_id,
+                max_bytes,
+                ..
+            } = socket
+                .wait_for("読む問い", |message| {
+                    matches!(message, ServerToAgent::ReadFile { .. })
+                })
+                .await
+            else {
+                panic!("[{}] 読む問いであること", backend.name);
+            };
+            assert_eq!(
+                max_bytes,
+                Some(limit),
+                "[{}] 3 MiB 未満の上限はそのまま運ぶ",
+                backend.name
+            );
+            socket
+                .send(&AgentMessage::HostReply {
+                    request_id,
+                    reply: protocol::a2s::HostReply::File(protocol::fs::FileContent {
+                        path: "/tmp/a.txt".to_string(),
+                        text: "x".to_string(),
+                        truncated: false,
+                        bytes,
+                        stamp: "s".to_string(),
+                        writable: false,
+                    }),
+                })
+                .await;
+            let answer = tokio::time::timeout(TIMEOUT, asking)
+                .await
+                .unwrap_or_else(|_| panic!("[{}] 答えが返ること", backend.name))
+                .expect("問いのタスクが落ちないこと");
+            if refused {
+                let err = answer.expect_err("上限を超える中身はサーバが断ること");
+                let server_core::session_host::HostAskError::Failed { reason, detail } = err
+                else {
+                    panic!("[{}] 断りの形であること: {err:?}", backend.name);
+                };
+                assert_eq!(
+                    reason,
+                    protocol::a2s::HostFailure::TooLarge,
+                    "[{}] {detail}",
+                    backend.name
+                );
+                assert!(
+                    detail.contains("1048576") && detail.contains("2097152"),
+                    "[{}] 断り文に上限と大きさが入ること: {detail}",
+                    backend.name
+                );
+            } else {
+                let content = answer.expect("上限の内側はそのまま返ること");
+                assert_eq!(content.bytes, bytes, "[{}]", backend.name);
+                assert_eq!(content.text, "x", "[{}]", backend.name);
+            }
+        }
+    }
+}

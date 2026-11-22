@@ -2062,7 +2062,24 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             })
             .await?
         {
-            HostReply::File(content) => Ok(content),
+            // **古い PC は `max_bytes` を知らずに自分の 3 MiB で読むので、3 MiB 未満の上限はここで守る**
+            // （コードレビュー対応 2026-11-23 対応2。念のための守りで、新しい PC は自分で断る）
+            HostReply::File(content) => {
+                if content.bytes > sent {
+                    return Err(HostAskError::Failed {
+                        reason: protocol::a2s::HostFailure::TooLarge,
+                        detail: format!(
+                            "{} は {}（{} バイト）で、上限の {}（{} バイト）を超えています",
+                            content.path,
+                            protocol::fs::human_bytes(content.bytes),
+                            content.bytes,
+                            protocol::fs::human_bytes(sent),
+                            sent
+                        ),
+                    });
+                }
+                Ok(content)
+            }
             // 古い PC が 3 MiB で断った。上限を上げても開けないので、**PC 側が古い**と言う
             // （「設定から変えられる」と言うと、変えても開けないので嘘になる）
             HostReply::Failed {
