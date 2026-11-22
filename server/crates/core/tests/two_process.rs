@@ -75,6 +75,11 @@ impl Pair {
 
     /// サーバだけ起こす（発行したトークンも返す）。
     async fn start_server_only(label: &str) -> (Self, String) {
+        Self::start_server_only_with(label, "").await
+    }
+
+    /// [`Self::start_server_only`] の、設定ファイルの末尾へ `extra_config` を足す形。
+    async fn start_server_only_with(label: &str, extra_config: &str) -> (Self, String) {
         let dir = std::env::temp_dir().join(format!(
             "agentdashboard-2p-{label}-{}",
             uuid::Uuid::new_v4().simple()
@@ -89,7 +94,7 @@ impl Pair {
         std::fs::write(
             &config_path,
             format!(
-                "port = {port}\nstate_dir = \"{state}\"\ndatabase_url = \"sqlite://{db}\"\n",
+                "port = {port}\nstate_dir = \"{state}\"\ndatabase_url = \"sqlite://{db}\"\n{extra_config}",
                 state = dir.join("state").display(),
                 db = dir.join("dashboard.db").display(),
             ),
@@ -219,6 +224,22 @@ impl Pair {
         let (addr, path, cookie) = (self.addr, path.to_string(), self.cookie.clone());
         tokio::task::spawn_blocking(move || {
             testkit::request(addr, "GET", &path, None, cookie.as_deref())
+        })
+        .await
+        .ok()?
+        .ok()
+        .map(|response| (response.status, response.body))
+    }
+
+    async fn put(&self, path: &str, body: &str) -> Option<(u16, String)> {
+        let (addr, path, body, cookie) = (
+            self.addr,
+            path.to_string(),
+            body.to_string(),
+            self.cookie.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "PUT", &path, Some(&body), cookie.as_deref())
         })
         .await
         .ok()?
@@ -455,6 +476,96 @@ async fn セルフホストではサーバと_pc_が別々のログを持つ() {
         欄の顔ぶれ(&pair.dir.join("agent-state"), "proc"),
         ["session-host"]
     );
+}
+
+/// サーバモードは、起動の形とクラウドの指定を設定の口へ渡し、判定と上限の変更をログに残す
+/// （ファイル閲覧の上限 設計§7-4・§11、テスト計画 フェーズ4「起動の形の差し込み」）。
+///
+/// **本物の起動の道（`serve_server`）とログの出力層を通して見る**のはここだけ——手続きの中の
+/// 試験にはログを捕まえる道具が無く、`AppState` と設定の口を別々に組むと、起動の道が
+/// 片方へしか差し込んでいなくても緑になる。
+#[tokio::test]
+async fn サーバモードは起動の形とクラウドの指定を設定の口へ渡し_判定と変更をログに残す() {
+    // PC は繋がない。クラウドは設定ファイルで「はい」にする（手元に DMI が無くても陽性の道を通す）
+    let (pair, _token) = Pair::start_server_only_with("cloud", "metered_cloud = \"yes\"\n").await;
+
+    let (status, body) = pair.get("/api/settings").await.expect("設定を読めること");
+    assert_eq!(status, 200, "{body}");
+    let view: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+    let file_view = &view["file_view"];
+    assert_eq!(
+        file_view["via_server"], true,
+        "サーバモードであること: {file_view}"
+    );
+    assert_eq!(file_view["default_bytes"], 3 * 1024 * 1024, "{file_view}");
+    assert_eq!(file_view["max_bytes"], 3 * 1024 * 1024, "{file_view}");
+    assert_eq!(file_view["cloud"]["source"], "config", "{file_view}");
+    // 名前は比べない——試す機械の DMI が陽性なら、その名前になる
+    assert!(
+        file_view["cloud"]["name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()),
+        "{file_view}"
+    );
+    assert_eq!(file_view["warn_from_bytes"], 5 * 1024 * 1024, "{file_view}");
+    assert_eq!(
+        file_view["editable"], true,
+        "最初の管理者は変えられること: {file_view}"
+    );
+
+    let (status, body) = pair
+        .put("/api/settings", r#"{"file_view_max_bytes":10485760}"#)
+        .await
+        .expect("設定を変えられること");
+    assert_eq!(status, 200, "{body}");
+    let after: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+    assert_eq!(after["file_view"]["max_bytes"], 10 * 1024 * 1024, "{body}");
+
+    let state = pair.dir.join("state");
+    wait_for(
+        "起動時のクラウドの判定がログに出る",
+        || async {
+            行を探す(&state, "metered_cloud").iter().any(|line| {
+                line["deployment"] == "server"
+                    && line["source"] == "config"
+                    && line["setting"] == "yes"
+                    && line["dmi_fields"].is_u64()
+            })
+        },
+    )
+    .await;
+    wait_for("上限の変更がログに出る", || async {
+        行を探す(&state, "file_view_limit_changed")
+            .iter()
+            .any(|line| {
+                line["from"] == 3 * 1024 * 1024
+                    && line["to"] == 10 * 1024 * 1024
+                    && line["deployment"] == "server"
+                    && line["reset"] == false
+            })
+    })
+    .await;
+}
+
+/// `<state_dir>/logs/` の全行のうち、`kind` が合うもの。
+fn 行を探す(state_dir: &Path, kind: &str) -> Vec<serde_json::Value> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(state_dir.join("logs")) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
+                && value["kind"] == kind
+            {
+                found.push(value);
+            }
+        }
+    }
+    found
 }
 
 /// `<state_dir>/logs/` にあるファイル名。

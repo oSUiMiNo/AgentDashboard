@@ -19,6 +19,7 @@ pub mod children;
 pub mod cli;
 pub mod client;
 pub mod client_logs;
+pub mod cloud;
 pub mod compact_api;
 pub mod config;
 pub mod gate;
@@ -33,6 +34,7 @@ use server_core::{
     auth::AuthContext,
     config::ServerConfig,
     embed,
+    file_view::Deployment,
     gateway::SessionHostHub,
     registry::{NoticeLimits, SessionRegistry},
     ws,
@@ -53,6 +55,7 @@ use session_host_core::{
     session, session::SessionManager, settings, settings::SettingsStore,
 };
 use settings_api::SettingsState;
+use std::path::Path;
 use std::sync::Arc;
 
 /// ローカルモードで動くサーバ一式。
@@ -325,18 +328,21 @@ pub async fn serve_server(
     let agent: Arc<dyn server_core::session_host::SessionHost> = Arc::new(
         server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
     );
+    // ファイル閲覧の上限の決まり（設計§7-4）。既定はサーバ（3 MiB）、クラウドは起動時に1回だけ判定する
+    let file_view = cloud::policy(Deployment::Server, config.metered_cloud(), Path::new("/"));
     // ブラウザで起きたことの受け皿（設計§12）。**サーバモードでも同じ場所へ落ちる**——
     // PTY は持たないが、ブラウザと話しているのはこちらである
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config))
         .with_client_logs(client_logs::LoggingSink::open(&config.agent()))
-        // ファイル閲覧の上限の既定はサーバ（3 MiB）。クラウドの判定は後のフェーズで差し込む
-        .with_file_view(server_core::file_view::FileViewPolicy::server(None));
+        // 読む口（`AppState`）と設定の口が**同じ決まり**を見る。別々に組むと、設定画面の
+        // 既定と実際に断る上限が食い違う
+        .with_file_view(file_view.clone());
     let router = server_core::routes(ws_state, Arc::clone(&auth))
         // セッションホストの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
         // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
         .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
         .merge(server_core::guard(
-            settings_api::server_routes(Arc::clone(&hub))
+            settings_api::server_routes_with(Arc::clone(&hub), file_view)
                 // アカウント画面（トークンの発行・失効・PC 一覧。§11-1）。
                 // **ローカルモードには無い**——A2S の受け口が無いので、繋いでくる
                 // PC が存在せず、鍵を配る相手も居ない
@@ -614,9 +620,12 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
 
     // 版の入れ替えの前後でメモリを測る一式（設計§25）。器を渡す前に借りておく
     let memory_watch = manager.memory_watch();
+    // ファイル閲覧の上限の決まり（設計§7-4）。既定はローカル（5 GiB）、クラウドは起動時に1回だけ判定する
+    let file_view = cloud::policy(Deployment::Local, config.metered_cloud(), Path::new("/"));
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
         .with_settings(settings)
+        .with_file_view(file_view)
         // ブラウザで起きたことの受け皿（設計§12）。**同じ `logs/` へ落ちる**ので、
         // `agentdashboard logs` は経路を意識せずに混ぜて出せる
         .with_client_logs(client_logs::LoggingSink::open(&agent_config))

@@ -107,6 +107,10 @@ pub struct Config {
     pub compact_result_path: Option<PathBuf>,
     pub compact_ext4_vhdx: Option<PathBuf>,
     pub compact_docker_vhdx: Option<PathBuf>,
+
+    // --- ファイル閲覧の上限の警告（ファイル閲覧の上限 設計§7-3）---
+    /// この機械をクラウドの上とみなすか（`auto`／`yes`／`no`）。意味は [`crate::cloud::MeteredCloud`] を参照する。
+    pub metered_cloud: String,
 }
 
 impl Default for Config {
@@ -164,6 +168,8 @@ impl Default for Config {
             compact_result_path: compact.result_path,
             compact_ext4_vhdx: compact.ext4_vhdx,
             compact_docker_vhdx: compact.docker_vhdx,
+            // 射影先の無い鍵なので、判定の持ち主（`cloud`）が既定を持つ
+            metered_cloud: crate::cloud::MeteredCloud::default().as_str().to_string(),
         }
     }
 }
@@ -464,9 +470,25 @@ impl Config {
                 self.compact_window
             )));
         }
+        // 読めない綴りをここで断るのは、**読み違えると費用の警告が黙って消える**ため
+        // （`compact_window` と同じ考え。ファイル閲覧の上限 設計§7-3）。受けたふりをしない
+        if crate::cloud::MeteredCloud::parse(&self.metered_cloud).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "metered_cloud は auto / yes / no のどれかです（\"{}\" が入っています）",
+                self.metered_cloud
+            )));
+        }
         // `log_file_level` はここで断らない。読めない綴りは logging 側が `debug` へ
         // 落として**そのことをログに残す**（黙って落ちるのがこのイシューの敵）
         Ok(())
+    }
+
+    /// `metered_cloud` を読んだもの。
+    ///
+    /// 読み込み（[`Self::validate`]）で綴りを断っているので、ここで外れるのは試験が構造体を
+    /// 直に組んだときだけ。そのときは既定（`auto`）として扱う。
+    pub fn metered_cloud(&self) -> crate::cloud::MeteredCloud {
+        crate::cloud::MeteredCloud::parse(&self.metered_cloud).unwrap_or_default()
     }
 }
 
@@ -516,6 +538,39 @@ mod tests {
         assert!(config.selfheal_enabled);
         assert_eq!(config.canary_fallback_model, "sonnet");
         assert_eq!(config.selfheal_repo_dir, None);
+        assert_eq!(config.metered_cloud, "auto");
+    }
+
+    #[test]
+    fn metered_cloudは既定がautoで_環境変数で上書きでき_読めない綴りは断る() {
+        let _lock = env_lock();
+        use crate::cloud::MeteredCloud;
+        assert_eq!(
+            Config::from_toml_str("").unwrap().metered_cloud(),
+            MeteredCloud::Auto
+        );
+        assert_eq!(
+            Config::from_toml_str("metered_cloud = \"no\"\n")
+                .unwrap()
+                .metered_cloud(),
+            MeteredCloud::No
+        );
+        // 環境変数はプロセス全体のもの。錠を取ったうえで触り、確かめる前に消す（落ちても残さない）
+        unsafe { std::env::set_var("AGENTDASHBOARD_METERED_CLOUD", "yes") };
+        let from_env = Config::from_toml_str("");
+        unsafe { std::env::remove_var("AGENTDASHBOARD_METERED_CLOUD") };
+        assert_eq!(from_env.unwrap().metered_cloud(), MeteredCloud::Yes);
+
+        let error = Config::from_toml_str("metered_cloud = \"maybe\"\n").unwrap_err();
+        let text = error.to_string();
+        assert!(
+            matches!(error, ConfigError::Invalid(_)),
+            "読めない綴りは値の誤りとして断ること: {text}"
+        );
+        assert!(
+            text.contains("metered_cloud") && text.contains("maybe"),
+            "文にキー名と入っていた値が入ること: {text}"
+        );
     }
 
     #[test]
@@ -780,6 +835,9 @@ mod tests {
             // **上書きが効いたのか値が弾かれたのか**が分からなくなる（フロー制御と同じ）。
             // 既定（`02:00-05:00`）と違う、読める綴りを渡す
             ("compact_window", _) => "22:00-03:00".to_string(),
+            // `metered_cloud` も `validate()` が綴りを見る。適当な文字列だと、上書きが効いたのか
+            // 弾かれたのか分からない。既定（`auto`）と違う、読める綴りを渡す
+            ("metered_cloud", _) => "yes".to_string(),
             (_, toml::Value::Integer(_)) => "4242".to_string(),
             // 既定の逆を入れる。同じ値だと「上書きが効いた」ことにならない
             (_, toml::Value::Boolean(value)) => (!value).to_string(),
