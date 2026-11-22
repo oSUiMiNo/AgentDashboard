@@ -596,3 +596,65 @@ export function SaveGlyph({ className }: { className?: string }) {
     </svg>
   )
 }
+
+/**
+ * 「エクスプローラで開く」の印（サイドバーにエクスプローラで開くボタンが欲しい 設計§7-3）。
+ * **言葉は呼ぶ側の `aria-label` と `title` に残す。**
+ *
+ * 塗ったフォルダ（Filled 主体＝`DESIGN.md` §14.1）と、右上の外へ抜ける矢印。矢印は
+ * **外へ出す**ことを絵の側で言う（§14.3）。矢印は面から 2px 以上離す（§18.2 の隙間）
+ * ——面に重ねると同じ色で塗りつぶされて消える。
+ *
+ * **塗りは `path` の側に置く。** `svg` の `fill` は `none` のまま（印の作法のテストが見る）。
+ */
+export function FolderOutGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* フォルダ（タブ付き）。面で塗る */}
+      <path
+        fill="currentColor"
+        d="M3 11a1 1 0 0 1 1-1h3l2 2h3a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"
+      />
+      {/* 外へ出ていく矢印（角と軸で1本） */}
+      <path d="M14 3h7v7M21 3l-4 4" />
+    </svg>
+  )
+}
+
+/**
+ * 「VSCode で開く」の印（同 設計§7-3）。**VSCode の商標のロゴは使わない**（仮置き）。
+ *
+ * 右上の角が開いた窓（上に帯）と中の `<>`、外へ抜ける矢印。`ExternalLinkGlyph` とは
+ * 帯と `<>` で、`CodeGlyph`（`<>` だけ）とは窓の外形で見分ける。矢印の軸は `<>` に
+ * 届かないところで止める（重ねると記号が読めない）。
+ */
+export function EditorOutGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* 右上の角が開いた窓と、上の帯 */}
+      <path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6M3 9h8" />
+      {/* 中の <> */}
+      <path d="m8.5 13-2.5 2.5 2.5 2.5M13.5 13l2.5 2.5-2.5 2.5" />
+      {/* 外へ出ていく矢印（角と軸で1本） */}
+      <path d="M15 3h6v6M21 3l-6 6" />
+    </svg>
+  )
+}

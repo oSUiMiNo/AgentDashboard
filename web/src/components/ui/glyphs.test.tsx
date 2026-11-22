@@ -7,7 +7,9 @@ import {
   ChevronGlyph,
   CloseGlyph,
   CopyGlyph,
+  EditorOutGlyph,
   ExternalLinkGlyph,
+  FolderOutGlyph,
   GearGlyph,
   KeyboardGlyph,
   LanAddressGlyph,
@@ -40,6 +42,8 @@ const 印 = {
   PlusGlyph: <PlusGlyph />,
   KeyboardGlyph: <KeyboardGlyph />,
   ArrowUpGlyph: <ArrowUpGlyph />,
+  FolderOutGlyph: <FolderOutGlyph />,
+  EditorOutGlyph: <EditorOutGlyph />,
 }
 
 /**
@@ -57,7 +61,7 @@ const 太さの例外: Readonly<Record<string, string>> = {
 }
 
 describe('印の作法', () => {
-  it('14 そろっている', () => {
+  it('16 そろっている', () => {
     // 既存4つ＋フェーズ1の5つ＋`PlusGlyph`＋`KeyboardGlyph`＋`ArrowUpGlyph`
     // ＋`ExternalLinkGlyph`＋`LanAddressGlyph`。
     // **`KeyboardGlyph` はここへ足し忘れられていた**（コミットはされていたが、
@@ -67,7 +71,10 @@ describe('印の作法', () => {
     // **`ArrowUpGlyph` は、フェーズ1の「上向き矢印は足さない」を覆したもの**——
     // 山形は「前へ／後ろへ」の意味に取ってあり、**階層を1つ上がる**には足りず、
     // 実物では細い `^` がパスの文字に紛れていた（2026-09-05 の指定）
-    expect(Object.keys(印)).toHaveLength(14)
+    //
+    // ＋`FolderOutGlyph`・`EditorOutGlyph`（エクスプローラ・VSCode で開く。
+    // サイドバーにエクスプローラで開くボタンが欲しい 設計§7-3）
+    expect(Object.keys(印)).toHaveLength(16)
   })
 
   it.each(Object.entries(印))('%s が作法どおりに描かれている', (_name, node) => {
