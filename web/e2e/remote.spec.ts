@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import {
@@ -19,6 +21,7 @@ import {
   terminalScroll,
   typeLine,
   watchSentFrames,
+  WORK_DIR,
 } from './helpers'
 
 /**
@@ -599,4 +602,86 @@ test('サーバモードでは既定が 3 MB で、5 MB 以上に上げると警
     })
     expect(戻した.ok()).toBe(true)
   }
+})
+
+/**
+ * 大きいファイル（ファイル閲覧の上限を設定から変え、大きいものは流し読みする
+ * テスト計画フェーズ7「E2E（サーバモード）」）。
+ *
+ * **サーバを介すと、中身は PC（セッションホスト）→ サーバ → ブラウザと渡る。** 3 MB を超える
+ * ファイルが JSON で先頭の窓だけ届き、続きは窓読み（A2S の `ReadFileRange`）で1枚ずつ
+ * 往復することを、この構成でだけ確かめられる。
+ */
+test.describe('大きいファイル（サーバモード）', () => {
+  const MIB = 1024 * 1024
+  const GIB = 1024 * MIB
+  let projectDir = ''
+
+  test.beforeAll(() => {
+    projectDir = fs.mkdtempSync(path.join(WORK_DIR, 'adash-e2e-remote-large-'))
+    // 4 GiB の疎なファイル（先頭と末尾だけに字。間は書かないのでディスクを食わない）
+    const fd = fs.openSync(path.join(projectDir, 'big.log'), 'w')
+    try {
+      const head = Buffer.from(
+        Array.from({ length: 44_000 }, (_, i) => `head line ${String(i + 1).padStart(6, '0')} あいうえおかきくけこさしすせそ\n`).join(''),
+        'utf8',
+      )
+      const tail = Buffer.from(
+        Array.from({ length: 44_000 }, (_, i) => `tail line ${String(i + 1).padStart(6, '0')} たちつてとなにぬねのはひふへほ\n`).join('') + '末尾の印\n',
+        'utf8',
+      )
+      fs.writeSync(fd, head, 0, head.length, 0)
+      fs.ftruncateSync(fd, 4 * GIB)
+      fs.writeSync(fd, tail, 0, tail.length, 4 * GIB - tail.length)
+    } finally {
+      fs.closeSync(fd)
+    }
+  })
+
+  test.afterEach(async ({ page }) => {
+    // **上限はサーバ全体の値で、後の spec（`account.spec.ts` も chromium-remote）が同じサーバを
+    // 使う。** 10 GB のまま残すと、そちらが大きい上限で動いてしまうので、落ちても必ず戻す
+    const 戻した = await page.request.put('/api/settings', {
+      data: { file_view_max_bytes: 'default' },
+    })
+    expect(戻した.ok()).toBe(true)
+  })
+
+  test.afterAll(() => {
+    if (projectDir) fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  test('PC 経由の窓読みで末尾まで辿れる（JSON は先頭の窓だけを運ぶ）', async ({ page }) => {
+    await openDashboard(page)
+    const me = (await (await page.request.get('/api/me')).json()) as { is_admin?: boolean }
+    expect(me.is_admin, 'E2E のアカウントが管理者であること').toBe(true)
+    // 警告は画面の確認の窓が受け持つので、サーバは求めない（画面の警告はフェーズ6の試験が見る）
+    const 変えた = await page.request.put('/api/settings', { data: { file_view_max_bytes: 10 * GIB } })
+    expect(変えた.ok()).toBe(true)
+
+    const tile = await spawnSession(page, projectDir)
+    await openSession(page, tile)
+    // 開け閉めのボタンは「開いた状態にする」（覚えていた状態で開いていれば、押すと畳む）
+    const toggle = page.getByTestId('project-files-toggle')
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const panel = page.getByTestId('project-files-panel')
+
+    // **big.log の答えだけを待つ。** 同じ口は統計や候補の小さい JSON の読みにも使われる
+    const 答え = page.waitForResponse(
+      (response) =>
+        response.url().includes('/file?path=') &&
+        response.url().includes('big.log') &&
+        !response.url().includes('as='),
+    )
+    await panel.getByTestId('folder-entry').filter({ hasText: 'big.log' }).click()
+    const body = (await (await 答え).json()) as { truncated?: boolean; text?: string; bytes?: number }
+    expect(body.truncated, '3 MB を超えるファイルは先頭の窓だけが届くこと').toBe(true)
+    expect(body.bytes).toBe(4 * GIB)
+    expect(Buffer.byteLength(body.text ?? '', 'utf8')).toBeLessThanOrEqual(256 * 1024)
+
+    await expect(page.getByTestId('file-window-text')).toBeVisible()
+    await page.getByTestId('file-window-end').click()
+    await expect(page.getByTestId('file-window-text')).toContainText('末尾の印')
+  })
 })
