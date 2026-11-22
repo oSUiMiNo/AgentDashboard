@@ -145,7 +145,10 @@ export default defineConfig({
     //
     // `claude-settings.json` も消さない。`globalSetup` が webServer より先に書くので、
     // ここで消すと**書いたそばから消す**ことになり、モデルの検査が空振りする。
-    command: `rm -rf .e2e-state/state/dashboard.db* .e2e-state/state/offsets.json .e2e-state/state/selfheal.json .e2e-state/state/version-notice.json .e2e-state/state/model-aliases.json .e2e-state/state/version-current .e2e-state/state/versions && ${serverBinary} --config e2e/config.toml`,
+    //
+    // `open-in/`（外の道具の記録）は消す。押した回の番号は起動ごとに 1 から振り直すので、
+    // 前の走行の `close-<id>` が残ると、次の走行の同じ番号の待ちが即座に終わる。
+    command: `rm -rf .e2e-state/state/dashboard.db* .e2e-state/state/offsets.json .e2e-state/state/selfheal.json .e2e-state/state/version-notice.json .e2e-state/state/model-aliases.json .e2e-state/state/version-current .e2e-state/state/versions .e2e-state/open-in && ${serverBinary} --config e2e/config.toml`,
     env: {
       // 本物の claude ではなく擬似 claude を起動させる
       AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,
@@ -159,6 +162,9 @@ export default defineConfig({
       // 見にいく——開発機には 1,119 フォルダ・27,499本の `.jsonl` があり、
       // 遅いうえに機械ごとに結果が変わる。テストは自分でここへ置く
       AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home',
+      // **外の道具（エクスプローラ・VSCode）は起こさず記録だけする**（設計§8）。
+      // 相対パスはこのサーバの作業フォルダ（web/）から。open-in.spec.ts がここを読む
+      AGENTDASHBOARD_OPEN_IN: 'record:.e2e-state/open-in',
       RUST_LOG: 'info',
     },
     url: 'http://127.0.0.1:4173',
@@ -198,6 +204,8 @@ export default defineConfig({
         // **初回退避の元を空にする。** 塞がないと、起こすたびに実行ファイル3本ぶん
         // （数十MB）を控えにいく
         AGENTDASHBOARD_VERSION_SOURCE_DIR: '.e2e-state/versions-state/none',
+        // 外の道具は塞ぐ（設計§8）。この土台では押すテストが無く、本物へ落ちる道を残さないため
+        AGENTDASHBOARD_OPEN_IN: 'off',
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4178',
@@ -229,6 +237,8 @@ export default defineConfig({
         // **行き先は自分の複製。** ここが `installed` の行として並び、押すとここへ乗る
         AGENTDASHBOARD_VERSION_SOURCE_DIR: '.e2e-state/handover-state/bin',
         AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home',
+        // 外の道具は塞ぐ（設計§8）。この土台では押すテストが無く、本物へ落ちる道を残さないため
+        AGENTDASHBOARD_OPEN_IN: 'off',
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4179',
