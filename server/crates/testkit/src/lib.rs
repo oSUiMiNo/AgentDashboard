@@ -60,6 +60,10 @@ pub const VERSION_HANDOVER_ENV: &str = "AGENTDASHBOARD_VERSION_HANDED_OVER";
 /// 版の切替が使える構成かの上書き（`session_host_core::version::VERSION_SUPPORTED_ENV` と同じ綴り）。
 pub const VERSION_SUPPORTED_ENV: &str = "AGENTDASHBOARD_VERSION_SUPPORTED";
 
+/// 外の道具（エクスプローラ・VSCode）で開く口の起こし口の選び方
+/// （`session_host_core::open_in::OPEN_IN_ENV` と同じ綴り）。
+pub const OPEN_IN_ENV: &str = "AGENTDASHBOARD_OPEN_IN";
+
 /// ビルド済みの実行ファイルを起こす命令を、**版まわりを無害にした状態で**作る。
 ///
 /// 素の [`std::process::Command`] で起こすと、版の切替がテストへ2つの形で漏れ込む。
@@ -68,14 +72,25 @@ pub const VERSION_SUPPORTED_ENV: &str = "AGENTDASHBOARD_VERSION_SUPPORTED";
 /// |---|---|
 /// | 開発者の実環境のポインタを読む | `state_dir` を書き忘れたテストが1本あれば、**別の版のバイナリが試される**。失敗の形が「テストが落ちる」ではなく「別物を試していた」になるので追えない |
 /// | 入れる側が置いた版を保管庫へ控えにいく | 実行ファイル3本ぶん（数十MB）を、起こすたびに使い捨ての置き場所へコピーする |
+/// | 外の道具を起こす口が本物のまま | テストが起こした実行ファイルが、押されたら開発者の画面にエクスプローラ・VSCode の窓を出す |
 ///
-/// どちらも「起こし方」の問題なので、**経路をここへ集約して既定で塞ぐ**。版の切替
+/// どれも「起こし方」の問題なので、**経路をここへ集約して既定で塞ぐ**。版の切替
 /// そのものを試すテストは、返ってきた命令へ改めて環境変数を上書きする。
 pub fn binary_command(name: &str) -> std::process::Command {
     let mut command = std::process::Command::new(binary_path(name));
-    command.env(VERSION_HANDOVER_ENV, "1");
-    command.env(VERSION_SUPPORTED_ENV, "0");
+    defuse(&mut command);
     command
+}
+
+/// 起こす命令を無害にする（[`binary_command`] の中身）。
+///
+/// **切り出してあるのは、塞がっていることをテストで見るため。** `binary_command` は実行ファイルが
+/// 建っていないと `binary_path` の assert で落ちるので、そのままでは環境を確かめられない。
+pub fn defuse(command: &mut std::process::Command) -> &mut std::process::Command {
+    command
+        .env(VERSION_HANDOVER_ENV, "1")
+        .env(VERSION_SUPPORTED_ENV, "0")
+        .env(OPEN_IN_ENV, "off")
 }
 
 /// モックサーバが受信した1件のフック。
@@ -501,5 +516,27 @@ mod tests {
         .unwrap();
         assert_eq!(raw.body, b"hello");
         assert!(raw.complete);
+    }
+
+    #[test]
+    fn defuseすると外の道具を起こす口が塞がる() {
+        let mut command = std::process::Command::new("x");
+        defuse(&mut command);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new(OPEN_IN_ENV),
+                Some(std::ffi::OsStr::new("off"))
+            )),
+            "{envs:?}"
+        );
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new(VERSION_HANDOVER_ENV),
+            Some(std::ffi::OsStr::new("1"))
+        )));
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new(VERSION_SUPPORTED_ENV),
+            Some(std::ffi::OsStr::new("0"))
+        )));
     }
 }
