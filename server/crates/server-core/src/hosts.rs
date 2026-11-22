@@ -631,6 +631,7 @@ async fn raw_file(
                 head,
                 limit: ask.limit,
                 finder,
+                preview_html: finder,
                 host: ask.host.to_string(),
             });
             // **`Content-Length` を付けない。** 流している間にファイルが変わりうるので、
@@ -704,8 +705,14 @@ struct StreamFrom {
     /// 先頭の窓（`read_file_within` が返したもの。`truncated` が立っている）
     head: protocol::fs::FileContent,
     limit: u64,
-    /// 最後に探す係を継ぐか（preview かつ HTML）
+    /// 最後に探す係を継ぐか（preview かつ HTML）。継いだら [`finish`] が落とす
     finder: bool,
+    /// 打ち切るときに目に見える一言を足すか（preview かつ HTML）。
+    ///
+    /// **`finder` と同じ値で作るが、別の欄にしてある。** `finder` は探す係を1回だけ継ぐための
+    /// 印で、継いだら落とす。打ち切りの判定は「この応答が箱へ描かれる HTML か」という別の問いなので、
+    /// 1つの欄に2つの役目を持たせない
+    preview_html: bool,
     host: String,
 }
 
@@ -717,7 +724,48 @@ enum StreamStep {
     Next(StreamFrom, u64),
     /// 本文を流し終えた。探す係を継ぐか決める
     Finish(StreamFrom),
+    /// 打ち切りの一言を流し終えた。次の段でこの文の `Err` を流して接続を切る
+    Fail(String),
     Done,
+}
+
+/// 打ち切りの一言を流してから、`Err` で切るまでに置く間。
+///
+/// **間を置かないと、一言が届かない**（2026-11-23 に試験で実測）。hyper 1.x の書き出しは、
+/// 本文の塊を手元の箱へ積むと、送り出す前に次の塊を取りに来る。そこで `Err` が返ると、
+/// 箱に積んだ一言を送らずに接続を閉じる。ここで一度「まだ無い」を返すと、hyper はその間に
+/// 箱を送り出す。打ち切りは稀なので、待つのはそのときだけ
+const ABORT_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 流して返すプレビュー（HTML）を、読んでいる間にファイルが変わって打ち切ったときの一言。
+pub const ABORT_NOTICE_CHANGED: &str = "読んでいる間にこのファイルが変わったので、途中までしか表示していません。ファイルを開き直してください。";
+
+/// 流して返すプレビュー（HTML）を、続きが読めずに打ち切ったときの一言。
+pub const ABORT_NOTICE_READ_FAILED: &str = "このファイルの続きを読めなかったので、途中までしか表示していません。ファイルを開き直してください。";
+
+/// 打ち切りの一言の前置き。切れた所で「開いているかもしれないもの」を閉じてから一言を出す。
+///
+/// - コメントの中なら、`hidden` の span の中の `-->` で閉じる（コメントの外なら、隠れた span の字なので見えない）
+/// - 属性値の中なら `"` か `'` と `>` で閉じる
+/// - script・style・textarea・title・noscript・template の中なら終わりのタグで閉じる
+///   （開いていない終わりのタグは、HTML の構文では無視される）
+///
+/// それでも隠れる切れ方（`<plaintext>` の中など）は残るが、打ち切り自体が稀なので受け入れる。
+pub const ABORT_NOTICE_OPEN: &str =
+    "\n<span hidden>\"'>--></span></script></style></textarea></title></noscript></template>\n";
+
+/// 流して返すプレビュー（HTML）を打ち切ったとき、届いた本文の末尾へ足す一言。
+///
+/// `iframe` は届いたところまでをそのまま描くので、`Err` で切るだけでは**半分の文書が
+/// 完全なものに見える**（コードレビュー対応 2026-11-23 対応1）。打ち切ったことを人の目に
+/// 見える形で残す。**先頭には1バイトも触らない**（末尾に足すだけ。`DOCTYPE` の前に差すと
+/// 描き方が変わるため）。見た目は属性の style で付ける（[`RAW_CSP`] が `style-src 'unsafe-inline'`
+/// を許している）。文書側の CSS に負けないよう `!important` を付ける。
+fn abort_notice(message: &str) -> bytes::Bytes {
+    format!(
+        "{ABORT_NOTICE_OPEN}<div role=\"alert\" data-agentdashboard-abort=\"1\" style=\"position:fixed !important;top:0 !important;left:0 !important;right:0 !important;z-index:2147483647 !important;margin:0 !important;padding:8px 12px !important;background:#7a1f1f !important;color:#fff !important;font:14px/1.5 system-ui,sans-serif !important\">{message}</div>\n"
+    )
+    .into()
 }
 
 /// 窓を繰り返し読んで流して返す（設計§5-4）。
@@ -728,6 +776,10 @@ enum StreamStep {
 ///   進まない窓（縮んだ等）も打ち切る——無限の繰り返しを作らない
 /// - 打ち切りは `Err` を流して知らせる。hyper はチャンクの終わりの塊を送らずに接続を
 ///   閉じるので、受け手には「途中で切れた」と分かる。**成功の顔で全文と偽らない**
+/// - **プレビュー（HTML）では、`Err` の前に目に見える一言（[`abort_notice`]）を末尾へ流す。**
+///   `iframe` は届いたところまでを描くので、`Err` だけではプログラムの受け手（CLI・試験）にしか
+///   途中で切れたと伝わらない。`as=raw` には足さない（元のバイト列そのままの口。CLI の
+///   `--raw --out-file` が保存する）。SVG にも足さない（`</svg>` の外に要素を置けない）
 fn stream_text(
     from: StreamFrom,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
@@ -759,22 +811,20 @@ fn stream_text(
                     )
                     .await;
                 match answer {
-                    Ok(chunk) if chunk.stamp != from.head.stamp => {
-                        aborted(&from, offset, "changed", None);
-                        Some((
-                            Err(std::io::Error::other(
-                                "読んでいる間にファイルが変わりました",
-                            )),
-                            StreamStep::Done,
-                        ))
-                    }
-                    Ok(chunk) if chunk.end <= offset => {
-                        aborted(&from, offset, "read_failed", Some("窓が進まない"));
-                        Some((
-                            Err(std::io::Error::other("ファイルの続きを読めませんでした")),
-                            StreamStep::Done,
-                        ))
-                    }
+                    Ok(chunk) if chunk.stamp != from.head.stamp => abort_stream(
+                        &from,
+                        offset,
+                        "changed",
+                        None,
+                        "読んでいる間にファイルが変わりました".to_string(),
+                    ),
+                    Ok(chunk) if chunk.end <= offset => abort_stream(
+                        &from,
+                        offset,
+                        "read_failed",
+                        Some("窓が進まない"),
+                        "ファイルの続きを読めませんでした".to_string(),
+                    ),
                     Ok(chunk) => {
                         let next = chunk.end;
                         Some((
@@ -784,15 +834,46 @@ fn stream_text(
                     }
                     Err(err) => {
                         let message = err.message();
-                        aborted(&from, offset, "read_failed", Some(&message));
-                        Some((Err(std::io::Error::other(message)), StreamStep::Done))
+                        abort_stream(
+                            &from,
+                            offset,
+                            "read_failed",
+                            Some(&message),
+                            message.clone(),
+                        )
                     }
                 }
             }
             StreamStep::Finish(from) => finish(from),
+            StreamStep::Fail(message) => {
+                // 一言を送り出す間を置いてから切る（[`ABORT_FLUSH_WAIT`]）
+                tokio::time::sleep(ABORT_FLUSH_WAIT).await;
+                Some((Err(std::io::Error::other(message)), StreamStep::Done))
+            }
             StreamStep::Done => None,
         }
     })
+}
+
+/// 流すのを打ち切る。ログを1行残し、プレビュー（HTML）なら目に見える一言を流してから、
+/// そうでなければすぐに `Err` を流して切る（どちらも最後は `Err` で接続を切る）。
+fn abort_stream(
+    from: &StreamFrom,
+    offset: u64,
+    reason: &'static str,
+    error: Option<&str>,
+    message: String,
+) -> Option<(Result<bytes::Bytes, std::io::Error>, StreamStep)> {
+    aborted(from, offset, reason, error);
+    if from.preview_html {
+        let notice = if reason == "changed" {
+            ABORT_NOTICE_CHANGED
+        } else {
+            ABORT_NOTICE_READ_FAILED
+        };
+        return Some((Ok(abort_notice(notice)), StreamStep::Fail(message)));
+    }
+    Some((Err(std::io::Error::other(message)), StreamStep::Done))
 }
 
 /// 本文を流し終えたあと。探す係を継ぐなら1塊で返して終わる。

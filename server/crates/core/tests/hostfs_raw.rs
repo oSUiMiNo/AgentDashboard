@@ -639,6 +639,14 @@ async fn htmlは画像の上限ではなくテキストの道を通る() {
         rest == &小さい係つき.body[小さい本文.len()..],
         "流す道と丸ごと返す道で、継ぐ係が同じ1つであること"
     );
+    // **対照**：打ち切らずに流れ切ったプレビューには、打ち切りの一言が入らない
+    assert!(
+        !response
+            .body
+            .windows(b"data-agentdashboard-abort".len())
+            .any(|window| window == b"data-agentdashboard-abort"),
+        "流れ切ったプレビューに打ち切りの一言が混ざらないこと"
+    );
 }
 
 #[tokio::test]
@@ -673,10 +681,10 @@ async fn htmlにはプレビューの天井が効く() {
     assert_eq!(content.bytes, size);
 }
 
-#[tokio::test]
-async fn 流す途中でファイルが変わったら打ち切る() {
-    // 設計§5-4。読んでいる間にファイルが変わったら、**成功の顔で全文と偽らない**。
-    //
+/// 流して返す道（`as`）で、受け手が止まっている間にファイルを書き換える場面を作る。
+///
+/// 戻りは、受け取った応答と、書き換える前の元の本文。
+async fn 流す途中で書き換える(label: &str, as_: &str) -> (testkit::RawResponse, String) {
     // 製品コードに試験のための待ちを作らず、**受け手がわざと読むのを止める**。その間に
     // 送り手が先へ進めるのは「送り手の送信の箱（`tcp_wmem` の最大まで育つ）＋受け手の受信の
     // 箱＋送り手の手元の窓（読んだ1窓と、書き込みを待つ1窓）」だけ。受信の箱は既定では
@@ -684,10 +692,10 @@ async fn 流す途中でファイルが変わったら打ち切る() {
     // ようにする（`testkit::connect_with_recv_buffer`）。その量を大きさが十分に超えるなら、
     // 止まっている間に書き換えた後の窓を、送り手は必ず読む
     let size = (server_core::file_view::PREVIEW_MAX_BYTES - MIB) as usize;
-    let sandbox = Sandbox::new("htmlabort");
+    let sandbox = Sandbox::new(label);
     let text = 混ぜた本文(size);
     let path = sandbox.file("育つ.html", text.as_bytes());
-    let server = common::TestServer::start_with(config_for("htmlabort")).await;
+    let server = common::TestServer::start_with(config_for(label)).await;
 
     let (addr, cookie) = (server.addr, server.cookie.clone());
     let (stream, recv_buffer) = testkit::connect_with_recv_buffer(addr, 64 * 1024)
@@ -705,7 +713,7 @@ async fn 流す途中でファイルが変わったら打ち切る() {
         "前提が崩れた：止めている間に送り手が進める量（送り手の箱 {send_buffer_max}＋受け手の箱 {recv_buffer}＋手元の2窓＋余白 2 MiB＝{ahead} バイト）を、大きさ（{size} バイト＝プレビューの天井 {} − 1 MiB）が超えないと、書き換える前に読み終わりうる。天井を下げたか、この機械の `tcp_wmem` が大きいならこの試験の作りを見直すこと",
         server_core::file_view::PREVIEW_MAX_BYTES
     );
-    let url = format!("/api/hosts/local/file?path={}&as=raw", escape(&path));
+    let url = format!("/api/hosts/local/file?path={}&as={as_}", escape(&path));
     let file = std::path::PathBuf::from(&path);
     let received = tokio::task::spawn_blocking(move || {
         use std::io::{Read as _, Write as _};
@@ -748,6 +756,23 @@ async fn 流す途中でファイルが変わったら打ち切る() {
     .expect("受け手のスレッドが落ちないこと");
 
     let response = testkit::parse_raw_response(&received).expect("応答として読めること");
+    (response, text)
+}
+
+/// 打ち切りの一言の目印（文の綴りを変えても試験が空振りしないよう、属性と文の両方を見る）
+const ABORT_MARK: &[u8] = b"data-agentdashboard-abort=\"1\"";
+
+fn 数える(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+#[tokio::test]
+async fn 流す途中でファイルが変わったら打ち切る() {
+    // 設計§5-4。読んでいる間にファイルが変わったら、**成功の顔で全文と偽らない**。
+    let (response, text) = 流す途中で書き換える("htmlabort", "raw").await;
     assert_eq!(response.status, 200, "流し始めてから切れること");
     assert!(
         !response.complete,
@@ -762,6 +787,64 @@ async fn 流す途中でファイルが変わったら打ち切る() {
     assert!(
         text.as_bytes().starts_with(&response.body),
         "切れたところまでは元と同じであること"
+    );
+    // **生の口には一言を足さない**（元のバイト列そのままの口。CLI の `--raw --out-file` が保存する）
+    assert_eq!(
+        数える(&response.body, ABORT_MARK),
+        0,
+        "生の口に打ち切りの一言が混ざらないこと"
+    );
+    assert_eq!(
+        数える(
+            &response.body,
+            server_core::hosts::ABORT_NOTICE_CHANGED.as_bytes()
+        ),
+        0,
+        "生の口に打ち切りの文が混ざらないこと"
+    );
+}
+
+#[tokio::test]
+async fn プレビューは流す途中で打ち切ると途中までだと一言を足して切る() {
+    // コードレビュー対応 2026-11-23 対応1。`iframe` は届いたところまでを描くので、`Err` で
+    // 切るだけでは半分の文書が完全なものに見える。プレビューでは目に見える一言を末尾へ足す
+    let (response, text) = 流す途中で書き換える("htmlabortpv", "preview").await;
+    assert_eq!(response.status, 200, "流し始めてから切れること");
+    assert!(
+        !response.complete,
+        "一言を足しても成功の顔にしない＝接続は途中で切れること"
+    );
+    assert_eq!(
+        数える(&response.body, ABORT_MARK),
+        1,
+        "打ち切りの一言がちょうど1回入ること"
+    );
+    assert_eq!(
+        数える(
+            &response.body,
+            server_core::hosts::ABORT_NOTICE_CHANGED.as_bytes()
+        ),
+        1,
+        "変わったときの文がちょうど1回入ること"
+    );
+    let open = server_core::hosts::ABORT_NOTICE_OPEN.as_bytes();
+    let at = response
+        .body
+        .windows(open.len())
+        .position(|window| window == open)
+        .expect("一言の前置きがあること");
+    assert!(
+        text.as_bytes().starts_with(&response.body[..at]),
+        "一言の前までは元の本文の先頭と同じであること（先頭は1バイトも触らない）"
+    );
+    assert!(
+        response.body.ends_with(b"</div>\n"),
+        "一言が本文の末尾にあること"
+    );
+    assert_eq!(
+        数える(&response.body, b"__fileFind"),
+        0,
+        "最後まで流れなかったので、探す係は付かないこと"
     );
 }
 
