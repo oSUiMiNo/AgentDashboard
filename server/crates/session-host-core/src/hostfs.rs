@@ -463,8 +463,11 @@ pub fn read_file_range_from(
 /// 設計§3-1）。
 ///
 /// - **窓読みでも設定の上限を越えさせない**（[`checked_meta`] を通る）
-/// - 長さは [`RANGE_MAX_BYTES`] で切り詰める（4 未満は 4 に上げる。4 バイトあれば最初の
-///   1字は必ず収まるので、`end` から頼み続けて空のまま進まない形は起きない）
+/// - 長さは 1 以上で受け、[`RANGE_MAX_BYTES`] で切り詰め、**頼んだ終わりで止める**。終わりの
+///   寄せで1字も入らないときだけ1字ぶん読み足す（`end` から頼み続けて空のまま進まない形を
+///   作らない）。行頭への寄せで空になったときは空で返す（画面が寄せずに頼み直す）。
+///   長さを 4 へ広げると、先頭近くで前へ読み足す窓の終わりが今の先頭を越え、継ぎ目が合わない
+///   （コードレビュー対応 2026-11-23 対応4）
 /// - 読むのは窓ぶんだけ。ファイル全体は読まない
 /// - 開始と終わりを UTF-8 の文字の境目へ寄せる。**次の窓を `end` から頼めば、継ぎ目に
 ///   欠けも重なりも出ない**。行の途中で切れるのは許す（継げば元に戻る）
@@ -483,7 +486,7 @@ pub fn read_file_range(
     let (meta, bytes) = checked_meta(path, limit)?;
     let stamp = stamp_of(&meta);
     let shown = path.display().to_string();
-    let length = range.length.clamp(4, RANGE_MAX_BYTES);
+    let length = range.length.clamp(1, RANGE_MAX_BYTES);
 
     if range.offset >= bytes {
         return Ok(FileChunk {
@@ -500,7 +503,9 @@ pub fn read_file_range(
     let mut file = std::fs::File::open(path).map_err(|err| HostFsError::from_io(&err, path))?;
     file.seek(SeekFrom::Start(range.offset))
         .map_err(|err| HostFsError::from_io(&err, path))?;
-    let want = length.min(bytes - range.offset);
+    // 頼んだ長さに、字1つを入れきるための予備（続きのバイトの飛ばし3＋字1つの4）を足して読む
+    let want = (length + 7).min(bytes - range.offset);
+    let cut = usize::try_from(length).unwrap_or(usize::MAX);
     let mut buf = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
     (&mut file)
         .take(want)
@@ -514,22 +519,34 @@ pub fn read_file_range(
             head += 1;
         }
     }
+    let cut = cut.min(buf.len());
     let mut at_line_start = range.offset == 0;
-    if range.align_line && range.offset > 0 {
-        if let Some(pos) = buf[head..].iter().position(|&b| b == b'\n') {
+    let mut aligned = false;
+    if range.align_line && range.offset > 0 && head < cut {
+        if let Some(pos) = buf[head..cut].iter().position(|&b| b == b'\n') {
             head += pos + 1;
             at_line_start = true;
+            aligned = true;
         }
     }
 
-    // 終わりを寄せる：ファイルの最後でなければ、末尾の欠けた字を切り落とす
-    let at_eof = range.offset + buf.len() as u64 >= bytes;
+    // 終わりを寄せる：ファイルの最後でなければ、頼んだ終わりの手前の欠けた字を切り落とす
+    let at_eof = range.offset + cut as u64 >= bytes;
     let tail = if at_eof {
-        buf.len()
+        cut
     } else {
-        complete_prefix_len(&buf)
+        complete_prefix_len(&buf[..cut])
     };
-    let tail = tail.max(head);
+    let mut tail = tail.max(head);
+    // 終わりの寄せで1字も入らなかったときだけ、予備から字1つぶん延ばす。行頭への寄せで
+    // 空になったときは延ばさない（延ばすと終わりが今の先頭を越え、継ぎ目が合わない）
+    if tail == head && !at_eof && !aligned {
+        if let Some(need) = buf.get(head).and_then(|&lead| utf8_len(lead)) {
+            if head + need <= buf.len() {
+                tail = head + need;
+            }
+        }
+    }
 
     let slice = &buf[head..tail];
     let start = range.offset + head as u64;
@@ -558,6 +575,17 @@ pub fn read_file_range(
         stamp,
         at_line_start,
     })
+}
+
+/// UTF-8 の字の先頭バイトが示す字の長さ。先頭バイトとして読めなければ `None`。
+fn utf8_len(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7F => Some(1),
+        0xC0..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF7 => Some(4),
+        _ => None,
+    }
 }
 
 /// 末尾の欠けた字を除いた長さ（設計§3-1）。

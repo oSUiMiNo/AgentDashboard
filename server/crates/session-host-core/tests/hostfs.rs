@@ -1176,6 +1176,54 @@ fn 頼まれた長さは一回の最大で切り詰める() {
 }
 
 #[test]
+fn 窓の長さは頼んだ終わりで止まり4へ広げない() {
+    // コードレビュー対応 2026-11-23 対応4。4 へ広げると、先頭近くで前へ読み足す窓の終わりが
+    // 今の先頭を越え、継ぎ目が合わない
+    let sandbox = Sandbox::new("range-short");
+    let path = sandbox.file("短.txt", b"abcdefgh");
+
+    let chunk =
+        hostfs::read_file_range(&path, 窓(0, 2, false), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert_eq!((chunk.start, chunk.end), (0, 2), "頼んだ終わりで止まること");
+    assert_eq!(chunk.text, "ab");
+
+    let chunk =
+        hostfs::read_file_range(&path, 窓(0, 1, false), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert_eq!((chunk.start, chunk.end), (0, 1));
+    assert_eq!(chunk.text, "a");
+}
+
+#[test]
+fn 長さ1でも字の頭からなら1字入る() {
+    let sandbox = Sandbox::new("range-one");
+    let path = sandbox.file("字.txt", "あいう".as_bytes());
+
+    // 字の頭から1バイトだけ頼んでも、空のまま進まない形にせず1字入れる
+    let chunk =
+        hostfs::read_file_range(&path, 窓(0, 1, false), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert_eq!((chunk.start, chunk.end), (0, 3));
+    assert_eq!(chunk.text, "あ");
+
+    // 字の途中（「あ」の2バイト目）から1バイト：次の字の頭から1字
+    let chunk =
+        hostfs::read_file_range(&path, 窓(1, 1, false), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert_eq!((chunk.start, chunk.end), (3, 6));
+    assert_eq!(chunk.text, "い");
+}
+
+#[test]
+fn 行頭への寄せで空になった窓は延ばさない() {
+    // 画面はこの空の窓を見て、寄せずに1回だけ頼み直す。ここで延ばすと終わりが今の先頭を越える
+    let sandbox = Sandbox::new("range-align-empty");
+    let path = sandbox.file("寄せ.txt", b"ab\ncd");
+
+    let chunk =
+        hostfs::read_file_range(&path, 窓(1, 2, true), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert_eq!((chunk.start, chunk.end), (3, 3), "改行の直後で空になること");
+    assert_eq!(chunk.text, "");
+}
+
+#[test]
 fn 書く側は一括で読む線で断る() {
     let sandbox = Sandbox::new("write-whole-line");
     let size = WHOLE_TEXT_BYTES + 1;
