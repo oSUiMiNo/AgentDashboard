@@ -23,8 +23,15 @@ pub const MAX_ENTRIES: usize = 1_000;
 /// **件数と重ねて掛ける。** 名前は1件255バイトまで在りうるので、件数だけでは縛れない。
 pub const MAX_LISTING_BYTES: usize = 512 * 1024;
 
-/// 中身を返してよいファイルの大きさの上限（設計§23-2。`表示できるテキストの上限を3MBへ上げる`
-/// で 256 KiB から引き上げた）。
+/// 全文を1通で返す線（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-1）。
+///
+/// **いまは読める上限ではない。** これを超えて設定の上限以下なら、先頭の窓
+/// （[`WINDOW_BYTES`]）だけを返して `truncated: true` にし、続きは窓読み（[`FileChunk`]）で
+/// 取る。読める上限は設定の値で、PC 自身の天井は [`FILE_VIEW_LIMIT_MAX`] である。
+///
+/// 値の由来は、かつての「中身を返してよいファイルの大きさの上限」（設計§23-2。
+/// `表示できるテキストの上限を3MBへ上げる` で 256 KiB から引き上げた）。下の実測は、
+/// 3 MiB までなら全文を1通で返しても動くことの根拠としていまも正しい。
 ///
 /// # なぜ上げたのか
 ///
@@ -46,9 +53,90 @@ pub const MAX_LISTING_BYTES: usize = 512 * 1024;
 /// # HTML と SVG もここを通る
 ///
 /// [`MAX_BLOB_BYTES`] を通るのは**画像だけ**である（`server-core` の生の口を見よ）。
-/// したがってこの値は、整形して読む・生テキストで見る・`iframe` で描く の**すべて**を
-/// 決めている。
+/// 一括で読む線を超えた HTML／SVG は、サーバが窓を繰り返し読んで流す
+/// （`server_core::file_view::PREVIEW_MAX_BYTES` まで）。
 pub const WHOLE_TEXT_BYTES: u64 = 3 * 1024 * 1024;
+
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+/// 窓の大きさ。最初の窓と、続きを頼むときの既定の長さ（設計§2-1。エージェントの仮置き）。
+///
+/// 生テキストの描画は 3 MiB でも 36ms（`FileView.tsx` の実測の表）なので、画面が4枚持っても
+/// 1 MiB で軽い。1回の往復で数千行が来るので、スクロールのたびに待たせない。16 MiB の
+/// 壁（`session-host-core/src/link.rs` のコメント）の 1/64 に収まる。
+pub const WINDOW_BYTES: u64 = 256 * 1024;
+
+/// 1回の窓読みで読める最大（設計§2-1）。頼まれた長さはここで切り詰める——ブラウザの言い値を
+/// そのまま使わない。
+pub const RANGE_MAX_BYTES: u64 = MIB;
+
+/// 設定の上限の選択肢（設計§1・§2-1）。要件の16個の並びそのまま。
+///
+/// 2進で数え、表示は Windows と同じ「MB」「GB」にする（方針§8。エージェントの仮置き）。
+/// この PJT の画面は既に「2進の値を MB／GB と表示する」作法で揃っている（`web/src/lib/format.ts`）。
+pub const FILE_VIEW_LIMIT_CHOICES: [u64; 16] = [
+    MIB,
+    3 * MIB,
+    5 * MIB,
+    10 * MIB,
+    15 * MIB,
+    20 * MIB,
+    30 * MIB,
+    50 * MIB,
+    100 * MIB,
+    300 * MIB,
+    500 * MIB,
+    GIB,
+    3 * GIB,
+    5 * GIB,
+    10 * GIB,
+    20 * GIB,
+];
+
+/// PC 自身の天井（設計§2-1・§3-1）。渡された上限がこれを超えても、ここで断る——壊れた
+/// サーバや CLI の手打ちで天井を越えさせない。選択肢の最後と同じ値。
+pub const FILE_VIEW_LIMIT_MAX: u64 = 20 * GIB;
+
+const _: () = assert!(FILE_VIEW_LIMIT_CHOICES[15] == FILE_VIEW_LIMIT_MAX);
+
+/// 大きさを人の読める形にする（設計§2-2）。`web/src/lib/format.ts` の `formatBytes` の写し。
+///
+/// 1024 ごとに繰り上げ、`B/KB/MB/GB/TB`、MB 以上で 100 未満なら小数1桁。**両側に同じ見本の
+/// 表を置いて固定する**（TS 側の表はフェーズ6で置く）。
+///
+/// 丸めは「半分は上へ」を明示で書く。JS の `toFixed` は同点で大きい方を選ぶが、Rust の
+/// `format!("{:.1}")` は同点を偶数へ寄せるので、そのまま書くと 2560 バイトで TS は "3 KB"、
+/// Rust は "2 KB" と割れる。
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit >= 2 && value < 100.0 {
+        format!("{:.1} {}", (value * 10.0).round() / 10.0, UNITS[unit])
+    } else {
+        format!("{} {}", value.round() as u64, UNITS[unit])
+    }
+}
+
+/// 選択肢の名前（"1 MB"・"20 GB"。整数）を作る（設計§2-2）。名前は Rust 側で1つだけ作り、
+/// 画面は設定の口で受け取る。MiB・GiB の倍数でなければ [`human_bytes`] に任せる。
+pub fn limit_label(bytes: u64) -> String {
+    if bytes != 0 && bytes % GIB == 0 {
+        format!("{} GB", bytes / GIB)
+    } else if bytes != 0 && bytes % MIB == 0 {
+        format!("{} MB", bytes / MIB)
+    } else {
+        human_bytes(bytes)
+    }
+}
 
 /// フォルダ1つの中身（設計§8）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,10 +184,13 @@ pub enum EntryKind {
 pub struct FileContent {
     pub path: String,
     pub text: String,
-    /// 上限の**内側で**行数などの都合により切ったか。
+    /// 一括で読む線（[`WHOLE_TEXT_BYTES`]）を超え、設定の上限以下のときに true
+    /// （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§2-2）。
     ///
-    /// [`WHOLE_TEXT_BYTES`] を超えた場合はここを使わず、断る（設計§9）。切れていることが
-    /// 伝わらない形（先頭だけ返して黙る）を避けるため、意味を混ぜない。
+    /// そのとき `text` は先頭の窓（[`WINDOW_BYTES`] まで、文字の境目で切る）で、続きは
+    /// 窓読み（[`FileChunk`]）で取る。**設定の上限を超えた場合はここを使わず断る**——
+    /// 切れていることが伝わらない形（先頭だけ返して黙る）を避けるため、上限超えと意味を
+    /// 混ぜない。
     pub truncated: bool,
     /// 元のファイルの大きさ。断るときにも添えるので、返せた場合も入れておく
     pub bytes: u64,
@@ -127,6 +218,41 @@ pub struct FileContent {
     /// 書けない相手に打てる姿を見せることになる。
     #[serde(default)]
     pub writable: bool,
+}
+
+/// 窓1つ。位置を指定して読んだテキストの一部（設計§2-2）。
+///
+/// `end` から次を頼めば、継ぎ目に欠けも重なりも無い（開始と終わりを UTF-8 の文字の境目へ
+/// 寄せてあるため）。`stamp` は [`FileContent::stamp`] と同じ作りで、不透明。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub path: String,
+    /// 実際に読んだ先頭（UTF-8 の文字の境目。行頭へ寄せたならその位置）
+    pub start: u64,
+    /// 実際に読んだ終わり（排他。文字の境目）
+    pub end: u64,
+    /// ファイル全体の大きさ（読んだ時点）
+    pub bytes: u64,
+    pub text: String,
+    /// 読んだ時点の印（[`FileContent::stamp`] と同じ作り。不透明）
+    pub stamp: String,
+    /// 行頭へ寄せられたか。寄せを頼まなかった・窓の中に改行が無かったときは false
+    /// （先頭から読んだ窓は常に true）
+    pub at_line_start: bool,
+}
+
+/// 窓の頼み方（設計§2-2）。
+///
+/// 線の上には載らない（`ServerToAgent::ReadFileRange` の欄として載る）。trait と `hostfs` の
+/// 引数として使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRange {
+    /// 読み始める位置（バイト）。文字の途中なら次の字の頭へ寄せる
+    pub offset: u64,
+    /// 読む長さ（バイト）。読む側が [`RANGE_MAX_BYTES`] で切り詰める
+    pub length: u64,
+    /// 最初の改行の直後へ寄せるか（位置へ飛ぶとき、行頭から見せるため）
+    pub align_line: bool,
 }
 
 /// バイト列で返してよいファイルの大きさの上限（`ファイル閲覧で画像とHTMLも表示する` 設計§4）。
@@ -364,6 +490,124 @@ mod tests {
         assert_eq!(MAX_ENTRIES, 1_000);
         assert_eq!(MAX_LISTING_BYTES, 524_288);
         assert_eq!(WHOLE_TEXT_BYTES, 3_145_728);
+        assert_eq!(WINDOW_BYTES, 262_144);
+        assert_eq!(RANGE_MAX_BYTES, 1_048_576);
+        assert_eq!(FILE_VIEW_LIMIT_MAX, 21_474_836_480);
+    }
+
+    /// 窓・選択肢・大きさの表記（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+    /// 設計§2。テスト計画フェーズ1）。
+    mod 窓と選択肢 {
+        use super::*;
+
+        #[test]
+        fn 選択肢は16個で昇順に並び最後が天井() {
+            assert_eq!(FILE_VIEW_LIMIT_CHOICES.len(), 16);
+            for pair in FILE_VIEW_LIMIT_CHOICES.windows(2) {
+                assert!(pair[0] < pair[1], "狭義の昇順であること：{pair:?}");
+            }
+            for value in FILE_VIEW_LIMIT_CHOICES {
+                // 2進で数える（1 MB ＝ 1,048,576 バイト）
+                assert_eq!(value % 1_048_576, 0, "{value} が MiB の倍数であること");
+            }
+            assert_eq!(FILE_VIEW_LIMIT_CHOICES[15], 21_474_836_480);
+        }
+
+        #[test]
+        fn 選択肢の名前は要件の並びのまま() {
+            // **字で書く。** 要件の16個（1MB〜20GB）と食い違ったら、どちらかが嘘になっている
+            let labels: Vec<String> = FILE_VIEW_LIMIT_CHOICES
+                .iter()
+                .map(|&value| limit_label(value))
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    "1 MB", "3 MB", "5 MB", "10 MB", "15 MB", "20 MB", "30 MB", "50 MB", "100 MB",
+                    "300 MB", "500 MB", "1 GB", "3 GB", "5 GB", "10 GB", "20 GB"
+                ]
+            );
+        }
+
+        #[test]
+        fn 選択肢に無い大きさの名前は表記の関数に任せる() {
+            assert_eq!(limit_label(0), "0 B");
+            assert_eq!(limit_label(1_536), "2 KB");
+            assert_eq!(limit_label(5_062_904), "4.8 MB");
+        }
+
+        #[test]
+        fn 大きさの表記は画面と同じ見本の表に合う() {
+            // **画面（`web/src/lib/format.ts` の `formatBytes`）に当てて求めた値。** 同じ表を
+            // TS 側にも置く（テスト計画フェーズ6）。同点（1.5・2.5・2.25）は「半分は上へ」で、
+            // 偶数へ寄せる丸めだと 2560 が "2 KB" になって落ちる
+            let table: [(u64, &str); 16] = [
+                (0, "0 B"),
+                (1, "1 B"),
+                (1_023, "1023 B"),
+                (1_024, "1 KB"),
+                (1_536, "2 KB"),
+                (2_560, "3 KB"),
+                (1_048_575, "1024 KB"),
+                (1_048_576, "1.0 MB"),
+                (2_359_296, "2.3 MB"),
+                (3_145_728, "3.0 MB"),
+                (5_062_904, "4.8 MB"),
+                (8_388_608, "8.0 MB"),
+                (104_857_600, "100 MB"),
+                (1_073_741_824, "1.0 GB"),
+                (21_474_836_480, "20.0 GB"),
+                (5_497_558_138_880, "5.0 TB"),
+            ];
+            for (bytes, want) in table {
+                assert_eq!(human_bytes(bytes), want, "{bytes} バイト");
+            }
+        }
+
+        fn 窓の見本() -> FileChunk {
+            FileChunk {
+                path: "/home/me/記録.log".to_string(),
+                start: 262_144,
+                end: 524_290,
+                bytes: 6_442_450_944,
+                text: "あé🙂\n\"引用\" と \\ 逆斜線\n".to_string(),
+                stamp: "12345:678".to_string(),
+                at_line_start: true,
+            }
+        }
+
+        #[test]
+        fn 窓の欄名は画面が読む綴りのまま() {
+            // 画面（フェーズ7）が同じ綴りで読む。線の上の形をここで固定する
+            let value = serde_json::to_value(窓の見本()).unwrap();
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "at_line_start",
+                    "bytes",
+                    "end",
+                    "path",
+                    "stamp",
+                    "start",
+                    "text"
+                ]
+            );
+        }
+
+        #[test]
+        fn 窓は多バイト字と引用符を混ぜても往復して同じに戻る() {
+            let chunk = 窓の見本();
+            let json = serde_json::to_string(&chunk).unwrap();
+            let back: FileChunk = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, chunk);
+        }
     }
 
     /// 種別の表（`ファイル閲覧で画像とHTMLも表示する` 設計§2。テスト計画フェーズ2）。
