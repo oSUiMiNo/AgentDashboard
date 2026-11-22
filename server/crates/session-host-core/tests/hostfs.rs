@@ -7,7 +7,10 @@
 #![allow(non_snake_case)]
 
 use protocol::a2s::HostFailure;
-use protocol::fs::{EntryKind, MAX_BLOB_BYTES, MAX_ENTRIES, WHOLE_TEXT_BYTES};
+use protocol::fs::{
+    EntryKind, FILE_VIEW_LIMIT_MAX, FileRange, MAX_BLOB_BYTES, MAX_ENTRIES, RANGE_MAX_BYTES,
+    WHOLE_TEXT_BYTES, WINDOW_BYTES,
+};
 use session_host_core::hostfs;
 use std::path::{Path, PathBuf};
 
@@ -856,4 +859,339 @@ fn 絶対パスは起点を組み立てずにそのまま読む() {
     let content = hostfs::read_file_from(&path.display().to_string()).expect("読めること");
 
     assert_eq!(content.text, body);
+}
+
+// ───── 窓で読む（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§3）─────
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// 中身を書かずに大きさだけ持つ（疎な）ファイル。中身は NUL で、ディスクを食わない
+fn 疎(sandbox: &Sandbox, name: &str, size: u64) -> PathBuf {
+    let path = sandbox.path().join(name);
+    let file = std::fs::File::create(&path).expect("ファイルを作れること");
+    file.set_len(size).expect("大きさを伸ばせること");
+    path
+}
+
+/// 先頭と末尾にだけ字を書き、間を疎にしたファイル。間の窓は NUL になる
+fn 頭と尻だけ字(
+    sandbox: &Sandbox,
+    name: &str,
+    head: &[u8],
+    size: u64,
+    tail: &[u8],
+) -> PathBuf {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = sandbox.file(name, head);
+    // 試験のファイルなので OpenOptions を使ってよい（禁止は `src/hostfs.rs` の本文だけ）
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("開けること");
+    file.set_len(size).expect("大きさを伸ばせること");
+    file.seek(SeekFrom::Start(size - tail.len() as u64))
+        .expect("末尾へ移れること");
+    file.write_all(tail).expect("末尾に書けること");
+    path
+}
+
+/// 1〜4バイトの字・改行・引用符・逆斜線を規則的に並べた本文（`bytes` を最大3バイト超える）
+fn 混ぜた本文(bytes: usize) -> String {
+    let pieces = ["a", "é", "あ", "🙂", "\n", "\"", "\\", "bc", "行"];
+    let mut out = String::with_capacity(bytes + 4);
+    let mut at = 0;
+    while out.len() < bytes {
+        out.push_str(pieces[at % pieces.len()]);
+        at += 1;
+    }
+    out
+}
+
+/// ちょうど `bytes` バイトの本文（混ぜた本文の後ろを `a` で埋める）
+fn ちょうどの本文(bytes: usize) -> String {
+    let mut body = 混ぜた本文(bytes - 8);
+    while body.len() < bytes {
+        body.push('a');
+    }
+    assert_eq!(body.len(), bytes);
+    body
+}
+
+fn 窓(offset: u64, length: u64, align_line: bool) -> FileRange {
+    FileRange {
+        offset,
+        length,
+        align_line,
+    }
+}
+
+/// `offset = 0` から、返った `end` を次の `offset` にして末尾まで読み、継いだものを返す
+fn 継いで読む(path: &Path, length: u64) -> String {
+    let mut offset = 0;
+    let mut joined = String::new();
+    loop {
+        let chunk = hostfs::read_file_range(path, 窓(offset, length, false), FILE_VIEW_LIMIT_MAX)
+            .unwrap_or_else(|e| {
+                panic!("窓が正しい UTF-8 で返ること（{offset} から）：{}", e.detail)
+            });
+        assert_eq!(
+            chunk.start, offset,
+            "継ぎ目に欠けも重なりも無いこと（{offset} から頼んだ）"
+        );
+        joined.push_str(&chunk.text);
+        if chunk.end >= chunk.bytes {
+            return joined;
+        }
+        assert!(chunk.end > offset, "窓が進むこと（{offset} から）");
+        offset = chunk.end;
+    }
+}
+
+#[test]
+fn 上限を渡すと超えたファイルは中身を読まずに断る() {
+    let sandbox = Sandbox::new("within-toolarge");
+    let path = 疎(&sandbox, "大きい.log", 6 * GIB);
+
+    let started = std::time::Instant::now();
+    let err = hostfs::read_file_within(&path, 5 * GIB).expect_err("断ること");
+    // 時間は判定にしない（混み具合で動く）。読まなかったことは、下の理由で確かめている
+    eprintln!("断るまで {:?}", started.elapsed());
+
+    // **中身は NUL である。** 読みに行っていたら「テキストではない」（Unsupported）になる
+    assert_eq!(err.reason, HostFailure::TooLarge, "{}", err.detail);
+    for want in ["6442450944", "6.0 GB", "5368709120", "5.0 GB"] {
+        assert!(
+            err.detail.contains(want),
+            "{want} が断り文に入ること（{}）",
+            err.detail
+        );
+    }
+
+    // 窓読みでも設定の上限を越えさせない
+    let err = hostfs::read_file_range(&path, 窓(0, 4096, false), 5 * GIB)
+        .expect_err("窓読みでも断ること");
+    assert_eq!(err.reason, HostFailure::TooLarge, "{}", err.detail);
+}
+
+#[test]
+fn 渡された上限が天井を超えてもpc自身の天井で断る() {
+    let sandbox = Sandbox::new("within-ceiling");
+    let path = 疎(&sandbox, "とても大きい.log", 21 * GIB);
+
+    let err = hostfs::read_file_within(&path, 30 * GIB).expect_err("天井で断ること");
+
+    assert_eq!(err.reason, HostFailure::TooLarge, "{}", err.detail);
+    assert!(
+        err.detail.contains("21474836480") && err.detail.contains("20.0 GB"),
+        "天井（20 GB）で断ったと分かること（{}）",
+        err.detail
+    );
+}
+
+#[test]
+fn 一括で読む線の内側はいまと同じ全文読み() {
+    let sandbox = Sandbox::new("within-whole");
+    let body = ちょうどの本文(WHOLE_TEXT_BYTES as usize);
+    let path = sandbox.file("ちょうど.txt", body.as_bytes());
+
+    let content = hostfs::read_file_within(&path, FILE_VIEW_LIMIT_MAX).expect("読めること");
+
+    assert!(!content.truncated);
+    assert_eq!(content.bytes, WHOLE_TEXT_BYTES);
+    assert!(content.text == body, "全文がそのまま返ること");
+
+    // NUL と UTF-8 でないものは、いままでどおり断る
+    let nul = sandbox.file("bin.dat", b"MZ\x00\x00");
+    let err = hostfs::read_file_within(&nul, FILE_VIEW_LIMIT_MAX).expect_err("断ること");
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    let sjis = sandbox.file("sjis.txt", &[0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA]);
+    let err = hostfs::read_file_within(&sjis, FILE_VIEW_LIMIT_MAX).expect_err("断ること");
+    assert_eq!(err.reason, HostFailure::Unsupported);
+}
+
+#[test]
+fn 一括で読む線を超えたら先頭の窓だけを返す() {
+    let sandbox = Sandbox::new("within-head");
+    // 窓の境目を「あ」（3バイト）がまたぐようにしておく
+    let mut body = "a".repeat(WINDOW_BYTES as usize - 1);
+    body.push('あ');
+    while body.len() < WHOLE_TEXT_BYTES as usize + 1 {
+        body.push('b');
+    }
+    let path = sandbox.file("大きい.txt", body.as_bytes());
+
+    let content = hostfs::read_file_within(&path, FILE_VIEW_LIMIT_MAX).expect("読めること");
+
+    assert!(content.truncated, "途中までだと分かること");
+    // 欠けた字で終わらない（境目をまたいだ「あ」は次の窓へ回る）
+    assert!(
+        content.text == "a".repeat(WINDOW_BYTES as usize - 1),
+        "先頭の窓だけが、文字の境目で切って返ること（{} バイト）",
+        content.text.len()
+    );
+    assert_eq!(content.bytes, 3_145_729);
+    assert!(!content.writable, "全文を読めないものは書けない扱い");
+    assert!(!content.stamp.is_empty());
+}
+
+#[test]
+fn 窓を継ぐと元と一致する() {
+    let sandbox = Sandbox::new("range-join");
+    // 小さい長さは小さい本文に、大きい長さは大きい本文に当てる（4 で数 MiB は遅い）
+    let small = 混ぜた本文(200 * 1024);
+    let small_path = sandbox.file("小.txt", small.as_bytes());
+    for length in [4, 7, 13] {
+        let joined = 継いで読む(&small_path, length);
+        assert!(joined == small, "長さ {length} で継ぐと元と一致すること");
+    }
+
+    let large = 混ぜた本文(3 * 1024 * 1024 + 512 * 1024);
+    let large_path = sandbox.file("大.txt", large.as_bytes());
+    for length in [1_000_003, RANGE_MAX_BYTES] {
+        let joined = 継いで読む(&large_path, length);
+        assert!(joined == large, "長さ {length} で継ぐと元と一致すること");
+    }
+}
+
+#[test]
+fn 途中から頼むと文字の境目へ寄る() {
+    let sandbox = Sandbox::new("range-boundary");
+    let body = "xあy";
+    let path = sandbox.file("境目.txt", body.as_bytes());
+
+    // 2 は「あ」（1〜3バイト目）の2バイト目
+    let chunk = hostfs::read_file_range(&path, 窓(2, 1024, false), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+
+    assert_eq!(chunk.start, 4, "次の字の頭へ寄ること");
+    assert_eq!(chunk.text, &body[4..chunk.end as usize]);
+    assert!(!chunk.at_line_start);
+}
+
+#[test]
+fn 行頭へ寄せる_寄せられないとき_末尾の先() {
+    let sandbox = Sandbox::new("range-line");
+    let body = "一行目\n二行目\n三行目\n";
+    let path = sandbox.file("行.txt", body.as_bytes());
+
+    // 13 は二行目の途中。最初の改行の直後＝三行目の頭へ寄る
+    let chunk = hostfs::read_file_range(&path, 窓(13, 1024, true), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+    assert_eq!(chunk.start, 20, "三行目の頭へ寄ること");
+    assert!(chunk.at_line_start);
+    assert_eq!(chunk.text, "三行目\n");
+
+    // 改行の無い長い1行の途中：文字の境目のまま、行頭ではない
+    let long = "あ".repeat(100);
+    let long_path = sandbox.file("一行.txt", long.as_bytes());
+    let chunk = hostfs::read_file_range(&long_path, 窓(4, 1024, true), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+    assert_eq!(chunk.start, 6);
+    assert!(!chunk.at_line_start);
+
+    // 先頭から読んだ窓は常に行頭
+    let chunk =
+        hostfs::read_file_range(&path, 窓(0, 1024, true), FILE_VIEW_LIMIT_MAX).expect("読めること");
+    assert!(chunk.at_line_start);
+    assert_eq!(chunk.text, body);
+
+    // 末尾の先は空の窓。断らない
+    let bytes = body.len() as u64;
+    for offset in [bytes, bytes + 10] {
+        let chunk = hostfs::read_file_range(&path, 窓(offset, 1024, true), FILE_VIEW_LIMIT_MAX)
+            .expect("末尾の先でも断らないこと");
+        assert_eq!((chunk.start, chunk.end, chunk.bytes), (bytes, bytes, bytes));
+        assert_eq!(chunk.text, "");
+        assert!(!chunk.at_line_start);
+    }
+}
+
+#[test]
+fn 途中の窓のnulと壊れたutf8は位置つきで断る() {
+    let sandbox = Sandbox::new("range-nul");
+    let edge = 64 * 1024;
+    let head = "h".repeat(edge);
+    let tail = "t".repeat(edge);
+    let size = 8 * 1024 * 1024;
+    let path = 頭と尻だけ字(
+        &sandbox,
+        "頭と尻.log",
+        head.as_bytes(),
+        size,
+        tail.as_bytes(),
+    );
+
+    let first = hostfs::read_file_range(&path, 窓(0, edge as u64, false), FILE_VIEW_LIMIT_MAX)
+        .expect("先頭の窓は読めること");
+    assert!(first.text == head);
+
+    let err = hostfs::read_file_range(&path, 窓(4 * 1024 * 1024, 4096, false), FILE_VIEW_LIMIT_MAX)
+        .expect_err("間の窓は断ること");
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    assert!(
+        err.detail.contains("4194304 バイト目から")
+            && err.detail.contains("テキストではありません"),
+        "位置つきで断ること（{}）",
+        err.detail
+    );
+
+    let last = hostfs::read_file_range(
+        &path,
+        窓(size - edge as u64, edge as u64, false),
+        FILE_VIEW_LIMIT_MAX,
+    )
+    .expect("末尾の窓は読めること");
+    assert!(last.text == tail);
+    assert_eq!(last.end, size);
+
+    // 壊れた UTF-8 を含む窓
+    let mut broken = b"a".repeat(100);
+    broken.extend_from_slice(&[0xFF, 0xFE]);
+    broken.extend_from_slice(&b"b".repeat(100));
+    let broken_path = sandbox.file("壊れた.txt", &broken);
+    let err = hostfs::read_file_range(&broken_path, 窓(50, 1024, false), FILE_VIEW_LIMIT_MAX)
+        .expect_err("断ること");
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    assert!(
+        err.detail.contains("50 バイト目から") && err.detail.contains("UTF-8 として読めません"),
+        "位置つきで断ること（{}）",
+        err.detail
+    );
+}
+
+#[test]
+fn 頼まれた長さは一回の最大で切り詰める() {
+    let sandbox = Sandbox::new("range-clamp");
+    let body = 混ぜた本文(3 * 1024 * 1024 + 512 * 1024);
+    let path = sandbox.file("大.txt", body.as_bytes());
+
+    let chunk = hostfs::read_file_range(&path, 窓(0, 2 * 1024 * 1024, false), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+
+    let got = chunk.end - chunk.start;
+    assert!(
+        got <= 1_048_576 && got > 1_048_576 - 4,
+        "1 MiB（から欠けた字を除いた長さ）で切り詰めること（{got}）"
+    );
+}
+
+#[test]
+fn 書く側は一括で読む線で断る() {
+    let sandbox = Sandbox::new("write-whole-line");
+    let size = WHOLE_TEXT_BYTES + 1;
+    let path = sandbox.file("大きい.md", &vec![b'a'; size as usize]);
+    let roots = 根(sandbox.path());
+    // 先頭の窓の印（全文を読めていない状態）
+    let stamp = hostfs::read_file_within(&path, FILE_VIEW_LIMIT_MAX)
+        .expect("先頭の窓は読めること")
+        .stamp;
+
+    let err = hostfs::write_file(&path, "x", &stamp, &roots).expect_err("書き戻さないこと");
+
+    assert_eq!(err.reason, HostFailure::TooLarge, "{}", err.detail);
+    assert_eq!(
+        std::fs::metadata(&path).expect("在ること").len(),
+        3_145_729,
+        "切り詰めて上書きされていないこと"
+    );
 }

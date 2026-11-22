@@ -22,6 +22,13 @@
 //! いるのは `tests/hostfs.rs` の構造の検査で、**書く道具の綴りがソースに現れていないか**
 //! を見ている。[`write_file`] が使ってよいのは `fs::write` 1つだけである。
 //!
+//! # 読む口は2つある
+//!
+//! 全文（[`read_file_within`]。一括で読む線〈`WHOLE_TEXT_BYTES`〉まで。超えたら先頭の窓）と、
+//! 位置を指定した窓（[`read_file_range`]）である（`ファイル閲覧の上限を設定から変え、
+//! 大きいものは流し読みする` 設計§3）。**どちらも開く前に `checked_meta` で大きさを見る**
+//! ——上限を越えて開く道を作らない。
+//!
 //! # 同期のまま置いてある
 //!
 //! ファイルの仕事は呼ぶ側が `spawn_blocking` へ逃がす（`link.rs`）。ここを `async` に
@@ -29,9 +36,11 @@
 
 use protocol::a2s::HostFailure;
 use protocol::fs::{
-    DirEntry, DirListing, EntryKind, FileBlob, FileContent, FileKind, MAX_BLOB_BYTES, MAX_ENTRIES,
-    MAX_LISTING_BYTES, WHOLE_TEXT_BYTES, WrittenFile, kind_of, media_type_of,
+    DirEntry, DirListing, EntryKind, FILE_VIEW_LIMIT_MAX, FileBlob, FileChunk, FileContent,
+    FileKind, FileRange, MAX_BLOB_BYTES, MAX_ENTRIES, MAX_LISTING_BYTES, RANGE_MAX_BYTES,
+    WHOLE_TEXT_BYTES, WINDOW_BYTES, WrittenFile, human_bytes, kind_of, media_type_of,
 };
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// 応えられなかったときの中身。そのまま `HostReply::Failed` になる。
@@ -326,12 +335,29 @@ pub fn read_file_from(path: &str) -> Result<FileContent, HostFsError> {
 
 /// ファイル1つの中身を返す（設計§9）。
 ///
-/// **テキストだけ。** 文字コードの推定はしない——外したときに文字化けした嘘を
-/// 表示することになる。
+/// **いままでどおり 3 MiB で断る。** 上限＝一括で読む線なので、先頭の窓だけを返すことは
+/// 起きない。既存の呼び手と試験のために意味を変えない（`ファイル閲覧の上限を設定から変え、
+/// 大きいものは流し読みする` 設計§3-1。エージェントの仮置き）。上限を渡して読むのは
+/// [`read_file_within`]。
 pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
-    // **判定と読み取りが同じものを見る。** 下の `fs::read` はリンクを辿るので、
-    // ここで `symlink_metadata`（辿らない側）を使うと、リンクの大きさ＝数十バイトで
-    // 上限を判定してしまい、**リンク1本で上限をすり抜けられる**
+    read_file_within(path, WHOLE_TEXT_BYTES)
+}
+
+/// **`~/` で始まるならホームから**、上限を渡してファイル1つを読む（設計§3-1）。
+///
+/// 展開の決まりは [`read_file_from`] と同じ。
+pub fn read_file_from_within(path: &str, limit: u64) -> Result<FileContent, HostFsError> {
+    read_file_within(&resolve_read_path(path), limit)
+}
+
+/// 開く前に見る——フォルダか・大きさ（設計§3-1）。**テキストを読む口は全部ここを通る。**
+///
+/// 判定を1か所にしてあるので、全文読みと窓読みのどちらからでも、上限を越えて開くことは
+/// 無い。上限は渡された値と PC 自身の天井（[`FILE_VIEW_LIMIT_MAX`]）の小さい方。
+fn checked_meta(path: &Path, limit: u64) -> Result<(std::fs::Metadata, u64), HostFsError> {
+    // **判定と読み取りが同じものを見る。** 読む側（`fs::read`・`File::open`）はリンクを
+    // 辿るので、ここで `symlink_metadata`（辿らない側）を使うと、リンクの大きさ＝数十
+    // バイトで上限を判定してしまい、**リンク1本で上限をすり抜けられる**
     let meta = std::fs::metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
     if meta.is_dir() {
         return Err(HostFsError::new(
@@ -341,15 +367,54 @@ pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
     }
 
     // **開く前に大きさで断る。** 読んでから捨てるのでは、上限を置いた意味が無い
+    let effective = limit.min(FILE_VIEW_LIMIT_MAX);
     let bytes = meta.len();
-    if bytes > WHOLE_TEXT_BYTES {
+    if bytes > effective {
         return Err(HostFsError::new(
             HostFailure::TooLarge,
             format!(
-                "{} は {bytes} バイトで、上限の {WHOLE_TEXT_BYTES} バイトを超えています",
-                path.display()
+                "{} は {}（{bytes} バイト）で、上限の {}（{effective} バイト）を超えています",
+                path.display(),
+                human_bytes(bytes),
+                human_bytes(effective)
             ),
         ));
+    }
+    Ok((meta, bytes))
+}
+
+/// 上限を渡してファイル1つの中身を返す（設計§3-1）。
+///
+/// - 上限（と PC 自身の天井）を超えていたら、**開く前に**断る
+/// - 一括で読む線（[`WHOLE_TEXT_BYTES`]）以下なら、全文を返す（いままでの読み方）
+/// - それより大きければ、先頭の窓（[`WINDOW_BYTES`]）だけを返して `truncated: true`。
+///   続きは [`read_file_range`] で読む。全文を読めないので `writable` は立てない
+///
+/// **テキストだけ。** 文字コードの推定はしない——外したときに文字化けした嘘を
+/// 表示することになる。
+pub fn read_file_within(path: &Path, limit: u64) -> Result<FileContent, HostFsError> {
+    let (meta, bytes) = checked_meta(path, limit)?;
+
+    if bytes > WHOLE_TEXT_BYTES {
+        // `bytes` と `stamp` は窓の側から取る——同じ metadata から取ったものを組で返し、
+        // 食い違わせない
+        let chunk = read_file_range(
+            path,
+            FileRange {
+                offset: 0,
+                length: WINDOW_BYTES,
+                align_line: false,
+            },
+            limit,
+        )?;
+        return Ok(FileContent {
+            path: chunk.path,
+            text: chunk.text,
+            truncated: true,
+            bytes: chunk.bytes,
+            stamp: chunk.stamp,
+            writable: false,
+        });
     }
 
     let raw = std::fs::read(path).map_err(|err| HostFsError::from_io(&err, path))?;
@@ -372,7 +437,7 @@ pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
     Ok(FileContent {
         path: path.display().to_string(),
         text,
-        // 上限の内側で切ることは、いまはしない。**上限超えと意味を混ぜない**（設計§9）
+        // 一括で読む線の内側なので全文。**上限超えと意味を混ぜない**（設計§9）
         truncated: false,
         bytes,
         // 読んだ時点の印。**保存のときにこれを持ってきてもらう**（設計§8-3）
@@ -383,6 +448,142 @@ pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
         // 倒したまま返し、サーバが上書きする。
         writable: false,
     })
+}
+
+/// **`~/` で始まるならホームから**、位置を指定して窓1つを読む（設計§3-1）。
+pub fn read_file_range_from(
+    path: &str,
+    range: FileRange,
+    limit: u64,
+) -> Result<FileChunk, HostFsError> {
+    read_file_range(&resolve_read_path(path), range, limit)
+}
+
+/// 位置を指定して窓1つを読む（`ファイル閲覧の上限を設定から変え、大きいものは流し読みする`
+/// 設計§3-1）。
+///
+/// - **窓読みでも設定の上限を越えさせない**（[`checked_meta`] を通る）
+/// - 長さは [`RANGE_MAX_BYTES`] で切り詰める（4 未満は 4 に上げる。4 バイトあれば最初の
+///   1字は必ず収まるので、`end` から頼み続けて空のまま進まない形は起きない）
+/// - 読むのは窓ぶんだけ。ファイル全体は読まない
+/// - 開始と終わりを UTF-8 の文字の境目へ寄せる。**次の窓を `end` から頼めば、継ぎ目に
+///   欠けも重なりも出ない**。行の途中で切れるのは許す（継げば元に戻る）
+/// - `align_line` なら、最初の改行の直後へ寄せる（位置へ飛ぶとき、行頭から見せるため）
+/// - NUL と UTF-8 の検査は窓ごと。断り文に位置を入れる（画面が「ここから先は読めない」を
+///   その位置に出すため）
+/// - 末尾の先（`offset >= bytes`）は空の窓を返し、**断らない**（末尾へ飛んだ直後の
+///   「続き」が日常的に当たるため）
+///
+/// ログは出さない（窓ごとに回るため。断りはサーバが出す。設計§11）。
+pub fn read_file_range(
+    path: &Path,
+    range: FileRange,
+    limit: u64,
+) -> Result<FileChunk, HostFsError> {
+    let (meta, bytes) = checked_meta(path, limit)?;
+    let stamp = stamp_of(&meta);
+    let shown = path.display().to_string();
+    let length = range.length.clamp(4, RANGE_MAX_BYTES);
+
+    if range.offset >= bytes {
+        return Ok(FileChunk {
+            path: shown,
+            start: bytes,
+            end: bytes,
+            bytes,
+            text: String::new(),
+            stamp,
+            at_line_start: false,
+        });
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    file.seek(SeekFrom::Start(range.offset))
+        .map_err(|err| HostFsError::from_io(&err, path))?;
+    let want = length.min(bytes - range.offset);
+    let mut buf = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
+    (&mut file)
+        .take(want)
+        .read_to_end(&mut buf)
+        .map_err(|err| HostFsError::from_io(&err, path))?;
+
+    // 先頭を寄せる：途中から頼まれたら、字の続きのバイト（0b10xx_xxxx）を最大3つ飛ばす
+    let mut head = 0usize;
+    if range.offset > 0 {
+        while head < buf.len() && head < 3 && buf[head] & 0xC0 == 0x80 {
+            head += 1;
+        }
+    }
+    let mut at_line_start = range.offset == 0;
+    if range.align_line && range.offset > 0 {
+        if let Some(pos) = buf[head..].iter().position(|&b| b == b'\n') {
+            head += pos + 1;
+            at_line_start = true;
+        }
+    }
+
+    // 終わりを寄せる：ファイルの最後でなければ、末尾の欠けた字を切り落とす
+    let at_eof = range.offset + buf.len() as u64 >= bytes;
+    let tail = if at_eof {
+        buf.len()
+    } else {
+        complete_prefix_len(&buf)
+    };
+    let tail = tail.max(head);
+
+    let slice = &buf[head..tail];
+    let start = range.offset + head as u64;
+    let end = range.offset + tail as u64;
+
+    // NUL を含むならバイナリ。テキストとして出すと画面が壊れる
+    if slice.contains(&0) {
+        return Err(HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} の {start} バイト目からはテキストではありません"),
+        ));
+    }
+    let text = String::from_utf8(slice.to_vec()).map_err(|_| {
+        HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} の {start} バイト目からは UTF-8 として読めません"),
+        )
+    })?;
+
+    Ok(FileChunk {
+        path: shown,
+        start,
+        end,
+        bytes,
+        text,
+        stamp,
+        at_line_start,
+    })
+}
+
+/// 末尾の欠けた字を除いた長さ（設計§3-1）。
+///
+/// 末尾から続きのバイトを最大3つ戻って字の先頭バイトを見つけ、その先頭バイトが示す長さに
+/// 足りなければ、先頭バイトの位置で切る。先頭バイトとして読めない（壊れている）なら
+/// 切らずに返し、UTF-8 の検査に任せる。
+fn complete_prefix_len(buf: &[u8]) -> usize {
+    let len = buf.len();
+    let mut lead = len;
+    let mut back = 0;
+    while lead > 0 && back < 4 {
+        lead -= 1;
+        back += 1;
+        if buf[lead] & 0xC0 != 0x80 {
+            let need = match buf[lead] {
+                b if b & 0x80 == 0x00 => 1,
+                b if b & 0xE0 == 0xC0 => 2,
+                b if b & 0xF0 == 0xE0 => 3,
+                b if b & 0xF8 == 0xF0 => 4,
+                _ => return len,
+            };
+            return if lead + need > len { lead } else { len };
+        }
+    }
+    len
 }
 
 /// 読んだ時点と書く直前を突き合わせるための印（設計§8-3）。
@@ -468,13 +669,18 @@ pub fn write_file(
         ));
     }
 
-    // **切り詰めて上書きする事故を塞ぐ**（設計§9）。いまは上限超えを丸ごと断っているので
-    // 発火しないが、部分読みが入ったときにここが効く
+    // **全文を読めないものは書き戻さない**（`ファイル閲覧の上限を設定から変え、大きいものは
+    // 流し読みする` 設計§3-1）。一括で読む線を超えたファイルは画面に先頭の窓しか届かない
+    // ので、書き戻すと残りが消える
     let bytes = meta.len();
     if bytes > WHOLE_TEXT_BYTES {
         return Err(HostFsError::new(
             HostFailure::TooLarge,
-            format!("{shown} は {bytes} バイトで、上限の {WHOLE_TEXT_BYTES} バイトを超えています"),
+            format!(
+                "{shown} は {}（{bytes} バイト）で、書き戻せる大きさの {} を超えています（全文を読めないものは書き戻せません）",
+                human_bytes(bytes),
+                human_bytes(WHOLE_TEXT_BYTES)
+            ),
         ));
     }
 
