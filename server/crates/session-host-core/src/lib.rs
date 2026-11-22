@@ -37,6 +37,7 @@ pub mod model_aliases;
 pub mod model_catalog;
 pub mod model_post;
 pub mod offsets;
+pub mod open_in;
 pub mod parser;
 pub mod proc;
 pub mod redact;
