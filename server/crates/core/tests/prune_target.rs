@@ -97,6 +97,19 @@ impl 偽の置き場所 {
         古くする(&dir, age_days);
     }
 
+    /// `release/deps` に部品を1つ置く。`name` はハッシュと拡張子まで含めた名前。
+    fn リリースの部品(&self, name: &str, age_days: u64, kib: usize) {
+        let dir = self.join("release/deps");
+        std::fs::create_dir_all(&dir).expect("作れること");
+        let path = dir.join(name);
+        std::fs::write(&path, vec![b'x'; kib * 1024]).expect("書けること");
+        古くする(&path, age_days);
+    }
+
+    fn リリースの顔ぶれ(&self) -> Vec<String> {
+        顔ぶれ(&self.join("release/deps"))
+    }
+
     fn depsの顔ぶれ(&self) -> Vec<String> {
         顔ぶれ(&self.join("debug/deps"))
     }
@@ -320,6 +333,112 @@ fn 巻き添えにしないこと() {
     assert!(
         place.join("CACHEDIR.TAG").exists(),
         "置き場所そのものの目印を消しています"
+    );
+}
+
+// --- リリース：古い世代を組で落とし、直下と1世代しかないものは残す ---------------
+
+/// リリースの `deps` に世代を並べた仕掛け。デバッグの側は空にしてある。
+///
+/// **デバッグの嵩だけでは上限に届かないようにしてある。** リリースを嵩に数えない
+/// 実装へ戻すと、何も起きずに検査が落ちる。
+fn リリースの仕掛け(label: &str) -> 偽の置き場所 {
+    const 大: usize = 8 * 1024;
+    const 小: usize = 64;
+    let place = 偽の置き場所::new(label);
+    // この PJT の部品に4世代。1世代は `.rlib` `.rmeta` `.d` と実行ファイルの組
+    for (i, age) in [(1, 40), (2, 30), (3, 20), (4, 1)] {
+        let size = if i <= 2 { 大 } else { 小 };
+        let hash = format!("aaaaaaaaaaaaaaa{i}");
+        place.リリースの部品(&format!("libcore-{hash}.rlib"), age, size);
+        place.リリースの部品(&format!("libcore-{hash}.rmeta"), age, 1);
+        place.リリースの部品(&format!("agentdashboard-{hash}"), age, size);
+        place.リリースの部品(&format!("agentdashboard-{hash}.d"), age, 1);
+    }
+    // 外のライブラリが1世代だけ。**残す数に満たないものは、古くても落とさない**
+    place.リリースの部品("libserde-1111111111111111.rlib", 90, 1);
+    place.リリースの部品("libserde-1111111111111111.rmeta", 90, 1);
+    // ハッシュを持たない名前。**世代と読めないものには触らない**
+    place.リリースの部品("foo-0.rcgu.o", 90, 1);
+    place
+}
+
+#[test]
+fn リリースの古い世代が組で落ち新しい世代と直下が残る() {
+    let place = リリースの仕掛け("release-gen");
+    let env = 段1が走る環境(段1で収まる上限);
+    成功を確かめる(&走らせる(&place, &[], &借りる(&env)));
+
+    let left = place.リリースの顔ぶれ();
+    for gone in ["aaaaaaaaaaaaaaa1", "aaaaaaaaaaaaaaa2"] {
+        assert!(
+            !left.iter().any(|n| n.contains(gone)),
+            "古い世代 {gone} が残っています: {left:?}"
+        );
+    }
+    for kept in [
+        "libcore-aaaaaaaaaaaaaaa3.rlib",
+        "libcore-aaaaaaaaaaaaaaa3.rmeta",
+        "agentdashboard-aaaaaaaaaaaaaaa3",
+        "agentdashboard-aaaaaaaaaaaaaaa3.d",
+        "libcore-aaaaaaaaaaaaaaa4.rlib",
+        "agentdashboard-aaaaaaaaaaaaaaa4",
+        "libserde-1111111111111111.rlib",
+        "libserde-1111111111111111.rmeta",
+        "foo-0.rcgu.o",
+    ] {
+        assert!(
+            left.iter().any(|n| n == kept),
+            "{kept} を消しています: {left:?}"
+        );
+    }
+    // **直下は常駐の出どころ。** ここが消える実装は、走っているダッシュボードを巻き添えにする
+    assert!(
+        place.join("release/bystander").exists(),
+        "リリースの直下を巻き添えにしています"
+    );
+    assert!(
+        place.記録().contains("リリースの古い世代 8 ファイル"),
+        "リリースで消した数が記録に残っていません: {}",
+        place.記録()
+    );
+}
+
+#[test]
+fn 段2でもリリースは丸ごとは落とさない() {
+    let place = リリースの仕掛け("release-stage2");
+    let env = 段1が走る環境(段1では収まらない上限);
+    成功を確かめる(&走らせる(&place, &[], &借りる(&env)));
+
+    let left = place.リリースの顔ぶれ();
+    assert!(
+        left.iter().any(|n| n == "agentdashboard-aaaaaaaaaaaaaaa4"),
+        "段2でリリースの新しい世代まで消しています: {left:?}"
+    );
+    assert!(
+        place.記録().contains("リリースだけで上限を超えている"),
+        "リリースのせいで上限に収まらないことが記録に残っていません: {}",
+        place.記録()
+    );
+}
+
+#[test]
+fn allはリリースの古い世代も落とす() {
+    let place = リリースの仕掛け("release-all");
+    成功を確かめる(&走らせる(&place, &["--all"], &[]));
+
+    let left = place.リリースの顔ぶれ();
+    assert!(
+        !left.iter().any(|n| n.contains("aaaaaaaaaaaaaaa1")),
+        "--all でリリースの古い世代が残っています: {left:?}"
+    );
+    assert!(
+        left.iter().any(|n| n == "agentdashboard-aaaaaaaaaaaaaaa4"),
+        "--all でリリースの新しい世代まで消しています: {left:?}"
+    );
+    assert!(
+        place.join("release/bystander").exists(),
+        "--all でリリースの直下を巻き添えにしています"
     );
 }
 

@@ -21,7 +21,7 @@
 # 挙動は次の 4 つで変えられる（`AGENTDASHBOARD_CARGO_*` は**このラッパー自身の制御**の
 # 名前空間で、コンテナへは持ち込まれない。scripts/cargo の決まりに合わせてある）。
 #   AGENTDASHBOARD_CARGO_PRUNE               0 で自動の掃除を止める（既定 1）
-#   AGENTDASHBOARD_CARGO_PRUNE_CAP_GB        この GB を超えたら掃除を始める（既定 40）
+#   AGENTDASHBOARD_CARGO_PRUNE_CAP_GB        debug/ と release/ の合計がこの GB を超えたら掃除を始める（既定 40）
 #   AGENTDASHBOARD_CARGO_PRUNE_KEEP          基準名ごとに残す世代の数（既定 2）
 #   AGENTDASHBOARD_CARGO_PRUNE_INTERVAL_SEC  測る間隔（既定 900）
 set -euo pipefail
@@ -64,6 +64,12 @@ fi
 DEBUG_DIR="${TARGET}/debug"
 DEPS_DIR="${DEBUG_DIR}/deps"
 INC_DIR="${DEBUG_DIR}/incremental"
+# **リリースビルドも嵩に数え、`deps/` の古い世代を落とす。** 数えていなかった間は、
+# 開発ツリーの `release/deps` に同じ部品が 120〜140 世代、14 GB 積まれていた（2026-11-22）。
+# **触るのは `deps/` の中だけ。** 直下の `release/agentdashboard` は常駐している
+# ダッシュボードの出どころなので、ここは丸ごと消す道（段2）にも載せない。
+RELEASE_DIR="${TARGET}/release"
+REL_DEPS_DIR="${RELEASE_DIR}/deps"
 
 # 状態・ロック・記録は**置き場所の直下**（`debug/` の外）に置く。cargo 自身が
 # `CACHEDIR.TAG` と `.rustc_info.json` を同じ層へ置く前例があり、段1・段2どちらの
@@ -186,6 +192,49 @@ INC_STRIP='-[0-9a-z]+$'
         awk -F'\t' -v keep="${KEEP}" 'base != $1 { base = $1; n = 0 } { n++ } n > keep { print $3 }'
 }
 
+# リリースの `deps/` で、基準名ごとに新しい世代を KEEP 組だけ残し、残りの**道のり**を並べる。
+#
+# **世代の単位は、ハッシュまでの名前（`libfoo-0123456789abcdef`）である。** 同じ世代の
+# `.rlib` `.rmeta` `.d` と実行ファイルは、そろって残るか、そろって落ちる。
+#
+# **デバッグの側と違って、中間成果物（`.rlib` など）も落とす。** あちらは「ソースが変わら
+# なければ古いものも現物でありうる」として触らないが、リリースはこの PJT の部品が
+# コードを直すたびに名前を変えて積まれ、それが嵩の大半を占めていた。外のライブラリも、
+# 版を上げるたびに古い版が残る（例：axum が 10 世代）。**いま使っている世代を落として
+# しまっても、次のビルドがその部品を建て直すだけで、壊れはしない。**
+#
+# 新旧は、その世代のファイルのうちいちばん新しい mtime で決める。
+リリースの古い世代を並べる() {
+    [ -d "${REL_DEPS_DIR}" ] || return 0
+    find "${REL_DEPS_DIR}" -maxdepth 1 -type f -printf '%T@\t%f\t%p\n' |
+        awk -F'\t' -v OFS='\t' -v strip="${DEPS_STRIP}" '{
+            stem = $2; sub(/\.[A-Za-z0-9_]+$/, "", stem)
+            base = stem
+            if (sub(strip, "", base) == 0) next
+            print base, stem, $1, $3
+        }' |
+        awk -F'\t' -v keep="${KEEP}" '{
+            base = $1; stem = $2; t = $3 + 0
+            if (!(stem in newest)) { n[base]++; stems[base, n[base]] = stem; newest[stem] = t }
+            else if (t > newest[stem]) { newest[stem] = t }
+            files[stem]++; path[stem, files[stem]] = $4
+        }
+        END {
+            for (b in n) {
+                if (n[b] <= keep) continue
+                for (i = 2; i <= n[b]; i++) {
+                    s = stems[b, i]; j = i - 1
+                    while (j >= 1 && newest[stems[b, j]] < newest[s]) { stems[b, j + 1] = stems[b, j]; j-- }
+                    stems[b, j + 1] = s
+                }
+                for (i = keep + 1; i <= n[b]; i++) {
+                    s = stems[b, i]
+                    for (k = 1; k <= files[s]; k++) print path[s, k]
+                }
+            }
+        }'
+}
+
 数えて消す() {
     local listing="$1" count
     count=$(printf '%s' "${listing}" | grep -c . || true)
@@ -195,17 +244,30 @@ INC_STRIP='-[0-9a-z]+$'
     echo "${count}"
 }
 
+リリースの段1() {
+    local rel_old
+    rel_old=$(リリースの古い世代を並べる)
+    数えて消す "${rel_old}"
+}
+
 段1() {
-    local deps_old inc_old deps_n inc_n
+    local deps_old inc_old deps_n inc_n rel_n
     deps_old=$(古い世代を並べる "${DEPS_DIR}" f "${DEPS_STRIP}")
     inc_old=$(古い世代を並べる "${INC_DIR}" d "${INC_STRIP}")
     deps_n=$(数えて消す "${deps_old}")
     inc_n=$(数えて消す "${inc_old}")
-    printf '%s %s' "${deps_n}" "${inc_n}"
+    rel_n=$(リリースの段1)
+    printf '%s %s %s' "${deps_n}" "${inc_n}" "${rel_n}"
 }
 
+# **リリースは載せない。** 丸ごと消すと、常駐しているダッシュボードの出どころを失う。
 段2() {
     rm -rf "${DEPS_DIR}" "${INC_DIR}"
+}
+
+# デバッグとリリースを合わせた嵩。上限はこの合計に掛かる。
+両方の嵩() {
+    echo $(($(嵩を測る "${DEBUG_DIR}") + $(嵩を測る "${RELEASE_DIR}")))
 }
 
 # --- 手で叩く道（make prune）------------------------------------------------
@@ -217,15 +279,20 @@ INC_STRIP='-[0-9a-z]+$'
 # 形で落ちる。自動の側と違って「諦める」わけにはいかない（人が消せと言っている）ので、
 # **待っていることを先に伝えてから**待つ。
 if [ "${ALL}" -eq 1 ]; then
-    before=$(嵩を測る "${DEBUG_DIR}")
+    before=$(両方の嵩)
     exec 9>"${LOCK_FILE}"
     if ! flock --exclusive --nonblock 9; then
         printf 'prune-target: ビルドが走っています。終わるまで待ちます\n' >&2
         flock --exclusive 9
     fi
+    if ! 基準名を剥がせるか確かめる; then
+        rel_n=0
+    else
+        rel_n=$(リリースの段1)
+    fi
     段2
-    after=$(嵩を測る "${DEBUG_DIR}")
-    記録 "段2（--all）	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+    after=$(両方の嵩)
+    記録 "段2（--all）	リリースの古い世代 ${rel_n} ファイル	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
     exit 0
 fi
 
@@ -252,7 +319,7 @@ fi
 # もう一度測ってしまう。**
 printf '%s\n' "${now}" >"${STATE_FILE}"
 
-before=$(嵩を測る "${DEBUG_DIR}")
+before=$(両方の嵩)
 cap_bytes=$(awk -v g="${CAP_GB}" 'BEGIN { printf "%d", g * 1073741824 }')
 if [ "${before}" -le "${cap_bytes}" ]; then
     exit 0
@@ -273,16 +340,20 @@ if ! 基準名を剥がせるか確かめる; then
     exit 0
 fi
 
-read -r deps_n inc_n <<<"$(段1)"
-after=$(嵩を測る "${DEBUG_DIR}")
+read -r deps_n inc_n rel_n <<<"$(段1)"
+after=$(両方の嵩)
 
 if [ "${after}" -gt "${cap_bytes}" ]; then
     # **段2まで来るのは異常事態である。** 世代で落として上限を超えるということは、
     # 1 世代ぶんだけで上限に達しているということなので、しきい値か KEEP の見直しが要る。
     # 警告として残すのはそのためで、あとから気づけるようにしてある。
     段2
-    after=$(嵩を測る "${DEBUG_DIR}")
-    記録 "警告：段2	段1（実行ファイル ${deps_n} 件・クレート ${inc_n} 件）で上限に収まらず丸ごと落とした	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+    after=$(両方の嵩)
+    note=""
+    if [ "${after}" -gt "${cap_bytes}" ]; then
+        note="（リリースだけで上限を超えている。リリースは丸ごとは落とさない）"
+    fi
+    記録 "警告：段2	段1（実行ファイル ${deps_n} 件・クレート ${inc_n} 件・リリースの古い世代 ${rel_n} ファイル）で上限に収まらず丸ごと落とした${note}	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
 else
-    記録 "段1	実行ファイル ${deps_n} 件・クレート ${inc_n} 件	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+    記録 "段1	実行ファイル ${deps_n} 件・クレート ${inc_n} 件・リリースの古い世代 ${rel_n} ファイル	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
 fi
