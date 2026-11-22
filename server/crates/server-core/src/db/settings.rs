@@ -93,6 +93,17 @@ pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 pub const UPDATE_CHECK_ENABLED: &str = "update_check_enabled";
 pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
 
+/// ファイル閲覧の上限（バイト）。**サーバ全体スコープ**（`ファイル閲覧の上限を設定から変え、
+/// 大きいものは流し読みする` 設計§6-1。`lan_password_hash`・`update_check_enabled` と同じ行）。
+///
+/// 行が無ければ起動の形の既定（[`crate::file_view`]）。値は
+/// [`protocol::fs::FILE_VIEW_LIMIT_CHOICES`] の16個のどれかだけを通す。
+///
+/// # なぜ持ち出し（[`ACCOUNT_KEYS`]）に入れないのか
+/// 転送の費用を払うのはサーバの持ち主である。アカウントの書き出しに乗せると、別の構成へ
+/// 読み込んだ人が**その構成の上限を動かせる**。
+pub const FILE_VIEW_MAX_BYTES: &str = "file_view_max_bytes";
+
 /// メモを残しておく日数（メモ設計§11-2）。**行が無ければ既定。**
 ///
 /// **既定はファイル側（`config.rs` の添付の保持日数）と同じ 90 日**にしてある。
@@ -210,6 +221,22 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
         SCROLLBACK_LINES => number(&SCROLLBACK_LINES_RANGE),
         MEMO_RETENTION_DAYS => number(&MEMO_RETENTION_DAYS_RANGE),
         MEMO_MAX_BYTES => number(&MEMO_MAX_BYTES_RANGE),
+        // **サーバ全体の鍵だが、ここに入れる。** 画面の PUT と CLI が同じ検査を通るため。
+        // 持ち出しは `ACCOUNT_KEYS` で先に絞ってから `check()` を呼ぶので、ここに足しても
+        // 書き出し・読み込みには乗らない。範囲ではなく16個のどれか——2 MiB のような
+        // 選択肢の間の値を通すと、画面の選ぶ欄が「いまの値」を示せなくなる
+        FILE_VIEW_MAX_BYTES => match value.as_u64() {
+            Some(bytes) if protocol::fs::FILE_VIEW_LIMIT_CHOICES.contains(&bytes) => Ok(()),
+            Some(bytes) => Err(format!(
+                "{key} は次のどれかで指定してください：{}（{bytes} が入っています）",
+                protocol::fs::FILE_VIEW_LIMIT_CHOICES
+                    .iter()
+                    .map(|choice| format!("{}（{choice}）", protocol::fs::limit_label(*choice)))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            )),
+            None => Err(format!("{key} には数値を指定してください")),
+        },
         // 3段のうちどれか。**受けたふりをしない**——知らない綴りを黙って入れると、
         // 画面は既定へ落として描くので「設定したのに効かない」だけに見える
         MOTION_QUIET => match value.as_str() {
@@ -677,6 +704,37 @@ pub async fn set_update_check_enabled(db: &DatabaseConnection, enabled: bool) ->
     .await
 }
 
+/// ファイル閲覧の上限として保存してある値。行が無ければ `None`。
+///
+/// **選択肢かどうかはここでは見ない**（[`crate::file_view::effective_limit`] が見て、外れていれば
+/// 既定へ倒す）。ここで落とすと、選択肢に無い値が入っていることを誰も知らせられない。
+pub async fn file_view_max_bytes(db: &DatabaseConnection) -> Result<Option<u64>, DbErr> {
+    Ok(get(db, super::SERVER_SCOPE_ID, FILE_VIEW_MAX_BYTES)
+        .await?
+        .and_then(|value| value.as_u64()))
+}
+
+/// ファイル閲覧の上限を保存する。`None` は行を消す＝起動の形の既定へ戻す。
+///
+/// **呼ぶ前に [`check`] を通すこと。** ここは書くだけで、選択肢かどうかを見ない。
+pub async fn set_file_view_max_bytes(
+    db: &DatabaseConnection,
+    value: Option<u64>,
+) -> Result<(), DbErr> {
+    match value {
+        Some(bytes) => {
+            put(
+                db,
+                super::SERVER_SCOPE_ID,
+                FILE_VIEW_MAX_BYTES,
+                serde_json::json!(bytes),
+            )
+            .await
+        }
+        None => remove(db, super::SERVER_SCOPE_ID, FILE_VIEW_MAX_BYTES).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -722,6 +780,7 @@ mod tests {
         // サーバ全体スコープのものが混ざっていないこと（混ざると秘密が持ち出しへ乗る）
         assert!(!ACCOUNT_KEYS.contains(&LAN_PASSWORD_HASH));
         assert!(!ACCOUNT_KEYS.contains(&UPDATE_CHECK_ENABLED));
+        assert!(!ACCOUNT_KEYS.contains(&FILE_VIEW_MAX_BYTES));
         // 全部が `check()` を通る綴りであること。**受け付ける型が増えたら、ここの
         // 候補にも足す**——足し忘れると「check() が知らない」と読めてしまう
         for key in ACCOUNT_KEYS {
@@ -822,6 +881,37 @@ mod tests {
         assert!(reason.contains(ALWAYS_BYPASS_PERMISSIONS), "{reason}");
     }
 
+    /// ファイル閲覧の上限は**16個の選択肢だけ**を通すこと（設計§6-1）。
+    ///
+    /// 画面は選ぶ欄で絞っているが、REST と CLI は直に叩ける。選択肢の間の値（2 MiB）や
+    /// 天井の外（21 GiB）を通すと、画面の選ぶ欄が「いまの値」を示せなくなる。
+    #[test]
+    fn ファイル閲覧の上限は16個だけを通す() {
+        for choice in protocol::fs::FILE_VIEW_LIMIT_CHOICES {
+            assert!(
+                check(FILE_VIEW_MAX_BYTES, &serde_json::json!(choice)).is_ok(),
+                "{choice} が通らない"
+            );
+        }
+        let between = 2 * 1024 * 1024_u64;
+        let reason = check(FILE_VIEW_MAX_BYTES, &serde_json::json!(between)).unwrap_err();
+        assert!(reason.contains(FILE_VIEW_MAX_BYTES), "{reason}");
+        assert!(reason.contains(&between.to_string()), "{reason}");
+        assert!(reason.contains("1 MB（1048576）"), "{reason}");
+        assert!(reason.contains("20 GB（21474836480）"), "{reason}");
+        for wrong in [
+            serde_json::json!(0),
+            serde_json::json!(21 * 1024 * 1024 * 1024_u64),
+            serde_json::json!("3MB"),
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(-1),
+        ] {
+            let reason = check(FILE_VIEW_MAX_BYTES, &wrong).unwrap_err();
+            assert!(reason.contains(FILE_VIEW_MAX_BYTES), "{wrong}: {reason}");
+        }
+    }
+
     #[test]
     fn 知らないキーは断る() {
         assert!(check("lan_password_hash", &serde_json::json!("x")).is_err());
@@ -834,6 +924,9 @@ mod tests {
         // サーバ全体スコープのキーが入ると、書き出しへそのまま乗る
         assert!(!ACCOUNT_KEYS.contains(&LAN_PASSWORD_HASH));
         assert!(!ACCOUNT_KEYS.contains(&UPDATE_CHECK_ENABLED));
+        // ファイル閲覧の上限も入らない。費用を払うのはサーバの持ち主で、書き出しに乗ると
+        // 別の構成へ読み込んだ人がその構成の上限を動かせる
+        assert!(!ACCOUNT_KEYS.contains(&FILE_VIEW_MAX_BYTES));
         // 持ち出しの対象なら、必ず検査を持っていること。**キーを足して検査を
         // 足し忘れると、読み込みで何でも入る**
         for key in ACCOUNT_KEYS {

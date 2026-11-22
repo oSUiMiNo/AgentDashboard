@@ -393,6 +393,95 @@ async fn 更新確認を切る設定はサーバ全体で持つ() {
 }
 
 #[tokio::test]
+async fn ファイル閲覧の上限はサーバ全体で持ち_無ければ起動の形の既定になる() {
+    // 転送の費用を払うのはサーバの持ち主なので、持ち場はサーバ全体（設計§6-1）。
+    // 値が無ければ起動の形の既定、選択肢に無い値は既定へ倒す（設計§5-2）
+    use server_core::file_view::{FileViewPolicy, effective_limit};
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let local = FileViewPolicy::local(None);
+    let server = FileViewPolicy::server(None);
+    for backend in common::backends("file-view-limit").await {
+        // 行が無い＝起動の形の既定
+        assert_eq!(
+            settings::file_view_max_bytes(&backend.db).await.unwrap(),
+            None,
+            "[{}] 行が無いのに値がある",
+            backend.name
+        );
+        assert_eq!(
+            effective_limit(&backend.db, &local).await,
+            5 * GIB,
+            "[{}] ローカルの既定が 5 GB でない",
+            backend.name
+        );
+        assert_eq!(
+            effective_limit(&backend.db, &server).await,
+            3 * MIB,
+            "[{}] サーバの既定が 3 MB でない",
+            backend.name
+        );
+
+        // 入れた値はどちらの形でも効く
+        settings::set_file_view_max_bytes(&backend.db, Some(10 * MIB))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings::file_view_max_bytes(&backend.db).await.unwrap(),
+            Some(10 * MIB),
+            "[{}] 入れた値が読めない",
+            backend.name
+        );
+        assert_eq!(effective_limit(&backend.db, &local).await, 10 * MIB);
+        assert_eq!(effective_limit(&backend.db, &server).await, 10 * MIB);
+
+        // アカウント側へ同じ綴りで書いても、サーバ全体の答えは動かない
+        settings::put(
+            &backend.db,
+            db::LOCAL_ACCOUNT_ID,
+            settings::FILE_VIEW_MAX_BYTES,
+            serde_json::json!(MIB),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            effective_limit(&backend.db, &local).await,
+            10 * MIB,
+            "[{}] アカウント側の行に引きずられている",
+            backend.name
+        );
+
+        // 選択肢に無い値が直に入っていたら、既定へ倒す（開けなくしない）
+        settings::put(
+            &backend.db,
+            db::SERVER_SCOPE_ID,
+            settings::FILE_VIEW_MAX_BYTES,
+            serde_json::json!(2 * MIB),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            effective_limit(&backend.db, &local).await,
+            5 * GIB,
+            "[{}] 選択肢に無い値で既定へ倒れない",
+            backend.name
+        );
+
+        // 消せば既定へ戻る
+        settings::set_file_view_max_bytes(&backend.db, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            settings::file_view_max_bytes(&backend.db).await.unwrap(),
+            None,
+            "[{}] 消しても行が残っている",
+            backend.name
+        );
+        assert_eq!(effective_limit(&backend.db, &server).await, 3 * MIB);
+    }
+}
+
+#[tokio::test]
 async fn 設定はアカウントとサーバ全体で別々に持てる() {
     // 設計§3-2 は主キーを (account_id nullable, key) としているが、PostgreSQL は
     // 主キーに NULL を許さない。nil UUID をサーバ全体スコープの印にしている

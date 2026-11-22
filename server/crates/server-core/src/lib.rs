@@ -19,6 +19,7 @@ pub mod cluster;
 pub mod config;
 pub mod db;
 pub mod embed;
+pub mod file_view;
 pub mod gateway;
 pub mod hosts;
 pub mod lan_address;
