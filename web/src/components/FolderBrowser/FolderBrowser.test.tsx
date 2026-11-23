@@ -1485,3 +1485,155 @@ describe("パンくずの右クリック（追加の要望 2026-11-23）", () =>
     expect(screen.queryByTestId("folder-menu")).toBeNull();
   });
 });
+
+describe("一覧の余白の右クリック（追加の要望 2026-11-23）", () => {
+  function 頼まれた場所を返す(names = ["MyDocs", "計画.md"]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const 頼まれた =
+          new URL(url, "http://x").searchParams.get("path") ?? ROOT;
+        return new Response(JSON.stringify(listing(頼まれた, names)), {
+          status: 200,
+        });
+      }),
+    );
+  }
+
+  function 返さない() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+  }
+
+  function 写したものを控える() {
+    const 写した: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async (v: string) => void 写した.push(v)) },
+    });
+    return 写した;
+  }
+
+  async function 長押し(target: HTMLElement) {
+    await userEvent.pointer({ keys: "[TouchA>]", target });
+    await new Promise((done) => setTimeout(done, 900));
+    await userEvent.pointer({ keys: "[/TouchA]", target });
+  }
+
+  it("余白は一覧の最後の行の後ろに1つだけあり、読み上げには出さない", async () => {
+    置く();
+    await 行たち();
+
+    const 余白 = screen.getByTestId("folder-blank");
+    const 一覧 = 余白.parentElement as HTMLElement;
+    expect(一覧.tagName).toBe("UL");
+    expect(一覧.lastElementChild).toBe(余白);
+    expect(screen.getAllByTestId("folder-blank")).toHaveLength(1);
+    expect(余白).toHaveAttribute("aria-hidden", "true");
+    expect(余白.textContent).toBe("");
+  });
+
+  it("余白を右クリックすると、いまのフォルダを相手にメニューが出て、コピーの答えはパンくずの末尾の横に出る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    置く();
+    await userEvent.click((await screen.findAllByTestId("folder-entry"))[0]);
+    await waitFor(() =>
+      expect(screen.getByTestId("folder-browser")).toHaveAttribute(
+        "data-path",
+        `${ROOT}/MyDocs`,
+      ),
+    );
+    await screen.findAllByTestId("folder-entry");
+
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByTestId("folder-blank"),
+    });
+    expect(screen.getAllByTestId("folder-menu")).toHaveLength(1);
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "MyDocs",
+    );
+    await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
+
+    await waitFor(() => expect(写した).toEqual([`${ROOT}/MyDocs`]));
+    const 末尾 = screen.getAllByTestId("folder-crumb").at(-1) as HTMLElement;
+    expect(末尾).toHaveTextContent("MyDocs");
+    await waitFor(() =>
+      expect(
+        末尾.parentElement?.querySelector(
+          '[data-testid="folder-crumb-copy-state"]',
+        ),
+      ).toHaveTextContent("コピーしました"),
+    );
+    expect(screen.getAllByTestId("folder-crumb-copy-state")).toHaveLength(1);
+    expect(screen.queryAllByTestId("folder-copy-state")).toHaveLength(0);
+  });
+
+  it("空のフォルダでも、余白からいまのフォルダのメニューが出る", async () => {
+    頼まれた場所を返す([]);
+    置く();
+    expect(await screen.findByText("このフォルダは空です")).toBeInTheDocument();
+
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByTestId("folder-blank"),
+    });
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "app",
+    );
+  });
+
+  it("読み込み中でも、余白からいまのフォルダのメニューが出る", async () => {
+    返さない();
+    置く();
+    expect(await screen.findByText("読み込み中…")).toBeInTheDocument();
+
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByTestId("folder-blank"),
+    });
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "app",
+    );
+  });
+
+  it("どこを見ているかまだ分からない間（起点を省いた最初の読み込み）は、余白にメニューを掛けない", async () => {
+    返さない();
+    render(<FolderBrowser host="local" />);
+    expect(await screen.findByText("読み込み中…")).toBeInTheDocument();
+
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByTestId("folder-blank"),
+    });
+    await new Promise((done) => setTimeout(done, 30));
+    expect(screen.queryByTestId("folder-menu")).toBeNull();
+  });
+
+  it("行を右クリックすると、行のメニューが1つだけ開く（余白のメニューは重ならない）", async () => {
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
+
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "MyDocs",
+    );
+    expect(screen.getAllByTestId("folder-menu")).toHaveLength(1);
+  });
+
+  it("行を長押ししても、行のメニューが1つだけ開く（余白のメニューは重ならない）", async () => {
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await 長押し(行);
+
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "MyDocs",
+    );
+    expect(screen.getAllByTestId("folder-menu")).toHaveLength(1);
+  });
+});

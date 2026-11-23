@@ -424,6 +424,8 @@ export function FolderBrowser({
     (root === undefined || isUnder(root, ひとつ上.path))
   // **親PC の画面で、口が読めたときだけ。** それ以外は何も描かない（設計§7-1）
   const 開く口 = openIn?.view.same_machine === true ? openIn : undefined
+  const いまの段 = path === undefined ? undefined : 内側.at(-1)
+  const 余白 = <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
   const パンくずの答え = (at: string) =>
     copied?.場所 === "パンくず" && copied.path === at ? (
       <span data-testid="folder-crumb-copy-state" className="text-muted-foreground">
@@ -607,7 +609,7 @@ export function FolderBrowser({
         </p>
       )}
 
-      <ul className="min-h-0 flex-1 overflow-y-auto text-sm">
+      <ul className="flex min-h-0 flex-1 flex-col overflow-y-auto text-sm">
         {loading && (
           <li className="text-muted-foreground px-2 py-1.5 text-xs">
             読み込み中…
@@ -640,6 +642,19 @@ export function FolderBrowser({
               />
             )
           })}
+        {いまの段 === undefined ? (
+          余白
+        ) : (
+          <ContextMenu>
+            <ContextMenuTrigger asChild>{余白}</ContextMenuTrigger>
+            <PathMenu
+              name={いまの段.label}
+              path={いまの段.path}
+              openIn={開く口}
+              onCopy={(value) => copy(いまの段.path, value, "パンくず")}
+            />
+          </ContextMenu>
+        )}
       </ul>
     </div>
   )
