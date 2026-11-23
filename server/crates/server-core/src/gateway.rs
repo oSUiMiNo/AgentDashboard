@@ -2042,15 +2042,21 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         // （`ファイル閲覧の上限を設定から変え、大きいものは流し読みする` 設計§4-3）。
         // 渡すと「先頭の窓だけ」が返り、画面は続きを頼めずに止まる。切って渡せば、
         // その PC では 3 MiB を超えたものが必ず断られ、下の言い換えの道に揃う
+        // `None`＝名乗りを読めなかった（DB の失敗）。そのときは安全側に一括で読む線で切って
+        // 渡すが、**古い PC だとは言い換えない**（分からないのに「古い」と言わない）
         let ranged = match request.target {
             Some(target) => {
-                self.supports(Need::FileRange, request.account_id, target)
+                self.advertised(Need::FileRange, request.account_id, target)
                     .await
             }
             // 宛先が無ければ `ask` が「知らない」で断る。ここでは判断しない
-            None => false,
+            None => Some(false),
         };
-        let sent = if ranged { limit } else { limit.min(whole) };
+        let sent = if ranged == Some(true) {
+            limit
+        } else {
+            limit.min(whole)
+        };
         let path = path.to_string();
         match self
             .ask(request, Need::HostFs, move |request_id| {
@@ -2085,7 +2091,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             HostReply::Failed {
                 reason: protocol::a2s::HostFailure::TooLarge,
                 ..
-            } if !ranged && limit > whole => Err(HostAskError::Failed {
+            } if ranged == Some(false) && limit > whole => Err(HostAskError::Failed {
                 reason: protocol::a2s::HostFailure::Unavailable,
                 detail: old_host_large_file(),
             }),
@@ -2442,14 +2448,26 @@ impl RemoteSessionHost {
     /// 見るのは接続表ではなく **DB に残した名乗り**（`agents.capabilities`）。
     /// 接続表を見ると、**別のインスタンスに繋がっている PC が全部「できない」ことになる**。
     async fn supports(&self, need: Need, account_id: Uuid, target: AgentId) -> bool {
+        self.advertised(need, account_id, target)
+            .await
+            .unwrap_or(false)
+    }
+
+    /// [`Self::supports`] と同じ問いだが、**名乗りを読めなかった（DB の失敗）ときは `None`**。
+    ///
+    /// 「名乗っていない」と「分からない」を分けたい所だけで使う。古い PC だと言い換える道
+    /// （`read_file_within`）は、分からないのに「古い」と言うと、新しい PC の利用者に
+    /// 要らない更新を頼むことになる。
+    async fn advertised(&self, need: Need, account_id: Uuid, target: AgentId) -> Option<bool> {
         let rows = match pairing::capabilities_of(&self.hub.db, account_id).await {
             Ok(rows) => rows,
             Err(err) => {
                 tracing::warn!("PC の名乗りを読めません: {err}");
-                return false;
+                return None;
             }
         };
-        rows.into_iter()
+        let advertised = rows
+            .into_iter()
             .find(|(agent_id, _)| *agent_id == target)
             .and_then(|(_, value)| serde_json::from_value::<Capabilities>(value).ok())
             .is_some_and(|capabilities| match need {
@@ -2463,7 +2481,8 @@ impl RemoteSessionHost {
                 Need::AttachmentSweep => capabilities.supports_attachment_sweep,
                 Need::FileWrite => capabilities.supports_file_write,
                 Need::FileRange => capabilities.supports_file_range,
-            })
+            });
+        Some(advertised)
     }
 }
 
