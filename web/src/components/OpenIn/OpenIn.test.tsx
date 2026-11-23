@@ -290,6 +290,64 @@ describe('サイドバーの出し分けと押した先', () => {
       expect(ボタン).toBeEnabled()
     }
   })
+
+  function パンくずの的(名前: string) {
+    const 段 = screen.getAllByTestId('folder-crumb').find((e) => e.textContent === 名前)
+    if (段 === undefined) {
+      throw new Error(`パンくず ${名前} が無い`)
+    }
+    return 名前 === '…' ? (段.parentElement as HTMLElement) : 段
+  }
+
+  async function パンくずを右クリック(名前: string) {
+    await 行('計画.md')
+    await userEvent.pointer({ keys: '[MouseRight]', target: パンくずの的(名前) })
+    return await screen.findByTestId('folder-menu')
+  }
+
+  it('親PC なら、パンくずのメニューにも2つの項目が出て、その段のフォルダを開く', async () => {
+    const open = vi.fn()
+    置く({ view: view(), open, busy: false })
+
+    let メニュー = await パンくずを右クリック('app')
+    expect(within(メニュー).getByTestId('folder-name-full')).toHaveTextContent('app')
+    expect(
+      Array.from(メニュー.querySelectorAll("[data-testid^='folder-menu-']")).map((e) =>
+        e.getAttribute('data-testid'),
+      ),
+    ).toEqual(['folder-menu-open-explorer', 'folder-menu-open-vscode', 'folder-menu-copy-abs'])
+    await userEvent.click(within(メニュー).getByTestId('folder-menu-open-vscode'))
+    await waitFor(() => expect(screen.queryByTestId('folder-menu')).toBeNull())
+
+    メニュー = await パンくずを右クリック('…')
+    expect(within(メニュー).getByTestId('folder-name-full')).toHaveTextContent('dev')
+    await userEvent.click(within(メニュー).getByTestId('folder-menu-open-explorer'))
+
+    expect(open.mock.calls).toEqual([
+      ['vscode', ROOT],
+      ['explorer', '/home/me/dev'],
+    ])
+  })
+
+  it('親PC でない・開く口が無いときは、パンくずのメニューはコピーだけ', async () => {
+    for (const openIn of [
+      undefined,
+      { view: view({ same_machine: false, same_machine_reason: 'LAN の端末' }), open: vi.fn(), busy: false },
+    ]) {
+      const { unmount } = render(
+        <FolderBrowser host="local" start={ROOT} root={ROOT} onPickFile={vi.fn()} openIn={openIn} />,
+      )
+      for (const 名前 of ['app', '…']) {
+        const メニュー = await パンくずを右クリック(名前)
+        expect(within(メニュー).getByTestId('folder-menu-copy-abs')).toBeInTheDocument()
+        expect(within(メニュー).queryByTestId('folder-menu-open-explorer')).toBeNull()
+        expect(within(メニュー).queryByTestId('folder-menu-open-vscode')).toBeNull()
+        await userEvent.keyboard('{Escape}')
+        await waitFor(() => expect(screen.queryByTestId('folder-menu')).toBeNull())
+      }
+      unmount()
+    }
+  })
 })
 
 describe('useOpenIn の読み直しと押したとき', () => {

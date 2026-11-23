@@ -168,6 +168,7 @@ export function FolderBrowser({
     path: string
     value: string
     state: "done" | "failed"
+    場所: "行" | "パンくず"
   } | null>(null)
 
   /**
@@ -203,7 +204,7 @@ export function FolderBrowser({
    * 切れるかどうかはブラウザ任せなので、**動いたり動かなかったりする**形になる。
    */
   const copy = useCallback(
-    (at: string, value: string) => {
+    (at: string, value: string, 場所: "行" | "パンくず" = "行") => {
       const mine = ++copyAsked.current
       // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
       // 前の行の答えが残って見える
@@ -229,7 +230,7 @@ export function FolderBrowser({
           if (mine !== copyAsked.current) {
             return
           }
-          setCopied({ path: at, value, state: ok ? "done" : "failed" })
+          setCopied({ path: at, value, state: ok ? "done" : "failed", 場所 })
           /*
             **成功だけ時間で消す**（項目5-c）。長さは [`コピー表示を畳むまで`]。
 
@@ -423,6 +424,12 @@ export function FolderBrowser({
     (root === undefined || isUnder(root, ひとつ上.path))
   // **親PC の画面で、口が読めたときだけ。** それ以外は何も描かない（設計§7-1）
   const 開く口 = openIn?.view.same_machine === true ? openIn : undefined
+  const パンくずの答え = (at: string) =>
+    copied?.場所 === "パンくず" && copied.path === at ? (
+      <span data-testid="folder-crumb-copy-state" className="text-muted-foreground">
+        {copied.state === "done" ? "コピーしました" : "コピーできません"}
+      </span>
+    ) : null
 
   // **中身は1文字も変えずに外へ出しただけ。** 開く口があるときだけ外枠で包んで、右に
   // 2つのボタンを置く（設計§7-2）。`folder-crumbs` の testid と中の並びは既存のテストと
@@ -467,28 +474,52 @@ export function FolderBrowser({
       </Button>
 
       {外側 !== undefined && (
-        <button
-          type="button"
-          data-testid="folder-crumb"
-          disabled
-          title={`起点より上：${外側.path}`}
-          aria-label={`起点より上：${外側.path}`}
-          className="text-muted-foreground rounded px-1 py-0.5"
-        >
-          …
-        </button>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <span title={`起点より上：${外側.path}`} className="flex items-center gap-1">
+              <button
+                type="button"
+                data-testid="folder-crumb"
+                disabled
+                title={`起点より上：${外側.path}`}
+                aria-label={`起点より上：${外側.path}`}
+                className="text-muted-foreground pointer-events-none rounded px-1 py-0.5"
+              >
+                …
+              </button>
+              {パンくずの答え(外側.path)}
+            </span>
+          </ContextMenuTrigger>
+          <PathMenu
+            name={外側.label}
+            path={外側.path}
+            openIn={開く口}
+            onCopy={(value) => copy(外側.path, value, "パンくず")}
+          />
+        </ContextMenu>
       )}
       {内側.map((crumb, at) => (
         <span key={crumb.path} className="flex items-center gap-1">
           {(at > 0 ? 内側[at - 1]?.label !== '/' : 外側 !== undefined) && <span className="text-muted-foreground">/</span>}
-          <button
-            type="button"
-            data-testid="folder-crumb"
-            className="hover:text-primary rounded px-1 py-0.5 underline"
-            onClick={() => void go(crumb.path)}
-          >
-            {crumb.label}
-          </button>
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <button
+                type="button"
+                data-testid="folder-crumb"
+                className="hover:text-primary rounded px-1 py-0.5 underline"
+                onClick={() => void go(crumb.path)}
+              >
+                {crumb.label}
+              </button>
+            </ContextMenuTrigger>
+            <PathMenu
+              name={crumb.label}
+              path={crumb.path}
+              openIn={開く口}
+              onCopy={(value) => copy(crumb.path, value, "パンくず")}
+            />
+          </ContextMenu>
+          {パンくずの答え(crumb.path)}
         </span>
       ))}
     </nav>
@@ -603,7 +634,7 @@ export function FolderBrowser({
                   onPickFile === undefined ? undefined : () => onPickFile(full)
                 }
                 // **答えを持っているのは1行だけ。** 他の行は常に手つかずへ戻る
-                copyState={copied?.path === full ? copied.state : "idle"}
+                copyState={copied?.場所 === "行" && copied.path === full ? copied.state : "idle"}
                 onCopy={(value) => copy(full, value)}
                 openIn={開く口}
               />
