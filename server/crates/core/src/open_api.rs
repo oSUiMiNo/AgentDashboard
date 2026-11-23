@@ -87,10 +87,12 @@ pub struct ToolView {
     pub reason: Option<String>,
 }
 
-/// VSCode で開いているもの1つ。`path` は押されたときに送られてきたパスのまま。
+/// VSCode で開いているもの1つ。`path` は最後に押されたときに送られてきたパスのまま、`real` は
+/// 正規化した実体のパス（画面は両方と突き合わせる。別の書き方で開かれていても印が付くように）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenedView {
     pub path: String,
+    pub real: String,
     pub kind: TargetKind,
     pub since_ms: u64,
 }
@@ -165,6 +167,7 @@ fn view(judge: Judge, tools: &Tools, opened: Vec<OpenedEntry>) -> OpenInView {
             .into_iter()
             .map(|entry| OpenedView {
                 path: entry.path.to_string_lossy().into_owned(),
+                real: entry.real.to_string_lossy().into_owned(),
                 kind: entry.kind,
                 since_ms: entry
                     .since

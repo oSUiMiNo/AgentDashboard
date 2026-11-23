@@ -35,8 +35,10 @@ export interface ToolView {
 
 /** Rust 側の `OpenedView` と同じ綴り。 */
 export interface OpenedView {
-  /** 画面が送ったパスのまま返る（文字のまま突き合わせてよい） */
+  /** 最後に押されたときに送られたパスのまま返る（文字のまま突き合わせてよい） */
   path: string
+  /** 正規化した実体のパス。別の書き方（symlink・CLI）で開かれたものとも突き合わせるため */
+  real: string
   kind: 'dir' | 'file'
   since_ms: number
 }
@@ -94,9 +96,20 @@ function isOpenedView(value: unknown): value is OpenedView {
   const entry = value as Record<string, unknown>
   return (
     typeof entry.path === 'string' &&
+    typeof entry.real === 'string' &&
     (entry.kind === 'dir' || entry.kind === 'file') &&
     typeof entry.since_ms === 'number'
   )
+}
+
+/**
+ * そのパスを VSCode で開いているか。送ったパスの文字のままか、正規化した実体のパスと突き合わせる。
+ *
+ * **実体の側とも比べる。** 同じフォルダが別の書き方（symlink を通るパス・CLI で打ったパス）で
+ * 開かれていると、文字のままだけでは印が付かない。サイドバーのパスが実体の形なら、こちらで当たる。
+ */
+export function isOpenedIn(view: OpenInView, path: string): boolean {
+  return view.opened.some((entry) => entry.path === path || entry.real === path)
 }
 
 /** 形を確かめる。口の無いサーバの `index.html` や、別の口の JSON を通さない */

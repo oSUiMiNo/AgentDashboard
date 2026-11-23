@@ -185,6 +185,7 @@ mod tests {
             },
             opened: vec![OpenedView {
                 path: "/home/u/pjt".to_string(),
+                real: "/home/u/pjt".to_string(),
                 kind: TargetKind::Dir,
                 since_ms: 10_000,
             }],

@@ -49,7 +49,7 @@ import {
   type DirEntry,
   type DirListing,
 } from '@/lib/hostfs'
-import type { OpenApp, OpenInView } from '@/lib/openIn'
+import { isOpenedIn, type OpenApp, type OpenInView } from '@/lib/openIn'
 import { usePoll, 一覧を引き直す間隔 } from '@/lib/poll'
 
 /**
@@ -721,8 +721,8 @@ function Row({
   // **`file` に限る。** `symlink` を混ぜると、いままで押せなかった行が押せるようになる
   const linkable = entry.kind === "file" && onPickFile !== undefined
   const pressable = openable || linkable
-  // **文字のまま突き合わせる。** サーバは送ったパスのまま返す（設計§3-6）
-  const 開いている = openIn?.view.opened.some((entry) => entry.path === full) ?? false
+  // 送ったパスの文字のままと、正規化した実体のパスの両方で突き合わせる（設計§3-6）
+  const 開いている = openIn !== undefined && isOpenedIn(openIn.view, full)
 
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
   const 行のクラス =

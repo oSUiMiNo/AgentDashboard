@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { EditorOutGlyph, FolderOutGlyph } from '@/components/ui/glyphs'
-import type { OpenApp, OpenInView } from '@/lib/openIn'
+import { isOpenedIn, type OpenApp, type OpenInView } from '@/lib/openIn'
 
 interface Props {
   /** PJT のルート。**押すと開くのはここ**（いま辿っている場所ではない。仮置き） */
@@ -32,7 +32,7 @@ function 名前(path: string): string {
  * （設計§7-4）——薄くすると「使えない」と同じ見た目になる。
  */
 export function OpenInButtons({ root, view, open, busy }: Props) {
-  const 開いている = view.opened.some((entry) => entry.path === root)
+  const 開いている = isOpenedIn(view, root)
   const エクスプローラの説明 = view.explorer.available
     ? `エクスプローラで開く：${名前(root)}`
     : `エクスプローラで開く（使えません：${view.explorer.reason ?? '理由が分かりません'}）`

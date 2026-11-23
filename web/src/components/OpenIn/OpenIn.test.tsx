@@ -222,8 +222,8 @@ describe('サイドバーの出し分けと押した先', () => {
     置く({
       view: view({
         opened: [
-          { path: ROOT, kind: 'dir', since_ms: 1 },
-          { path: FILE, kind: 'file', since_ms: 2 },
+          { path: ROOT, real: ROOT, kind: 'dir', since_ms: 1 },
+          { path: FILE, real: FILE, kind: 'file', since_ms: 2 },
         ],
       }),
       open: vi.fn(),
@@ -246,9 +246,21 @@ describe('サイドバーの出し分けと押した先', () => {
     )
   })
 
+  it('別の書き方（symlink・CLI）で開かれたものも、実体のパスが合えば印が付く', async () => {
+    置く({
+      view: view({
+        opened: [{ path: '/home/me/近道', real: ROOT, kind: 'dir', since_ms: 1 }],
+      }),
+      open: vi.fn(),
+      busy: false,
+    })
+    await 行('計画.md')
+    expect(screen.getByTestId('open-in-vscode')).toHaveAttribute('data-open', 'true')
+  })
+
   it('PJT の札と開いている印は、両方とも行末に並ぶ', async () => {
     置く({
-      view: view({ opened: [{ path: PJT, kind: 'dir', since_ms: 1 }] }),
+      view: view({ opened: [{ path: PJT, real: PJT, kind: 'dir', since_ms: 1 }] }),
       open: vi.fn(),
       busy: false,
     })
@@ -404,7 +416,7 @@ describe('useOpenIn の読み直しと押したとき', () => {
   })
 
   it('押した答えをすぐ映し、失敗は知らせる', async () => {
-    const 開いた様子 = view({ opened: [{ path: ROOT, kind: 'dir', since_ms: 5 }] })
+    const 開いた様子 = view({ opened: [{ path: ROOT, real: ROOT, kind: 'dir', since_ms: 5 }] })
     const 断り = 'このブラウザは親PC の上で開かれていないので、窓を開けません。親PC では localhost で開いてください'
     let POSTの答え: () => Response = () =>
       new Response(JSON.stringify({ outcome: 'opened', view: 開いた様子 }), { status: 200 })
@@ -428,7 +440,7 @@ describe('useOpenIn の読み直しと押したとき', () => {
   })
 
   it('遅れて届いた読み直しの答えは、押した直後の答えを上書きしない', async () => {
-    const 開いた様子 = view({ opened: [{ path: ROOT, kind: 'dir', since_ms: 5 }] })
+    const 開いた様子 = view({ opened: [{ path: ROOT, real: ROOT, kind: 'dir', since_ms: 5 }] })
     let GETを解く: (r: Response) => void = () => {}
     vi.stubGlobal(
       'fetch',

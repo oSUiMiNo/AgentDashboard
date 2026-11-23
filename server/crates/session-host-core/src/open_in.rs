@@ -194,7 +194,10 @@ impl Tools {
 /// VSCode で開いているもの1つ。`path` は押されたときに送られてきたパスのまま。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedEntry {
+    /// 最後に押されたときに送られてきたパスのまま
     pub path: PathBuf,
+    /// 正規化した実体のパス（帳面の鍵）。画面が別の書き方のパスとも突き合わせるため
+    pub real: PathBuf,
     pub kind: TargetKind,
     pub since: SystemTime,
 }
@@ -1020,11 +1023,13 @@ impl OpenedBook {
     /// VSCode で開いているもの。古い順。
     pub fn list(&self) -> Vec<OpenedEntry> {
         let inner = self.lock();
-        let mut held: Vec<&Held> = inner.values().filter(|held| held.ready).collect();
-        held.sort_by_key(|held| (held.since, held.token));
+        let mut held: Vec<(&PathBuf, &Held)> =
+            inner.iter().filter(|(_, held)| held.ready).collect();
+        held.sort_by_key(|(_, held)| (held.since, held.token));
         held.iter()
-            .map(|held| OpenedEntry {
+            .map(|(key, held)| OpenedEntry {
                 path: held.shown.clone(),
+                real: (*key).clone(),
                 kind: held.kind,
                 since: held.since,
             })
@@ -1050,8 +1055,11 @@ impl OpenedBook {
         }
         let reserved = {
             let mut inner = self.lock();
-            if let Some(held) = inner.get(&key) {
+            if let Some(held) = inner.get_mut(&key) {
                 if held.ready {
+                    // **最後に押された書き方で見せる。** 先に別の書き方（symlink・CLI）で開かれていても、
+                    // 画面から押した後はその画面のパスと文字のまま突き合う
+                    held.shown = target.path.clone();
                     Reserve::Front
                 } else {
                     Reserve::Busy
@@ -1969,7 +1977,7 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
     }
 
     #[tokio::test]
-    async fn symlinkを通るパスは送ったまま見せ同じ実体の2回目は前に出すだけ() {
+    async fn symlinkを通るパスは送ったまま見せ同じ実体の2回目は前に出して最後の書き方で見せる() {
         let dir = 捨てるフォルダ::作る();
         let real = dir.path().join("実体");
         let link = dir.path().join("近道");
@@ -1982,16 +1990,27 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
             book.open_vscode(&launcher, フォルダ(&link)).unwrap(),
             VscodeOutcome::Opened
         );
+        let 実体の形 = std::fs::canonicalize(&real).unwrap();
         assert_eq!(
             book.list()[0].path,
             link,
             "送ったパス（symlink 側）の文字のまま見せる"
         );
         assert_eq!(
+            book.list()[0].real,
+            実体の形,
+            "正規化した実体のパスも添える（画面が別の書き方と突き合わせるため）"
+        );
+        assert_eq!(
             book.open_vscode(&launcher, フォルダ(&real)).unwrap(),
             VscodeOutcome::Fronted
         );
         assert_eq!(book.list().len(), 1);
+        assert_eq!(
+            book.list()[0].path,
+            real,
+            "前に出した後は、最後に押された書き方で見せること"
+        );
     }
 
     #[tokio::test]

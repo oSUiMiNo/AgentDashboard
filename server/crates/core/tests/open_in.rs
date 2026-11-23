@@ -416,6 +416,14 @@ async fn VSCodeで開くと閉じるまで印が残り二度押しは前に出�
         scratch.dir(),
         "送ったパスのまま返る"
     );
+    assert_eq!(
+        first["view"]["opened"][0]["real"],
+        std::fs::canonicalize(scratch.dir())
+            .unwrap()
+            .to_string_lossy()
+            .as_ref(),
+        "正規化した実体のパスも返る"
+    );
     assert_eq!(first["view"]["opened"][0]["kind"], "dir");
 
     let (status, body) = post_json(addr, OPEN, &host, &open_body("vscode", &scratch.dir())).await;

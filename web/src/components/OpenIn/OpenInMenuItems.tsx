@@ -1,5 +1,5 @@
 import { ContextMenuItem } from '@/components/ui/context-menu'
-import type { OpenApp, OpenInView } from '@/lib/openIn'
+import { isOpenedIn, type OpenApp, type OpenInView } from '@/lib/openIn'
 
 interface Props {
   /** その行の絶対パス */
@@ -19,7 +19,7 @@ interface Props {
  * 区切り線は呼ぶ側（`FolderBrowser` の行）で置く——この部品は前後に何が並ぶかを知らない。
  */
 export function OpenInMenuItems({ path, view, open }: Props) {
-  const 開いている = view.opened.some((entry) => entry.path === path)
+  const 開いている = isOpenedIn(view, path)
   const エクスプローラの理由 = view.explorer.reason ?? 'エクスプローラは使えません'
   const VSCodeの理由 = view.vscode.reason ?? 'VSCode は使えません'
   const VSCodeの文字 = 開いている ? 'VSCode で開いています（前に出す）' : 'VSCode で開く'

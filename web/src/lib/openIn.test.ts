@@ -12,6 +12,7 @@ import {
   FAILED,
   SIGNED_OUT,
   fetchOpenIn,
+  isOpenedIn,
   postOpenIn,
   type OpenInView,
 } from '@/lib/openIn'
@@ -22,7 +23,7 @@ const VIEW: OpenInView = {
   same_machine_reason: null,
   explorer: { available: true, reason: null },
   vscode: { available: true, reason: null },
-  opened: [{ path: '/home/me/dev/app', kind: 'dir', since_ms: 1 }],
+  opened: [{ path: '/home/me/dev/app', real: '/home/me/dev/app', kind: 'dir', since_ms: 1 }],
 }
 
 function 答える(response: () => Response | Promise<Response>) {
@@ -97,6 +98,18 @@ describe('fetchOpenIn', () => {
     )
     expect(await fetchOpenIn('local')).toEqual(VIEW)
     expect(fetchMock).toHaveBeenCalledWith('/api/hosts/local/open')
+  })
+})
+
+describe('isOpenedIn', () => {
+  it('送ったパスの文字のままか、正規化した実体のパスのどちらかと合えば開いている', () => {
+    const 近道で開いた: OpenInView = {
+      ...VIEW,
+      opened: [{ path: '/home/me/link', real: '/home/me/dev/app', kind: 'dir', since_ms: 1 }],
+    }
+    expect(isOpenedIn(近道で開いた, '/home/me/link')).toBe(true)
+    expect(isOpenedIn(近道で開いた, '/home/me/dev/app')).toBe(true)
+    expect(isOpenedIn(近道で開いた, '/home/me/dev')).toBe(false)
   })
 })
 
