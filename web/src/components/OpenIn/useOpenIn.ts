@@ -45,6 +45,8 @@ export function useOpenIn(host: string): OpenInHandle {
   // **state だけだと同じ描画の中の二度押しを止められない**ので、印を ref でも持つ
   const 押している = useRef(false)
   const 生きている = useRef(true)
+  // 押した直後の答えを、その前に出ていた遅い読み直しが上書きしないよう、通し番号で古い答えを捨てる
+  const 世代 = useRef(0)
 
   useEffect(() => {
     生きている.current = true
@@ -57,8 +59,9 @@ export function useOpenIn(host: string): OpenInHandle {
     if (止めた.current) {
       return
     }
+    const 出した世代 = 世代.current
     const answer = await fetchOpenIn(host)
-    if (!生きている.current || answer === FAILED) {
+    if (!生きている.current || 世代.current !== 出した世代 || answer === FAILED) {
       return
     }
     if (answer === SIGNED_OUT || answer === null) {
@@ -75,6 +78,7 @@ export function useOpenIn(host: string): OpenInHandle {
   // **最初の1回は自分で引く。** `usePoll` は最初の1回を間隔の後に打つので、任せると
   // サイドバーを開いてから3秒間ボタンが出ない。host が変わったら止めた印を解いて引き直す
   useEffect(() => {
+    世代.current += 1
     止めた.current = false
     void 引く()
   }, [引く])
@@ -88,6 +92,7 @@ export function useOpenIn(host: string): OpenInHandle {
       }
       押している.current = true
       setBusy(true)
+      const 出した世代 = 世代.current
       void postOpenIn(host, app, path)
         .then((attempt) => {
           if (!生きている.current) {
@@ -95,6 +100,10 @@ export function useOpenIn(host: string): OpenInHandle {
           }
           // **返ってきた様子ですぐ差し替える。** 印が次の読み直しを待たずに出る
           if (attempt.ok) {
+            if (世代.current !== 出した世代) {
+              return
+            }
+            世代.current += 1
             setView(attempt.result.view)
           } else {
             pushReplyNotice(attempt.message)

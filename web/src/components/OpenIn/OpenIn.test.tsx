@@ -419,6 +419,68 @@ describe('useOpenIn の読み直しと押したとき', () => {
     expect(result.current.busy).toBe(false)
   })
 
+  it('遅れて届いた読み直しの答えは、押した直後の答えを上書きしない', async () => {
+    const 開いた様子 = view({ opened: [{ path: ROOT, kind: 'dir', since_ms: 5 }] })
+    let GETを解く: (r: Response) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          return new Response(JSON.stringify({ outcome: 'opened', view: 開いた様子 }), { status: 200 })
+        }
+        return await new Promise<Response>((resolve) => {
+          GETを解く = resolve
+        })
+      }),
+    )
+    const { result } = renderHook(() => useOpenIn('local'))
+    act(() => result.current.open('vscode', ROOT))
+    await 落ち着かせる()
+    expect(result.current.view?.opened.map((o) => o.path)).toEqual([ROOT])
+
+    await act(async () => {
+      GETを解く(new Response(JSON.stringify(様子), { status: 200 }))
+      await Promise.resolve()
+    })
+    await 落ち着かせる()
+    expect(
+      result.current.view?.opened.map((o) => o.path),
+      '遅い読み直しの答えで、押した直後の印が消えないこと',
+    ).toEqual([ROOT])
+  })
+
+  it('host が変わったら、前の host の答えは捨てる', async () => {
+    const aの様子 = view({ vscode: { available: false, reason: 'a の答え' } })
+    const bの様子 = view({ vscode: { available: false, reason: 'b の答え' } })
+    let aを解く: (r: Response) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/api/hosts/a/open')) {
+          return await new Promise<Response>((resolve) => {
+            aを解く = resolve
+          })
+        }
+        return new Response(JSON.stringify(bの様子), { status: 200 })
+      }),
+    )
+    const { result, rerender } = renderHook(({ host }) => useOpenIn(host), {
+      initialProps: { host: 'a' },
+    })
+    rerender({ host: 'b' })
+    await 落ち着かせる()
+    expect(result.current.view?.vscode.reason).toBe('b の答え')
+
+    await act(async () => {
+      aを解く(new Response(JSON.stringify(aの様子), { status: 200 }))
+      await Promise.resolve()
+    })
+    await 落ち着かせる()
+    expect(result.current.view?.vscode.reason, '前の host の遅い答えで、今の host の様子を上書きしないこと').toBe(
+      'b の答え',
+    )
+  })
+
   it('答えを待つ間は二度押しできない', async () => {
     let 解く: (r: Response) => void = () => {}
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
