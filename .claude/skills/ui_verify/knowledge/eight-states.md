@@ -43,7 +43,7 @@
 
 ### 立てる作法
 
-自己修復機構を切り（`selfheal_enabled = false`）、専用の置き場所（サンドボックス専用の `state_dir`）を使い、本物の claude ではなく擬似claude（`fake-claude`）を使い、停滞の閾値を縮め（`stalled_threshold_secs` を小さくする）、版の乗り換えを塞ぐ（`AGENTDASHBOARD_VERSION_HANDED_OVER` / `AGENTDASHBOARD_VERSION_SUPPORTED` の固定）。これらは mainflow.md 段3 が呼ぶ `sandbox-dashboard up` が既に行っている（`bin/capture-plan` 自身は URL・幅・保存名の計画を出すだけで、サンドボックスは立てない）。
+自己修復機構を切り（`selfheal_enabled = false`）、専用の置き場所（サンドボックス専用の `state_dir`）を使い、本物の claude ではなく擬似claude（`fake-claude`）を使い、停滞の閾値を縮め（`stalled_threshold_secs` を小さくする）、版の乗り換えを塞ぎ（`AGENTDASHBOARD_VERSION_HANDED_OVER` / `AGENTDASHBOARD_VERSION_SUPPORTED` の固定）、外の道具（エクスプローラ・VSCode）を記録だけにする（`AGENTDASHBOARD_OPEN_IN=record:<state_dir>/open-in`。サイドバーのボタンを押しても利用者の画面に窓が出ず、`requests.jsonl` に残る）。これらは mainflow.md 段3 が呼ぶ `sandbox-dashboard up` が既に行っている（`bin/capture-plan` 自身は URL・幅・保存名の計画を出すだけで、サンドボックスは立てない）。
 
 ### 撮ったら参考へ置く
 

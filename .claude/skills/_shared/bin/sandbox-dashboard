@@ -245,11 +245,14 @@ always_bypass_permissions = true
 EOF
 
   local log_file="$state_dir/server.log"
+  # 外の道具（エクスプローラ・VSCode）は記録だけにする。サンドボックスもループバックから開くので
+  # 親PC と判定されボタンが出る。本物のままだと、押した・確かめた拍子に利用者の画面へ窓が出る
   AGENTDASHBOARD_CLAUDE_BIN="$FAKE_CLAUDE_BIN" \
   AGENTDASHBOARD_CLAUDE_HOME="$claude_home" \
   RUST_LOG="info" \
   AGENTDASHBOARD_VERSION_HANDED_OVER="1" \
   AGENTDASHBOARD_VERSION_SUPPORTED="0" \
+  AGENTDASHBOARD_OPEN_IN="record:$state_dir/open-in" \
   nohup "$SERVER_BIN" --config "$config_file" >"$log_file" 2>&1 &
   local pid=$!
   disown "$pid" 2>/dev/null
