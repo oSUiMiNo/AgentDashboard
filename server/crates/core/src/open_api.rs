@@ -383,6 +383,7 @@ const NOT_HERE: &str = "このブラウザは親PC の上で開かれていな�
 const BAD_PATH: &str = "パスは / から始まる絶対パスで渡してください";
 const NO_PATH: &str = "そのパスは在りません";
 const STOPPED: &str = "外の道具を起こす処理が途中で止まりました";
+const UNAVAILABLE: &str = "この道具はいま使えません";
 
 fn local_only(state: &OpenApiState, host: &str) -> Result<(), Refusal> {
     if state.serves_local && host == "local" {
@@ -465,12 +466,11 @@ async fn api_open(
         App::Vscode => &tools.vscode,
     };
     if !tool.available {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            tool.reason
-                .clone()
-                .unwrap_or_else(|| "この道具はいま使えません".to_string()),
-        ));
+        let reason = tool
+            .reason
+            .clone()
+            .unwrap_or_else(|| UNAVAILABLE.to_string());
+        return Err(unavailable(body.app, &path, reason));
     }
 
     let class = open_in::classify(Path::new(&path));
@@ -538,10 +538,25 @@ fn stopped(app: App, path: &str, err: &tokio::task::JoinError) -> Refusal {
     (StatusCode::INTERNAL_SERVER_ERROR, STOPPED.to_string())
 }
 
+/// 道具がいま使えないので断る。手前の確かめと起こす段のどちらか一方だけが出すので、同じ押しで2行にならない。
+///
+/// **断った押しにも1行残す。** 残さないと、押したのに何も起きなかった理由をログから辿れない（設計§11）。
+fn unavailable(app: App, path: &str, reason: String) -> Refusal {
+    tracing::warn!(
+        kind = "open_in_failed",
+        app = app.label(),
+        stage = "unavailable",
+        reason = %reason,
+        path = %path,
+        "外の道具がいま使えないので開けませんでした"
+    );
+    (StatusCode::SERVICE_UNAVAILABLE, reason)
+}
+
 /// 起こせなかった理由を HTTP の番号へ写す（設計§4-5）。
 fn refusal_of(app: App, path: &str, err: OpenError) -> Refusal {
     match err {
-        OpenError::Unavailable(reason) => (StatusCode::SERVICE_UNAVAILABLE, reason),
+        OpenError::Unavailable(reason) => unavailable(app, path, reason),
         full @ OpenError::Full { .. } => (
             StatusCode::CONFLICT,
             format!("{full}。どれかを閉じてから押してください"),

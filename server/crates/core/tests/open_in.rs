@@ -83,6 +83,41 @@ impl OpenLauncher for Fake {
     }
 }
 
+/// 起こす段で「使えない」と分かる起こし口。道具の有無を読む段では使えると答える。
+#[derive(Debug)]
+struct LateUnavailable;
+
+const LATE_REASON: &str = "起こす段で使えないと分かった";
+
+impl OpenLauncher for LateUnavailable {
+    fn tools(&self) -> Tools {
+        Tools {
+            explorer: ToolState::ok(),
+            vscode: ToolState::ok(),
+        }
+    }
+
+    fn explorer(&self, _target: &Target) -> Result<(), OpenError> {
+        Err(OpenError::Unavailable(LATE_REASON.to_string()))
+    }
+
+    fn vscode(&self, _target: &Target, _wait: bool) -> Result<Option<Waiter>, OpenError> {
+        Err(OpenError::Unavailable(LATE_REASON.to_string()))
+    }
+}
+
+/// そのパスの押しで出た `open_in_failed`（`stage=unavailable`）の行。
+fn unavailable_rows(
+    sink: &session_host_core::logging::capture::Sink,
+    mark: usize,
+    path: &str,
+) -> Vec<serde_json::Value> {
+    sink.matching(mark, "path", path)
+        .into_iter()
+        .filter(|row| row["kind"] == "open_in_failed" && row["stage"] == "unavailable")
+        .collect()
+}
+
 /// WSL の仮想スイッチの網（実機の形）。
 fn link() -> WslLink {
     WslLink {
@@ -431,6 +466,8 @@ async fn 相対パスとNULは400で無いパスは404() {
 async fn 塞いだ起こし口は503で理由を返す() {
     let scratch = Scratch::new();
     let addr = start(state_with(Arc::new(BlockedLauncher)), None, false).await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
     let (status, body) = post_json(
         addr,
         OPEN,
@@ -442,6 +479,41 @@ async fn 塞いだ起こし口は503で理由を返す() {
     assert!(
         body.contains("AGENTDASHBOARD_OPEN_IN=off"),
         "理由をそのまま返す: {body}"
+    );
+    let failed = unavailable_rows(sink, mark, &scratch.dir());
+    assert_eq!(
+        failed.len(),
+        1,
+        "使えずに断った押しは open_in_failed（stage=unavailable）がちょうど1行: {failed:?}"
+    );
+
+    let mark = sink.mark();
+    let (status, body) = get(addr, OPEN, &addr.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    let failed = sink.matching(mark, "kind", "open_in_failed");
+    assert!(failed.is_empty(), "GET ではログを出さない: {failed:?}");
+}
+
+#[tokio::test]
+async fn 起こす段で使えないと分かったら503と1行のログ() {
+    let scratch = Scratch::new();
+    let addr = start(state_with(Arc::new(LateUnavailable)), None, false).await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+    let (status, body) = post_json(
+        addr,
+        OPEN,
+        &addr.to_string(),
+        &open_body("vscode", &scratch.dir()),
+    )
+    .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains(LATE_REASON), "理由をそのまま返す: {body}");
+    let failed = unavailable_rows(sink, mark, &scratch.dir());
+    assert_eq!(
+        failed.len(),
+        1,
+        "起こす段で使えずに断った押しは open_in_failed（stage=unavailable）がちょうど1行: {failed:?}"
     );
 }
 
