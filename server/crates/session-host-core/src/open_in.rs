@@ -49,11 +49,15 @@ const STDERR_TAIL: usize = 2048;
 /// 子が終わったあと、標準エラーの読み手を待つ時間。**EOF までは待たない**——Windows 側の孫
 /// （`Code.exe` の待ち）が標準エラーを握ったまま残ることがある（設計 §10 の M3）。
 const STDERR_GRACE: Duration = Duration::from_millis(500);
+/// パスをエクスプローラへ渡す道に PowerShell を使うときの変数の名前（値をコマンドの文字列に埋めない）。
+const OPEN_IN_TARGET_ENV: &str = "OPEN_IN_TARGET";
 
 const BLOCKED_REASON: &str =
     "この起動では外の道具を起こさない設定です（AGENTDASHBOARD_OPEN_IN=off）";
 const NOT_WSL_REASON: &str = "この機械ではまだ使えません（WSL で動くダッシュボードだけが対象です）";
 const NO_EXPLORER_REASON: &str = "explorer.exe が見つかりません";
+const NO_POWERSHELL_REASON: &str =
+    "名前にカンマ（,）を含む場所をエクスプローラで開くのに要る powershell.exe が見つかりません";
 const NO_VSCODE_REASON: &str = "VSCode が見つかりません（PATH と既定の入れ場所を探しました）";
 const NO_DISTRO_REASON: &str = "WSL のディストロ名が分かりません";
 const OUTSIDE_RUNTIME: &str = "tokio の実行環境の外から呼ばれました";
@@ -266,6 +270,70 @@ pub fn explorer_args(kind: TargetKind, win: &str) -> Vec<String> {
     match kind {
         TargetKind::Dir => vec![win.to_string()],
         TargetKind::File => vec!["/select,".to_string(), win.to_string()],
+    }
+}
+
+/// エクスプローラの起こし方（何を・どの引数で・どの環境で起こすか）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerCommand {
+    pub program: &'static str,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// エクスプローラへ直に渡すと割れるパスか。
+///
+/// **カンマを含むパスは割れる。** WSL の橋渡しは空白を含まない引数を引用符で包まないので、
+/// エクスプローラがカンマを引数の区切りとして読み、「ドキュメント」や「デスクトップ」を開く。
+/// パスを `"…"` で包んで渡しても、橋渡しが `"` を `\"` に直すので同じく割れる（どちらも
+/// レビュー直し1周目で実測。設計 §3-3）。空白も含むパスは橋渡しが包むので直に渡せるが、
+/// 分けずにカンマを含むものは全部 PowerShell を通す。
+pub fn needs_powershell(win: &str) -> bool {
+    win.contains(',')
+}
+
+/// エクスプローラをどう起こすかを決める（純関数）。`env` は [`child_env`] で組んだ子の環境。
+///
+/// - カンマを含まない：`explorer.exe` を直に起こす（[`explorer_args`]。設計 §10 の M5 で確かめた形）
+/// - カンマを含む：`powershell.exe` の `Start-Process` で起こす。**パスはコマンドの文字列に
+///   埋めず**、環境変数 `OPEN_IN_TARGET` で渡す（`WSLENV` の `/w` で Windows 側へ値をそのまま
+///   運ぶ）。引用符は PowerShell の中で `[char]34` で足す。パスの中の `'`・`$`・空白・日本語でも
+///   崩れないことを実測した
+pub fn explorer_command(
+    kind: TargetKind,
+    win: &str,
+    env: Vec<(String, String)>,
+) -> ExplorerCommand {
+    if !needs_powershell(win) {
+        return ExplorerCommand {
+            program: EXPLORER,
+            args: explorer_args(kind, win),
+            env,
+        };
+    }
+    let argument = match kind {
+        TargetKind::Dir => "([char]34 + $env:OPEN_IN_TARGET + [char]34)",
+        TargetKind::File => "('/select,' + [char]34 + $env:OPEN_IN_TARGET + [char]34)",
+    };
+    let command = format!(
+        "Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList {argument}"
+    );
+    let mut env: BTreeMap<String, String> = env.into_iter().collect();
+    let wslenv = match env.get("WSLENV").filter(|value| !value.is_empty()) {
+        Some(value) => format!("{OPEN_IN_TARGET_ENV}/w:{value}"),
+        None => format!("{OPEN_IN_TARGET_ENV}/w"),
+    };
+    env.insert("WSLENV".to_string(), wslenv);
+    env.insert(OPEN_IN_TARGET_ENV.to_string(), win.to_string());
+    ExplorerCommand {
+        program: crate::resources::POWERSHELL,
+        args: vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            command,
+        ],
+        env: env.into_iter().collect(),
     }
 }
 
@@ -790,14 +858,22 @@ impl OpenLauncher for RealLauncher {
             return Err(OpenError::Unavailable(NO_EXPLORER_REASON.to_string()));
         }
         let win = to_windows(&target.path, "-w")?;
-        let child = tokio::process::Command::new(EXPLORER)
-            .args(explorer_args(target.kind, &win))
-            .env_clear()
-            .envs(child_env(
+        let command = explorer_command(
+            target.kind,
+            &win,
+            child_env(
                 parent_env(),
                 self.distro().as_deref().unwrap_or_default(),
                 PathClass::Wsl,
-            ))
+            ),
+        );
+        if !Path::new(command.program).exists() {
+            return Err(OpenError::Unavailable(NO_POWERSHELL_REASON.to_string()));
+        }
+        let child = tokio::process::Command::new(command.program)
+            .args(&command.args)
+            .env_clear()
+            .envs(command.env)
             .current_dir(WINDOWS_DIR)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1928,6 +2004,67 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
         assert!(
             帳面の行(sink, mark, "open_in_failed", &path).is_empty(),
             "explorer.exe は成功でも 1 を返すので、終了コードで失敗と書かない"
+        );
+    }
+
+    // ---- カンマを含むパス（レビュー直し1周目）
+
+    #[test]
+    fn カンマを含まないパスはexplorerを直に起こす() {
+        let env = vec![("PATH".to_string(), "/usr/bin".to_string())];
+        for (kind, win) in [
+            (TargetKind::Dir, r"C:\a b"),
+            (
+                TargetKind::File,
+                r"\\wsl.localhost\Ubuntu-24.04\home\u\空白 と.txt",
+            ),
+        ] {
+            let command = explorer_command(kind, win, env.clone());
+            assert_eq!(command.program, EXPLORER);
+            assert_eq!(command.args, explorer_args(kind, win));
+            assert_eq!(command.env, env, "環境は足さない");
+        }
+    }
+
+    #[test]
+    fn カンマを含むパスはpowershellを通しパスは環境変数で渡す() {
+        for win in [
+            r"C:\work\a,b",
+            r"C:\work\a,b\x,y.txt",
+            r"\\wsl.localhost\Ubuntu-24.04\home\u\a,b c\x,y z.txt",
+            r"\\wsl.localhost\Ubuntu-24.04\home\u\q'u$x,1 日本\f'$y,2 語.txt",
+        ] {
+            for kind in [TargetKind::Dir, TargetKind::File] {
+                let command = explorer_command(kind, win, vec![]);
+                assert_eq!(command.program, crate::resources::POWERSHELL, "{win}");
+                let script = command.args.last().expect("-Command の中身");
+                assert!(
+                    !script.contains(win),
+                    "パスをコマンドの文字列に埋めない：{script}"
+                );
+                assert!(script.contains("$env:OPEN_IN_TARGET"), "{script}");
+                assert!(!script.contains('"'), "引用符は [char]34 で足す：{script}");
+                assert_eq!(
+                    script.contains("'/select,'"),
+                    kind == TargetKind::File,
+                    "ファイルだけ /select, を付ける：{script}"
+                );
+                assert_eq!(値(&command.env, "OPEN_IN_TARGET").as_deref(), Some(win));
+                assert_eq!(
+                    値(&command.env, "WSLENV").as_deref(),
+                    Some("OPEN_IN_TARGET/w")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn powershellへ渡すwslenvは元の値の前に足す() {
+        let env = vec![("WSLENV".to_string(), "ELECTRON_RUN_AS_NODE/w".to_string())];
+        let command = explorer_command(TargetKind::Dir, r"C:\a,b", env);
+        assert_eq!(
+            値(&command.env, "WSLENV").as_deref(),
+            Some("OPEN_IN_TARGET/w:ELECTRON_RUN_AS_NODE/w")
         );
     }
 }
