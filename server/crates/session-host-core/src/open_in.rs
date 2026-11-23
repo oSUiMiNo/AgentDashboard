@@ -392,9 +392,14 @@ pub fn version_folder(script: &str) -> Option<String> {
     script_value(script, "VERSIONFOLDER")
 }
 
-/// VSCode の `code` script らしいか。`PATH` の同名の別物を弾くため（設計 §3-5）。
+/// Windows の VSCode に付いてくる WSL 用の `code` script か（設計 §3-5）。`PATH` の同名の別物と、
+/// WSL の中に入れた Linux 版を弾くため。Linux 版を拾うと WSLg の窓が開き、Windows のドライブの PJT では `cli.js` が見つからない。
 pub fn looks_like_vscode_script(script: &str) -> bool {
     script.contains("VSCODE_PATH=")
+        && script_value(script, "VERSIONFOLDER").is_some()
+        && script
+            .lines()
+            .any(|line| line.trim().starts_with("ELECTRON=") && line.trim().ends_with(".exe\""))
 }
 
 /// `wslpath -w /` の答え（`\\wsl.localhost\<名前>\`・`\\wsl$\<名前>\`）からディストロ名を読む。
@@ -1033,10 +1038,19 @@ impl OpenedBook {
         in_runtime()?;
         let key = std::fs::canonicalize(&target.path).unwrap_or_else(|_| target.path.clone());
 
+        enum Reserve {
+            Busy,
+            Front,
+            New(u64),
+        }
         let reserved = {
             let mut inner = self.lock();
-            if inner.contains_key(&key) {
-                None
+            if let Some(held) = inner.get(&key) {
+                if held.ready {
+                    Reserve::Front
+                } else {
+                    Reserve::Busy
+                }
             } else if inner.len() >= self.cap {
                 return Err(OpenError::Full { cap: self.cap });
             } else {
@@ -1052,16 +1066,21 @@ impl OpenedBook {
                         ready: false,
                     },
                 );
-                Some(token)
+                Reserve::New(token)
             }
         };
 
-        let Some(token) = reserved else {
-            // **待ちを増やさない。** 同じものの2回目も待たせると印が二重になる（設計 §10 の M1）
-            if let Some(waiter) = launcher.vscode(&target, false)? {
-                tokio::spawn(waiter);
+        let token = match reserved {
+            Reserve::New(token) => token,
+            // 起こしている最中の2回目は何も起こさない（2本目の `code` を起こすと窓が2つ開き、印が別の子に結び付く）
+            Reserve::Busy => return Ok(VscodeOutcome::Fronted),
+            Reserve::Front => {
+                // **待ちを増やさない。** 同じものの2回目も待たせると印が二重になる（設計 §10 の M1）
+                if let Some(waiter) = launcher.vscode(&target, false)? {
+                    tokio::spawn(waiter);
+                }
+                return Ok(VscodeOutcome::Fronted);
             }
-            return Ok(VscodeOutcome::Fronted);
         };
 
         match launcher.vscode(&target, true) {
@@ -1245,6 +1264,41 @@ mod tests {
             if !wait {
                 return Ok(None);
             }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.待ちの合図.lock().unwrap().push(tx);
+            Ok(Some(Box::pin(async move { rx.await.unwrap_or(Ok(())) })))
+        }
+    }
+
+    /// 起こす段（`wait=true`）で、合図が来るまで同期で止まる偽の起こし口。起こしている最中に2回目が来る形を作るため。
+    #[derive(Debug)]
+    struct 止まる起こし口 {
+        入った: Mutex<std::sync::mpsc::Sender<()>>,
+        放す: Mutex<std::sync::mpsc::Receiver<()>>,
+        前へ出した: Mutex<Vec<PathBuf>>,
+        待ちの合図: Mutex<Vec<tokio::sync::oneshot::Sender<Result<(), WaitFailure>>>>,
+    }
+
+    impl OpenLauncher for 止まる起こし口 {
+        fn tools(&self) -> Tools {
+            Tools::both(ToolState::ok())
+        }
+
+        fn explorer(&self, _target: &Target) -> Result<(), OpenError> {
+            Ok(())
+        }
+
+        fn vscode(&self, target: &Target, wait: bool) -> Result<Option<Waiter>, OpenError> {
+            if !wait {
+                self.前へ出した.lock().unwrap().push(target.path.clone());
+                return Ok(None);
+            }
+            self.入った.lock().unwrap().send(()).unwrap();
+            self.放す
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|err| OpenError::Spawn(err.to_string()))?;
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.待ちの合図.lock().unwrap().push(tx);
             Ok(Some(Box::pin(async move { rx.await.unwrap_or(Ok(())) })))
@@ -1470,6 +1524,40 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
         assert_eq!(script_value(SCRIPT_HEAD, "NAME").as_deref(), Some("Code"));
         assert!(looks_like_vscode_script(SCRIPT_HEAD));
         assert!(!looks_like_vscode_script("#!/bin/sh\necho hi\n"));
+    }
+
+    /// WSL の中に入れた Linux 版の `code` script の要点の写し（個人のパスは含まない）。
+    const LINUX_SCRIPT: &str = r#"#!/usr/bin/env sh
+#
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+if [ ! -L "$0" ]; then
+	VSCODE_PATH="$(dirname "$0")/.."
+else
+	VSCODE_PATH="$(dirname "$(readlink -f "$0")")/.."
+fi
+ELECTRON="$VSCODE_PATH/code"
+CLI="$VSCODE_PATH/resources/app/out/cli.js"
+ELECTRON_RUN_AS_NODE=1 "$ELECTRON" "$CLI" --ms-enable-electron-run-as-node "$@"
+exit $?
+"#;
+
+    #[test]
+    fn linux版のcode_scriptはvscodeのscriptとみなさない() {
+        assert!(
+            !looks_like_vscode_script(LINUX_SCRIPT),
+            "Linux 版の code script を VSCode の script とみなさないこと"
+        );
+        let 版のフォルダだけ = format!("{LINUX_SCRIPT}VERSIONFOLDER=\"8a14f0cc1b\"\n");
+        assert!(
+            !looks_like_vscode_script(&版のフォルダだけ),
+            "VERSIONFOLDER があっても ELECTRON が .exe でなければ採らないこと"
+        );
+        let exeだけ = "VSCODE_PATH=\"x\"\nELECTRON=\"$VSCODE_PATH/$NAME.exe\"\n";
+        assert!(
+            !looks_like_vscode_script(exeだけ),
+            "ELECTRON が .exe でも VERSIONFOLDER が無ければ採らないこと"
+        );
     }
 
     #[test]
@@ -1749,6 +1837,52 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
             "待ちは1つだけ"
         );
         assert_eq!(book.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn 起こしている最中の2回目は起こし口を呼ばずに前に出すだけ() {
+        let (入った_tx, 入った_rx) = std::sync::mpsc::channel();
+        let (放す_tx, 放す_rx) = std::sync::mpsc::channel();
+        let launcher = Arc::new(止まる起こし口 {
+            入った: Mutex::new(入った_tx),
+            放す: Mutex::new(放す_rx),
+            前へ出した: Mutex::new(Vec::new()),
+            待ちの合図: Mutex::new(Vec::new()),
+        });
+        let book = OpenedBook::new(OPENED_CAP);
+        let first = {
+            let launcher = Arc::clone(&launcher);
+            let book = Arc::clone(&book);
+            tokio::task::spawn_blocking(move || {
+                book.open_vscode(launcher.as_ref(), フォルダ("/home/u/p"))
+            })
+        };
+        入った_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("1回目が起こし口に入ること");
+
+        let outcome = book
+            .open_vscode(launcher.as_ref(), フォルダ("/home/u/p"))
+            .unwrap();
+        assert_eq!(outcome, VscodeOutcome::Fronted);
+        assert!(
+            launcher.前へ出した.lock().unwrap().is_empty(),
+            "起こしている最中の2回目で起こし口が呼ばれないこと"
+        );
+        assert!(
+            book.list().is_empty(),
+            "起こし終わるまでは一覧に出さないこと"
+        );
+
+        放す_tx.send(()).unwrap();
+        let first = first.await.expect("1回目の join").unwrap();
+        assert_eq!(first, VscodeOutcome::Opened);
+        assert_eq!(book.list().len(), 1);
+
+        for tx in launcher.待ちの合図.lock().unwrap().drain(..) {
+            let _ = tx.send(Ok(()));
+        }
+        空になるまで待つ(&book).await;
     }
 
     #[tokio::test]
