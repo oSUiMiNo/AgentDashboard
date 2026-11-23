@@ -428,7 +428,10 @@ export function FolderBrowser({
   const 余白 = <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
   const パンくずの答え = (at: string) =>
     copied?.場所 === "パンくず" && copied.path === at ? (
-      <span data-testid="folder-crumb-copy-state" className="text-muted-foreground">
+      <span
+        data-testid="folder-crumb-copy-state"
+        className="bg-popover text-popover-foreground pointer-events-none absolute top-full left-0 z-20 mt-0.5 rounded-md border px-1.5 py-0.5 whitespace-nowrap shadow-md"
+      >
         {copied.state === "done" ? "コピーしました" : "コピーできません"}
       </span>
     ) : null
@@ -478,7 +481,7 @@ export function FolderBrowser({
       {外側 !== undefined && (
         <ContextMenu>
           <ContextMenuTrigger asChild>
-            <span title={`起点より上：${外側.path}`} className="flex items-center gap-1">
+            <span title={`起点より上：${外側.path}`} className="relative flex items-center gap-1">
               <button
                 type="button"
                 data-testid="folder-crumb"
@@ -502,7 +505,7 @@ export function FolderBrowser({
         </ContextMenu>
       )}
       {内側.map((crumb, at) => (
-        <span key={crumb.path} className="flex items-center gap-1">
+        <span key={crumb.path} className="relative flex items-center gap-1">
           {(at > 0 ? 内側[at - 1]?.label !== '/' : 外側 !== undefined) && <span className="text-muted-foreground">/</span>}
           <ContextMenu>
             <ContextMenuTrigger asChild>

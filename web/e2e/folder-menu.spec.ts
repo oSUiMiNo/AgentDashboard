@@ -366,3 +366,41 @@ test.describe('指で触る画面（パンくずと余白・追加の要望 2026
     )
   })
 })
+
+test.describe('パンくずの答えは場所を取らない（追加の要望 2026-11-23）', () => {
+  test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
+
+  for (const 場面 of ['PJT のルート', 'MyDocs の中'] as const) {
+    test(`${場面}でパンくずから写して答えが出ても、パンくずの段と一覧の行は動かない`, async ({
+      page,
+    }) => {
+      const panel = await openSidebar(page)
+      if (場面 === 'MyDocs の中') {
+        await MyDocsへ入る(panel)
+      }
+      const 段 = パンくず(panel, PJT_NAME)
+      const 先頭の行 = panel.getByTestId('folder-entry').first()
+      const パンくずの器 = panel.getByTestId('folder-crumbs')
+      await 止まった真ん中(page, 段)
+      const 前 = {
+        段: await 段.boundingBox(),
+        行: await 先頭の行.boundingBox(),
+        器: await パンくずの器.boundingBox(),
+      }
+
+      await 段.click({ button: 'right' })
+      await page.getByTestId('folder-menu-copy-abs').click()
+      await expect(page.getByTestId('folder-menu')).toHaveCount(0)
+      await expect(横の答え(段)).toHaveText('コピーしました')
+
+      const 後 = {
+        段: await 段.boundingBox(),
+        行: await 先頭の行.boundingBox(),
+        器: await パンくずの器.boundingBox(),
+      }
+      expect(後.段, '押した段が動かないこと').toEqual(前.段)
+      expect(後.行, '一覧の先頭の行が下がらないこと').toEqual(前.行)
+      expect(後.器?.height, 'パンくずの高さが変わらないこと').toBe(前.器?.height)
+    })
+  }
+})
