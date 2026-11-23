@@ -1,3 +1,5 @@
+import { useId } from 'react'
+
 /**
  * 手書きのインライン SVG の印（並べ替え設計§5-2）。
  *
@@ -598,12 +600,18 @@ export function SaveGlyph({ className }: { className?: string }) {
 }
 
 /**
- * 「エクスプローラで開く」の印（サイドバーにエクスプローラで開くボタンが欲しい 設計§7-3）。
- * **言葉は呼ぶ側の `aria-label` と `title` に残す。**
+ * 「エクスプローラで開く」と「VSCode で開く」の印が共有する、右上へ抜ける矢印
+ * （サイドバーにエクスプローラで開くボタンが欲しい 設計§7-3）。2つの印を「塗った物＋外へ」の
+ * 1組にそろえるため、同じ位置・同じ大きさで描く。
+ */
+const 外へ出る矢印 = 'M17 2.5h4.5V7M21.5 2.5 17.5 6.5'
+
+/**
+ * 「エクスプローラで開く」の印。**言葉は呼ぶ側の `aria-label` と `title` に残す。**
  *
- * 塗ったフォルダ（Filled 主体＝`DESIGN.md` §14.1）と、右上の外へ抜ける矢印。矢印は
- * **外へ出す**ことを絵の側で言う（§14.3）。矢印は面から 2px 以上離す（§18.2 の隙間）
- * ——面に重ねると同じ色で塗りつぶされて消える。
+ * 塗ったフォルダが主役（幅は升目の 70% 以上＝`DESIGN.md` §18.2）で、矢印は右上に小さく
+ * 添える。矢印はフォルダの面から 2 以上離す（§18.2 の隙間）——面に重ねると同じ色で
+ * 塗りつぶされて消える。タブの段差は 3（18px で 2px 以上残る）。
  *
  * **塗りは `path` の側に置く。** `svg` の `fill` は `none` のまま（印の作法のテストが見る）。
  */
@@ -619,25 +627,29 @@ export function FolderOutGlyph({ className }: { className?: string }) {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      {/* フォルダ（タブ付き）。面で塗る */}
       <path
         fill="currentColor"
-        d="M3 11a1 1 0 0 1 1-1h3l2 2h3a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"
+        stroke="none"
+        d="M2 9a2 2 0 0 1 2-2h4a2 2 0 0 1 1.6.8L11 10h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"
       />
-      {/* 外へ出ていく矢印（角と軸で1本） */}
-      <path d="M14 3h7v7M21 3l-4 4" />
+      <path d={外へ出る矢印} />
     </svg>
   )
 }
 
 /**
- * 「VSCode で開く」の印（同 設計§7-3）。**VSCode の商標のロゴは使わない**（仮置き）。
+ * 「VSCode で開く」の印。**VSCode の商標のロゴは使わない**（仮置き）。
  *
- * 右上の角が開いた窓（上に帯）と中の `<>`、外へ抜ける矢印。`ExternalLinkGlyph` とは
- * 帯と `<>` で、`CodeGlyph`（`<>` だけ）とは窓の外形で見分ける。矢印の軸は `<>` に
- * 届かないところで止める（重ねると記号が読めない）。
+ * 塗った角丸の窓に `<>` を**抜き**で入れ、右上へ抜ける矢印を窓の外に置く。
+ * `ExternalLinkGlyph`（線の四角）とは「塗りの塊か線か」の外形で、`CodeGlyph`（線の `<>`
+ * だけ）とは窓の面で、`FolderOutGlyph` とはタブの有無と抜きの `<>` で見分ける
+ * （6-B の判定で、線の窓だと `ExternalLinkGlyph` と同じ外形になると分かった）。
+ * 抜きの太さと縁からの距離はどちらも 2（§18.2）。上の帯は描かない（14px で消える）。
+ *
+ * 抜きは `mask` で作る。同じ画面に何個並んでも取り違えないよう、`id` は `useId` で分ける。
  */
 export function EditorOutGlyph({ className }: { className?: string }) {
+  const 抜き = `editor-out-${useId().replace(/[^\w-]/g, '')}`
   return (
     <svg
       aria-hidden
@@ -649,12 +661,21 @@ export function EditorOutGlyph({ className }: { className?: string }) {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      {/* 右上の角が開いた窓と、上の帯 */}
-      <path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6M3 9h8" />
-      {/* 中の <> */}
-      <path d="m8.5 13-2.5 2.5 2.5 2.5M13.5 13l2.5 2.5-2.5 2.5" />
-      {/* 外へ出ていく矢印（角と軸で1本） */}
-      <path d="M15 3h6v6M21 3l-6 6" />
+      <mask id={抜き} maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+        <rect width="24" height="24" fill="white" stroke="none" />
+        <path d="M7.5 12 5 15l2.5 3M11.5 12l2.5 3-2.5 3" stroke="black" />
+      </mask>
+      <rect
+        x="2"
+        y="9"
+        width="15"
+        height="12"
+        rx="2.5"
+        fill="currentColor"
+        stroke="none"
+        mask={`url(#${抜き})`}
+      />
+      <path d={外へ出る矢印} />
     </svg>
   )
 }

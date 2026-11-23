@@ -98,6 +98,24 @@ describe('印の作法', () => {
     expect(svg?.getAttribute('aria-hidden')).not.toBeNull()
   })
 
+  it('VSCode の印の抜きは、並べても互いの mask を指さない', () => {
+    // サイドバーではボタンと行末の印で同じ画面に何個も並ぶ。`id` が重なると、
+    // 先に置かれた印の mask を後の印が借り、片方が消えても気づけない
+    const { container } = render(
+      <>
+        <EditorOutGlyph />
+        <EditorOutGlyph />
+      </>,
+    )
+    const ids = [...container.querySelectorAll('mask')].map((mask) => mask.getAttribute('id'))
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+    for (const svg of container.querySelectorAll('svg')) {
+      const id = svg.querySelector('mask')?.getAttribute('id')
+      expect(svg.querySelector('rect[mask]')?.getAttribute('mask')).toBe(`url(#${id})`)
+    }
+  })
+
   it('大きさは className でしか変わらない', () => {
     const { container } = render(<CopyGlyph className="size-3.5" />)
     expect(container.querySelector('svg')?.getAttribute('class')).toBe('size-3.5')
