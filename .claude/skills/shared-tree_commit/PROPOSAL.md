@@ -8,6 +8,7 @@
 | 1 | [ ] | 2026-0917-1000 | fe0d452b-4983-4d7c-bd20-3513cf9352ab | 触ったファイルの記録を、セッション記録（JSONL）の後解析ではなく `PostToolUse` フックで台帳に積む方式… |
 | 2 | [ ] | 2026-0917-1308 | fe0d452b-4983-4d7c-bd20-3513cf9352ab | touched-files がセッション記録を読むときの null バイト警告を消す |
 | 3 | [ ] | 2026-1123-0247 | a39c3ae7-f960-4b17-a49c-fce88c4be0df | fork のワーカがコミットするときの道を mainflow に書く（または touched-files に fork … |
+| 4 | [ ] | 2026-1123-0923 | a39c3ae7-f960-4b17-a49c-fce88c4be0df | コミットの前の確かめに、触った Rust の crate の `scripts/cargo fmt --check -p… |
 <!-- proposal_submit:summary-rows -->
 
 ---
@@ -33,6 +34,12 @@
 担当イシュー：ファイル閲覧の上限を設定から変え、大きいものは流し読みする
 背景：フェーズ1・2の実行ワーカ（どちらも fork）が、Phase 1 の sonnet 委譲を使わずに計画.md の『コミット（2）の注意』の手でコミットした。手順はイシューの計画.md にしか書かれておらず、別のイシューの fork は同じ判断を毎回し直すことになる
 特記事項：fork の中からは sonnet のワーカを起こせても、fork 自身の編集の記録の場所を touched-files が知らない。PROPOSAL #1（PostToolUse フックで台帳に積む方式）が入れば fork の編集も拾える可能性があり、そちらと合わせて判断するとよい
+
+### 4
+提案：コミットの前の確かめに、触った Rust の crate の `scripts/cargo fmt --check -p <crate>`（web なら `make lint-web`）を入れ、書式の外れたコミットを作らない
+担当イシュー：ファイル閲覧の上限を設定から変え、大きいものは流し読みする
+背景：レビュー直し2回目で、部分の門（触った crate の clippy・nextest）に fmt の検査が無く、試験の rustfmt の外れが make ci の lint まで分からなかった。共有ツリーで歴史を書き換えないため別のコミット（073611b）で直し、元のコミット（e9f312e）は単独では fmt を通らないまま残った
+特記事項：clippy は通るので気づきにくい。整形は触った crate だけ（fmt --all は他人の未コミットを巻き込む）
 <!-- proposal_submit:detail-sections -->
 
 ---
