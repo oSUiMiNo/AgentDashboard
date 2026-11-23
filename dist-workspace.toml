@@ -39,6 +39,8 @@ targets = [
 # ワンライナーの2種類だけ。homebrew・npm・msi は利用者の前提を増やすので作らない
 installers = ["shell", "powershell"]
 
+github-custom-runners = { aarch64-apple-darwin = "macos-15" }
+
 # 入れる場所。**~/.cargo/bin にしない**——利用者に Rust が入っている前提を持ち込まない。
 # PATH への追加はインストーラが面倒を見る
 install-path = "~/.local/bin"
