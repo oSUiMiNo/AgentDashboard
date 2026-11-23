@@ -630,7 +630,7 @@ export function FolderOutGlyph({ className }: { className?: string }) {
       <path
         fill="currentColor"
         stroke="none"
-        d="M2 9a2 2 0 0 1 2-2h4a2 2 0 0 1 1.6.8L11 10h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"
+        d="M2 10a2 2 0 0 1 2-2h4a2 2 0 0 1 1.6.8L11 11h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"
       />
       <path d={外へ出る矢印} />
     </svg>
@@ -644,7 +644,9 @@ export function FolderOutGlyph({ className }: { className?: string }) {
  * `ExternalLinkGlyph`（線の四角）とは「塗りの塊か線か」の外形で、`CodeGlyph`（線の `<>`
  * だけ）とは窓の面で、`FolderOutGlyph` とはタブの有無と抜きの `<>` で見分ける
  * （6-B の判定で、線の窓だと `ExternalLinkGlyph` と同じ外形になると分かった）。
- * 抜きの太さと縁からの距離はどちらも 2（§18.2）。上の帯は描かない（14px で消える）。
+ * 抜きの太さと縁からの距離はどちらも 2 以上（§18.2）。上の帯は描かない（14px で消える）。
+ * 窓は主役として升目の 70% 以上（幅 17）。下端は `FolderOutGlyph` とそろえて 22 にする
+ * （同じ枠で 2px 隣に並ぶので、下端が 1 ずれると目に付く）。
  *
  * 抜きは `mask` で作る。同じ画面に何個並んでも取り違えないよう、`id` は `useId` で分ける。
  */
@@ -663,12 +665,12 @@ export function EditorOutGlyph({ className }: { className?: string }) {
     >
       <mask id={抜き} maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
         <rect width="24" height="24" fill="white" stroke="none" />
-        <path d="M7.5 12 5 15l2.5 3M11.5 12l2.5 3-2.5 3" stroke="black" />
+        <path d="M8.5 13 6 16l2.5 3M12.5 13l2.5 3-2.5 3" stroke="black" />
       </mask>
       <rect
         x="2"
-        y="9"
-        width="15"
+        y="10"
+        width="17"
         height="12"
         rx="2.5"
         fill="currentColor"

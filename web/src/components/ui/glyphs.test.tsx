@@ -116,6 +116,18 @@ describe('印の作法', () => {
     }
   })
 
+  it('VSCode の印の窓は升目の 70% 以上で、下端がエクスプローラの印とそろう', () => {
+    // `DESIGN.md` §18.2 の主役の下限（24 の 70%＝16.8）。15 だった版は再判定で落ちた
+    const { container } = render(<EditorOutGlyph />)
+    const 窓 = container.querySelector('rect[mask]')
+    const 幅 = Number(窓?.getAttribute('width'))
+    expect(幅, '窓の幅が升目の 70% 以上').toBeGreaterThanOrEqual(24 * 0.7)
+    expect(Number(窓?.getAttribute('y')) + Number(窓?.getAttribute('height'))).toBe(22)
+    const フォルダ = render(<FolderOutGlyph />).container.querySelector('path[fill]')
+    // フォルダの形は「左の辺の上端 y から 12 下が下端」（始点 → 体の右の辺 v7 → 角 2 → 左の辺 → 始点）
+    expect(フォルダ?.getAttribute('d')?.startsWith('M2 10'), 'フォルダの下端が 22（始点が y=10）').toBe(true)
+  })
+
   it('大きさは className でしか変わらない', () => {
     const { container } = render(<CopyGlyph className="size-3.5" />)
     expect(container.querySelector('svg')?.getAttribute('class')).toBe('size-3.5')
