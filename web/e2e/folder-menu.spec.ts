@@ -44,10 +44,15 @@ const DIR = 'MyDocs'
 /** `radix-ui` の長押しは 700ms。**余裕を持って超えさせる**（境目を測るテストではない） */
 const 長押し = 1000
 
+const 長い一覧の数 = 60
+
 test.beforeAll(() => {
   fs.rmSync(PROJECT_DIR, { recursive: true, force: true })
   fs.mkdirSync(path.join(PROJECT_DIR, DIR), { recursive: true })
   fs.writeFileSync(path.join(PROJECT_DIR, FILE), '# 計画\n\n- [x] 済んだこと\n')
+  for (let i = 0; i < 長い一覧の数; i++) {
+    fs.writeFileSync(path.join(PROJECT_DIR, DIR, `f_${String(i).padStart(2, '0')}.txt`), `${i}\n`)
+  }
 })
 
 test.afterAll(() => {
@@ -155,5 +160,209 @@ test.describe('指で触る画面', () => {
     // メニュー自体は出る（コピーは使える）
     await expect(page.getByTestId('folder-menu-copy-abs')).toBeVisible()
     await expect(page.getByTestId('folder-menu-open-tab')).toHaveCount(0)
+  })
+})
+
+const PJT_NAME = path.basename(PROJECT_DIR)
+const 起点より上 = path.dirname(PROJECT_DIR)
+
+function パンくず(panel: Locator, name: string): Locator {
+  return panel.getByTestId('folder-crumb').filter({ hasText: new RegExp(`^${name}$`) })
+}
+
+function 横の答え(段: Locator): Locator {
+  return 段.locator('xpath=..').getByTestId('folder-crumb-copy-state')
+}
+
+async function MyDocsへ入る(panel: Locator) {
+  await panel.getByTestId('folder-entry').filter({ hasText: DIR }).click()
+  await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
+    'data-path',
+    path.join(PROJECT_DIR, DIR),
+  )
+  await expect(panel.getByTestId('folder-entry')).toHaveCount(長い一覧の数)
+}
+
+async function 止まった真ん中(page: Page, target: Locator): Promise<{ x: number; y: number }> {
+  let 前 = await target.boundingBox()
+  for (let i = 0; i < 60; i++) {
+    await page.waitForTimeout(50)
+    const 今 = await target.boundingBox()
+    if (前 && 今 && 前.x === 今.x && 前.y === 今.y && 前.width === 今.width && 前.height === 今.height) {
+      return { x: 今.x + 今.width / 2, y: 今.y + 今.height / 2 }
+    }
+    前 = 今
+  }
+  throw new Error('位置が落ち着きません')
+}
+
+async function 写したもの(page: Page): Promise<string> {
+  return await page.evaluate(() => navigator.clipboard.readText())
+}
+
+test.describe('マウスで右クリック（パンくずと余白・追加の要望 2026-11-23）', () => {
+  test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
+
+  test('パンくずのフォルダ名を右クリックすると、そのフォルダを相手にメニューが出て、移動はしない', async ({
+    page,
+  }) => {
+    const panel = await openSidebar(page)
+    await MyDocsへ入る(panel)
+
+    const 段 = パンくず(panel, PJT_NAME)
+    await 段.click({ button: 'right' })
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(PJT_NAME)
+    await expect(page.getByTestId('folder-menu-copy-name')).toHaveText('フォルダ名をコピー')
+    await page.getByTestId('folder-menu-copy-abs').click()
+
+    await expect(横の答え(段)).toHaveText('コピーしました')
+    expect(await 写したもの(page)).toBe(PROJECT_DIR)
+    await expect(panel.getByTestId('folder-crumb-copy-state')).toHaveCount(1)
+    await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      path.join(PROJECT_DIR, DIR),
+    )
+  })
+
+  test('「…」は押しても移動せず、本物のマウスで右クリックすると起点より上のフォルダのメニューが出る', async ({
+    page,
+  }) => {
+    const panel = await openSidebar(page)
+    const 点 = panel.getByTestId('folder-crumb').first()
+    await expect(点).toHaveText('…')
+    await expect(点).toHaveAttribute('title', `起点より上：${起点より上}`)
+    const 真ん中 = await 止まった真ん中(page, 点)
+
+    await page.mouse.click(真ん中.x, 真ん中.y)
+    await page.waitForTimeout(300)
+    await expect(page.getByTestId('folder-menu')).toHaveCount(0)
+    await expect(panel.getByTestId('folder-browser')).toHaveAttribute('data-path', PROJECT_DIR)
+
+    await page.mouse.click(真ん中.x, 真ん中.y, { button: 'right' })
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(path.basename(起点より上))
+    await page.getByTestId('folder-menu-copy-name').click()
+
+    await expect(横の答え(点)).toHaveText('コピーしました')
+    expect(await 写したもの(page)).toBe(path.basename(起点より上))
+    await expect(panel.getByTestId('folder-browser')).toHaveAttribute('data-path', PROJECT_DIR)
+  })
+
+  test('一覧の余白を右クリックすると、いまのフォルダを相手にメニューが出て、答えはパンくずの末尾の横に出る', async ({
+    page,
+  }) => {
+    const panel = await openSidebar(page)
+
+    await panel.getByTestId('folder-blank').click({ button: 'right' })
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(PJT_NAME)
+    await page.getByTestId('folder-menu-copy-abs').click()
+
+    await expect(横の答え(パンくず(panel, PJT_NAME))).toHaveText('コピーしました')
+    expect(await 写したもの(page)).toBe(PROJECT_DIR)
+  })
+
+  test('余白の行を足しても、行の高さと並びは変わらない（短い一覧でも長い一覧でも）', async ({
+    page,
+  }) => {
+    const panel = await openSidebar(page)
+    const 一覧 = panel.getByTestId('folder-browser').locator('ul')
+
+    const 測る = () =>
+      一覧.evaluate((ul) => {
+        ul.scrollTop = 0
+        const 器 = ul.getBoundingClientRect()
+        const 行 = Array.from(ul.children)
+          .filter((li) => li.getAttribute('data-testid') !== 'folder-blank')
+          .map((li) => {
+            const r = li.getBoundingClientRect()
+            return [r.left - 器.left, r.top - 器.top, r.width, r.height].map((v) => Math.round(v * 100) / 100)
+          })
+        const blank = ul.querySelector<HTMLElement>('[data-testid="folder-blank"]')
+        const 余白 = blank?.getBoundingClientRect()
+        const 最後 = 行.at(-1)
+        return {
+          行,
+          余白の高さ: 余白?.height ?? -1,
+          余白の上と最後の行の下: 余白 && 最後 ? Math.abs(余白.top - 器.top - (最後[1] + 最後[3])) : -1,
+          中身の高さ: ul.scrollHeight,
+          器の高さ: ul.clientHeight,
+        }
+      })
+    const 余白なしで測る = () =>
+      一覧.evaluate((ul) => {
+        const blank = ul.querySelector<HTMLElement>('[data-testid="folder-blank"]')
+        ul.style.display = 'block'
+        if (blank) blank.style.display = 'none'
+        ul.scrollTop = 0
+        const 器 = ul.getBoundingClientRect()
+        const 行 = Array.from(ul.children)
+          .filter((li) => li.getAttribute('data-testid') !== 'folder-blank')
+          .map((li) => {
+            const r = li.getBoundingClientRect()
+            return [r.left - 器.left, r.top - 器.top, r.width, r.height].map((v) => Math.round(v * 100) / 100)
+          })
+        ul.style.display = ''
+        if (blank) blank.style.display = ''
+        return 行
+      })
+
+    const 短い = await 測る()
+    expect(短い.行).toHaveLength(2)
+    expect(短い.行).toEqual(await 余白なしで測る())
+    expect(短い.余白の上と最後の行の下).toBeLessThan(0.5)
+    expect(短い.中身の高さ).toBe(短い.器の高さ)
+    expect(短い.余白の高さ).toBeGreaterThan(100)
+
+    await MyDocsへ入る(panel)
+    const 長い = await 測る()
+    expect(長い.行).toHaveLength(長い一覧の数)
+    expect(長い.行).toEqual(await 余白なしで測る())
+    expect(長い.余白の上と最後の行の下).toBeLessThan(0.5)
+    expect(長い.中身の高さ).toBeGreaterThan(長い.器の高さ)
+    expect(長い.余白の高さ).toBeGreaterThanOrEqual(31.5)
+    expect(長い.余白の高さ).toBeLessThanOrEqual(32.5)
+  })
+})
+
+test.describe('指で触る画面（パンくずと余白・追加の要望 2026-11-23）', () => {
+  test.use({ hasTouch: true })
+
+  test('余白を長押しすると、いまのフォルダのメニューが1つだけ出る', async ({ page }) => {
+    const panel = await openSidebar(page)
+
+    await 長押しで開く(page, panel.getByTestId('folder-blank'))
+
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(PJT_NAME)
+  })
+
+  test('行を長押ししても、行のメニューが1つだけ出る（余白のメニューは重ならない）', async ({
+    page,
+  }) => {
+    const panel = await openSidebar(page)
+
+    await 長押しで開く(page, 行の器(panel, DIR))
+
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(DIR)
+  })
+
+  test('パンくずのフォルダ名を長押しすると、メニューが出て、移動はしない', async ({ page }) => {
+    const panel = await openSidebar(page)
+    await MyDocsへ入る(panel)
+
+    await 長押しで開く(page, パンくず(panel, PJT_NAME))
+
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(PJT_NAME)
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('folder-menu')).toHaveCount(0)
+    await page.waitForTimeout(500)
+    await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      path.join(PROJECT_DIR, DIR),
+    )
   })
 })
