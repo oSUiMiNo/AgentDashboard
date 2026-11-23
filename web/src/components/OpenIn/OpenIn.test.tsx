@@ -14,7 +14,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
-import { useOpenIn, 開く口を読み直す間隔 } from '@/components/OpenIn/useOpenIn'
+import { useOpenIn, 親PCでないときの間引き, 開く口を読み直す間隔 } from '@/components/OpenIn/useOpenIn'
 import type { OpenApp, OpenInView } from '@/lib/openIn'
 
 const pushReplyNotice = vi.hoisted(() => vi.fn())
@@ -316,19 +316,27 @@ describe('useOpenIn の読み直しと押したとき', () => {
 
   const 成功 = (v: OpenInView) => () => new Response(JSON.stringify(v), { status: 200 })
 
-  it('親PC でないと分かったら、読み直しを止める', async () => {
+  it('親PC でないと分かったら、読み直しを間引き、親PC に戻ればまた3秒おきに読む', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      const fetchMock = 順に答える(成功(view({ same_machine: false, same_machine_reason: 'LAN' })))
+      const fetchMock = 順に答える(
+        成功(view({ same_machine: false, same_machine_reason: 'LAN' })),
+        成功(様子),
+      )
       const { result } = renderHook(() => useOpenIn('local'))
       await 落ち着かせる()
       expect(fetchMock).toHaveBeenCalledTimes(1)
       // 答えは捨てない（出さないと決めるのは FolderBrowser の側）
       expect(result.current.view?.same_machine).toBe(false)
-      for (let i = 0; i < 3; i += 1) {
+      for (let i = 0; i < 親PCでないときの間引き - 1; i += 1) {
         await 間隔を進める()
       }
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock, '親PC でない間は3秒おきに引かないこと').toHaveBeenCalledTimes(1)
+      await 間隔を進める()
+      expect(fetchMock, '間引いた回数の後には引き直すこと（一時の外れから戻れるように）').toHaveBeenCalledTimes(2)
+      expect(result.current.view?.same_machine).toBe(true)
+      await 間隔を進める()
+      expect(fetchMock, '親PC に戻ったら3秒おきに戻ること').toHaveBeenCalledTimes(3)
     } finally {
       vi.useRealTimers()
     }
