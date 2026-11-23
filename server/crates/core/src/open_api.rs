@@ -482,45 +482,60 @@ async fn api_open(
     let app = body.app;
     let launcher = Arc::clone(&state.launcher);
     let book = Arc::clone(&state.book);
-    let launched = tokio::task::spawn_blocking(move || match app {
-        App::Explorer => launcher.explorer(&target).map(|()| Outcome::Launched),
-        App::Vscode => book
-            .open_vscode(launcher.as_ref(), target)
-            .map(|outcome| match outcome {
-                VscodeOutcome::Opened => Outcome::Opened,
-                VscodeOutcome::Fronted => Outcome::Fronted,
-            }),
-    })
-    .await;
-
-    let outcome = match launched {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(err)) => return Err(refusal_of(app, &path, err)),
-        Err(err) => {
-            tracing::warn!(
-                kind = "open_in_failed",
-                app = app.label(),
-                reason = %err,
-                path = %path,
-                "外の道具を起こせませんでした"
-            );
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, STOPPED.to_string()));
-        }
+    // **起こしとその後のログは、ハンドラから切り離した task で行う。** 押してすぐタブを
+    // 閉じると、axum はハンドラの future を落とす。起こしは `spawn_blocking` の中で続くのに、
+    // その後のログ（`open_in`・`open_in_failed`）だけが消えていた（6-A で実測）。
+    // `tokio::spawn` の task は JoinHandle を落としても最後まで走る
+    let log_path = path.clone();
+    let task = tokio::spawn(async move {
+        let launched = tokio::task::spawn_blocking(move || match app {
+            App::Explorer => launcher.explorer(&target).map(|()| Outcome::Launched),
+            App::Vscode => {
+                book.open_vscode(launcher.as_ref(), target)
+                    .map(|outcome| match outcome {
+                        VscodeOutcome::Opened => Outcome::Opened,
+                        VscodeOutcome::Fronted => Outcome::Fronted,
+                    })
+            }
+        })
+        .await;
+        let outcome = match launched {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(err)) => return Err(refusal_of(app, &log_path, err)),
+            Err(err) => return Err(stopped(app, &log_path, &err)),
+        };
+        tracing::info!(
+            kind = "open_in",
+            app = app.label(),
+            target_kind = kind.label(),
+            path_class = class.label(),
+            outcome = outcome.label(),
+            path = %log_path,
+            "外の道具で開きました"
+        );
+        Ok(outcome)
+    });
+    let outcome = match task.await {
+        Ok(result) => result?,
+        Err(err) => return Err(stopped(app, &path, &err)),
     };
 
-    tracing::info!(
-        kind = "open_in",
-        app = app.label(),
-        target_kind = kind.label(),
-        path_class = class.label(),
-        outcome = outcome.label(),
-        path = %path,
-        "外の道具で開きました"
-    );
     Ok(Json(OpenResult {
         outcome,
         view: view(judge, &tools, state.book.list()),
     }))
+}
+
+/// 起こす処理の task が途中で止まった（panic・取り消し）。
+fn stopped(app: App, path: &str, err: &tokio::task::JoinError) -> Refusal {
+    tracing::warn!(
+        kind = "open_in_failed",
+        app = app.label(),
+        reason = %err,
+        path = %path,
+        "外の道具を起こせませんでした"
+    );
+    (StatusCode::INTERNAL_SERVER_ERROR, STOPPED.to_string())
 }
 
 /// 起こせなかった理由を HTTP の番号へ写す（設計§4-5）。
@@ -663,5 +678,95 @@ mod tests {
         );
         assert_eq!(host_name("example.com"), HostName::Other);
         assert_eq!(host_name(""), HostName::Other);
+    }
+
+    /// 起こしの途中で止まる偽の起こし口。`explorer` は `release` に合図が来るまで戻らない。
+    #[derive(Debug)]
+    struct Hold {
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl open_in::OpenLauncher for Hold {
+        fn tools(&self) -> Tools {
+            Tools {
+                explorer: open_in::ToolState::ok(),
+                vscode: open_in::ToolState::ok(),
+            }
+        }
+
+        fn explorer(&self, _target: &Target) -> Result<(), OpenError> {
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                release.recv().ok();
+            }
+            Ok(())
+        }
+
+        fn vscode(
+            &self,
+            _target: &Target,
+            _wait: bool,
+        ) -> Result<Option<open_in::Waiter>, OpenError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn 押してすぐ切れても開いたログは残る() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdashboard-open-api-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        let (release, held) = std::sync::mpsc::channel();
+        let state = OpenApiState {
+            launcher: Arc::new(Hold {
+                release: Mutex::new(Some(held)),
+            }),
+            book: open_in::OpenedBook::new(open_in::OPENED_CAP),
+            link: Arc::new(WslLinkCache::fixed(None)),
+            serves_local: true,
+        };
+        let sink = session_host_core::logging::capture::sink();
+        let mark = sink.mark();
+
+        let handler = api_open(
+            AxumPath("local".to_string()),
+            State(state),
+            Peer(peer("127.0.0.1:5000")),
+            HeaderMap::new(),
+            Json(OpenRequest {
+                app: App::Explorer,
+                path: path.clone(),
+            }),
+        );
+        // 起こし口が止まっている間にハンドラの future を落とす（押してすぐタブを閉じたとき、
+        // axum が切断でハンドラを落とすのと同じ形）
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), handler)
+                .await
+                .is_err(),
+            "起こし口が止まっている間は返らないこと"
+        );
+        release.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let logged = loop {
+            let lines = sink.matching(mark, "path", &path);
+            if lines.iter().any(|line| line["kind"] == "open_in") {
+                break true;
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            logged,
+            "ハンドラが落とされても、起こした後の open_in の行が残ること"
+        );
     }
 }
