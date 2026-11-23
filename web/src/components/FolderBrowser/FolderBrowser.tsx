@@ -844,69 +844,93 @@ function Row({
           />
         </li>
       </ContextMenuTrigger>
-      <ContextMenuContent data-testid="folder-menu">
-        {/*
-          **指で触る画面では、名前の全体を読む唯一の道である。** 乗せたら出す指定は
-          マウスのある環境でしか効かず、**幅が狭くていちばん見切れるのはスマホ**——
-          つまり困っている側だけが救われない形になる。ここに置いて裏返す。
-
-          **フォルダにもファイルにも出す。** 見切れるのは種別を問わないので、
-          下の「新しいタブで開く」（ファイルだけ）とは分け方が違う。
-
-          **押せない部品で出す。** 押せる選択肢に混ぜると、押してみるまで押せないと
-          分からない。
-        */}
-        <ContextMenuLabel data-testid="folder-name-full">
-          {entry.name}
-        </ContextMenuLabel>
-        <ContextMenuSeparator />
-        {/*
-          **指で触る画面では、これが唯一の道である。** 中クリックも Ctrl＋クリックも
-          スマホには無いので、ここに置かないと**ブラウザの新しいタブへ出る道が1本も
-          残らない**（右クリックの既定メニューは、このメニュー自身が奪っている）。
-
-          **開くほうを先に置く。** ブラウザの右クリックメニューが「新しいタブで開く」
-          →「リンクのアドレスをコピー」の順なので、**押す人が既に持っている並びに
-          合わせる**。
-
-          **項目もリンクにする**（`ContextMenuItem asChild`）。`window.open` は
-          スマホで抑止されることがあるが、**リンクの既定動作は抑止されない**。
-          行のほうと同じ判断（`lib/openInNewTab.ts` の規則4）でもある。
-
-          **ここでは `target="_blank"` を付ける。** 行に付けないのは素の左クリックの
-          意味が変わるからで、**こちらは押したら必ず外へ出るもの**だから事情が違う
-          （ファイルビュアの「ブラウザで開く」と同じ）。
-
-          **フォルダには出さない。** 行き先の URL が無く、出しても押せないものが
-          並ぶだけになる（`linkable` はファイルの行だけで真になる）。
-        */}
-        {linkable && (
-          <ContextMenuItem asChild data-testid="folder-menu-open-tab">
-            <a href={rawUrl(host, full)} target="_blank" rel="noopener">
-              ブラウザの新しいタブで開く
-            </a>
-          </ContextMenuItem>
-        )}
-        {/*
-          **エクスプローラ・VSCode で開く**（開く口の設計§7-5）。「新しいタブで開く」の後、
-          「絶対パスをコピー」の前。フォルダの行は見出しの下の区切り線がそのまま上の区切りに
-          なるので、前の区切り線を重ねない
-        */}
-        {openIn !== undefined && (
-          <>
-            {linkable && <ContextMenuSeparator />}
-            <OpenInMenuItems path={full} view={openIn.view} open={openIn.open} />
-            <ContextMenuSeparator />
-          </>
-        )}
-        <ContextMenuItem
-          data-testid="folder-menu-copy-abs"
-          onSelect={() => onCopy(full)}
-        >
-          絶対パスをコピー
-        </ContextMenuItem>
-      </ContextMenuContent>
+      <PathMenu
+        name={entry.name}
+        path={full}
+        tabUrl={linkable ? rawUrl(host, full) : undefined}
+        openIn={openIn}
+        onCopy={onCopy}
+      />
     </ContextMenu>
+  )
+}
+
+function PathMenu({
+  name,
+  path,
+  tabUrl,
+  openIn,
+  onCopy,
+}: {
+  name: string
+  path: string
+  tabUrl?: string
+  openIn?: OpenInProp
+  onCopy: (value: string) => void
+}) {
+  return (
+    <ContextMenuContent data-testid="folder-menu">
+      {/*
+        **指で触る画面では、名前の全体を読む唯一の道である。** 乗せたら出す指定は
+        マウスのある環境でしか効かず、**幅が狭くていちばん見切れるのはスマホ**——
+        つまり困っている側だけが救われない形になる。ここに置いて裏返す。
+
+        **フォルダにもファイルにも出す。** 見切れるのは種別を問わないので、
+        下の「新しいタブで開く」（ファイルだけ）とは分け方が違う。
+
+        **押せない部品で出す。** 押せる選択肢に混ぜると、押してみるまで押せないと
+        分からない。
+      */}
+      <ContextMenuLabel data-testid="folder-name-full">
+        {name}
+      </ContextMenuLabel>
+      <ContextMenuSeparator />
+      {/*
+        **指で触る画面では、これが唯一の道である。** 中クリックも Ctrl＋クリックも
+        スマホには無いので、ここに置かないと**ブラウザの新しいタブへ出る道が1本も
+        残らない**（右クリックの既定メニューは、このメニュー自身が奪っている）。
+
+        **開くほうを先に置く。** ブラウザの右クリックメニューが「新しいタブで開く」
+        →「リンクのアドレスをコピー」の順なので、**押す人が既に持っている並びに
+        合わせる**。
+
+        **項目もリンクにする**（`ContextMenuItem asChild`）。`window.open` は
+        スマホで抑止されることがあるが、**リンクの既定動作は抑止されない**。
+        行のほうと同じ判断（`lib/openInNewTab.ts` の規則4）でもある。
+
+        **ここでは `target="_blank"` を付ける。** 行に付けないのは素の左クリックの
+        意味が変わるからで、**こちらは押したら必ず外へ出るもの**だから事情が違う
+        （ファイルビュアの「ブラウザで開く」と同じ）。
+
+        **フォルダには出さない。** 行き先の URL が無く、出しても押せないものが
+        並ぶだけになる（`linkable` はファイルの行だけで真になる）。
+      */}
+      {tabUrl !== undefined && (
+        <ContextMenuItem asChild data-testid="folder-menu-open-tab">
+          <a href={tabUrl} target="_blank" rel="noopener">
+            ブラウザの新しいタブで開く
+          </a>
+        </ContextMenuItem>
+      )}
+      {/*
+        **エクスプローラ・VSCode で開く**（開く口の設計§7-5）。「新しいタブで開く」の後、
+        「絶対パスをコピー」の前。フォルダの行は見出しの下の区切り線がそのまま上の区切りに
+        なるので、前の区切り線を重ねない
+      */}
+      {openIn !== undefined && (
+        <>
+          {tabUrl !== undefined && <ContextMenuSeparator />}
+          <OpenInMenuItems path={path} view={openIn.view} open={openIn.open} />
+          <ContextMenuSeparator />
+        </>
+      )}
+      <ContextMenuItem
+        data-testid="folder-menu-copy-abs"
+        onSelect={() => onCopy(path)}
+      >
+        絶対パスをコピー
+      </ContextMenuItem>
+    </ContextMenuContent>
   )
 }
 
