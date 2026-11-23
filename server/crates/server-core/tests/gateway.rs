@@ -1827,8 +1827,7 @@ async fn 窓読みを名乗らない古い_PC_が上限を超える中身を返�
                 .expect("問いのタスクが落ちないこと");
             if refused {
                 let err = answer.expect_err("上限を超える中身はサーバが断ること");
-                let server_core::session_host::HostAskError::Failed { reason, detail } = err
-                else {
+                let server_core::session_host::HostAskError::Failed { reason, detail } = err else {
                     panic!("[{}] 断りの形であること: {err:?}", backend.name);
                 };
                 assert_eq!(
