@@ -394,9 +394,12 @@ pub fn version_folder(script: &str) -> Option<String> {
 
 /// Windows の VSCode に付いてくる WSL 用の `code` script か（設計 §3-5）。`PATH` の同名の別物と、
 /// WSL の中に入れた Linux 版を弾くため。Linux 版を拾うと WSLg の窓が開き、Windows のドライブの PJT では `cli.js` が見つからない。
+///
+/// **`VERSIONFOLDER` は求めない。** 版のフォルダの形より前の VSCode の script には無く、求めると
+/// WSL の PJT まで「VSCode が見つかりません」になる。無いときは Windows のドライブの PJT だけが
+/// Remote-WSL の窓へ倒れる（`drive_tools` が見る）。
 pub fn looks_like_vscode_script(script: &str) -> bool {
     script.contains("VSCODE_PATH=")
-        && script_value(script, "VERSIONFOLDER").is_some()
         && script
             .lines()
             .any(|line| line.trim().starts_with("ELECTRON=") && line.trim().ends_with(".exe\""))
@@ -1553,10 +1556,29 @@ exit $?
             !looks_like_vscode_script(&版のフォルダだけ),
             "VERSIONFOLDER があっても ELECTRON が .exe でなければ採らないこと"
         );
-        let exeだけ = "VSCODE_PATH=\"x\"\nELECTRON=\"$VSCODE_PATH/$NAME.exe\"\n";
+    }
+
+    /// 版のフォルダの形より前の Windows の VSCode の `code` script の要点の写し（`VERSIONFOLDER` が無い）。
+    const OLD_SCRIPT: &str = r#"#!/usr/bin/env sh
+COMMIT="0123456789abcdef0123456789abcdef01234567"
+APP_NAME="code"
+QUALITY="stable"
+NAME="Code"
+SERVERDATAFOLDER=".vscode-server"
+VSCODE_PATH="$(dirname "$(dirname "$(realpath "$0")")")"
+ELECTRON="$VSCODE_PATH/$NAME.exe"
+"#;
+
+    #[test]
+    fn 版のフォルダの行が無い古いwindows版のscriptも採る() {
         assert!(
-            !looks_like_vscode_script(exeだけ),
-            "ELECTRON が .exe でも VERSIONFOLDER が無ければ採らないこと"
+            looks_like_vscode_script(OLD_SCRIPT),
+            "VERSIONFOLDER の無い古い Windows 版の code script も VSCode の script とみなすこと"
+        );
+        assert_eq!(version_folder(OLD_SCRIPT), None);
+        assert!(
+            !looks_like_vscode_script("ELECTRON=\"$VSCODE_PATH/$NAME.exe\"\n"),
+            "VSCODE_PATH の行が無ければ採らないこと"
         );
     }
 
