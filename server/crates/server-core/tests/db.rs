@@ -460,12 +460,16 @@ async fn ファイル閲覧の上限はサーバ全体で持ち_無ければ起�
         )
         .await
         .unwrap();
-        assert_eq!(
-            effective_limit(&backend.db, &local).await,
-            5 * GIB,
-            "[{}] 選択肢に無い値で既定へ倒れない",
-            backend.name
-        );
+        // 何度呼んでも既定が返る（警告を1回にまとめても、返す値は変わらない。
+        // コードレビュー対応 2026-11-23 対応7）
+        for _ in 0..3 {
+            assert_eq!(
+                effective_limit(&backend.db, &local).await,
+                5 * GIB,
+                "[{}] 選択肢に無い値で既定へ倒れない",
+                backend.name
+            );
+        }
 
         // 消せば既定へ戻る
         settings::set_file_view_max_bytes(&backend.db, None)
