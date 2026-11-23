@@ -538,9 +538,21 @@ async fn 上限まで抱えると409で8件と言う() {
         .path(&format!("d{OPENED_CAP}"))
         .to_string_lossy()
         .into_owned();
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
     let (status, body) = post_json(addr, OPEN, &host, &open_body("vscode", &path)).await;
     assert_eq!(status, 409, "{body}");
     assert!(body.contains("8 件"), "{body}");
+    let failed: Vec<_> = sink
+        .matching(mark, "path", &path)
+        .into_iter()
+        .filter(|row| row["kind"] == "open_in_failed" && row["stage"] == "full")
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "上限で断った押しは open_in_failed（stage=full）がちょうど1行: {failed:?}"
+    );
     fake.close_all();
 }
 

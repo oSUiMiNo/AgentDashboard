@@ -557,10 +557,20 @@ fn unavailable(app: App, path: &str, reason: String) -> Refusal {
 fn refusal_of(app: App, path: &str, err: OpenError) -> Refusal {
     match err {
         OpenError::Unavailable(reason) => unavailable(app, path, reason),
-        full @ OpenError::Full { .. } => (
-            StatusCode::CONFLICT,
-            format!("{full}。どれかを閉じてから押してください"),
-        ),
+        full @ OpenError::Full { .. } => {
+            tracing::warn!(
+                kind = "open_in_failed",
+                app = app.label(),
+                stage = "full",
+                reason = %full,
+                path = %path,
+                "VSCode で開いているものが上限なので開けませんでした"
+            );
+            (
+                StatusCode::CONFLICT,
+                format!("{full}。どれかを閉じてから押してください"),
+            )
+        }
         err @ (OpenError::Spawn(_) | OpenError::Convert(_)) => {
             tracing::warn!(
                 kind = "open_in_failed",
