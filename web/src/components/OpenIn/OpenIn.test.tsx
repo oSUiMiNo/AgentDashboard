@@ -172,13 +172,19 @@ describe('サイドバーの出し分けと押した先', () => {
     await 行('計画.md')
     const エクスプローラ = screen.getByTestId('open-in-explorer')
     const VSCode = screen.getByTestId('open-in-vscode')
+    // **押せないときもボタンの名前を先に残す**——理由だけだと2つが同じ名前になる
+    const エクスプローラの説明 = `エクスプローラで開く（使えません：${エクスプローラの理由}）`
+    const VSCodeの説明 = `VSCode で開く（使えません：${VSCodeの理由}）`
     expect(エクスプローラ).toBeDisabled()
-    expect(エクスプローラ).toHaveAttribute('title', エクスプローラの理由)
+    expect(エクスプローラ).toHaveAttribute('title', エクスプローラの説明)
+    expect(エクスプローラ).toHaveAttribute('aria-label', エクスプローラの説明)
     // **押せないボタンは乗せても title が出ない**ので、外側の span にも同じ文がある
-    expect(エクスプローラ.parentElement).toHaveAttribute('title', エクスプローラの理由)
+    expect(エクスプローラ.parentElement).toHaveAttribute('title', エクスプローラの説明)
     expect(VSCode).toBeDisabled()
-    expect(VSCode).toHaveAttribute('title', VSCodeの理由)
-    expect(VSCode.parentElement).toHaveAttribute('title', VSCodeの理由)
+    expect(VSCode).toHaveAttribute('title', VSCodeの説明)
+    expect(VSCode).toHaveAttribute('aria-label', VSCodeの説明)
+    expect(VSCode.parentElement).toHaveAttribute('title', VSCodeの説明)
+    expect(エクスプローラ.getAttribute('aria-label')).not.toBe(VSCode.getAttribute('aria-label'))
 
     const メニュー = await 右クリック('計画.md')
     const 項目1 = within(メニュー).getByTestId('folder-menu-open-explorer')

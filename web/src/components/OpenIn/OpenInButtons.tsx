@@ -25,6 +25,8 @@ function 名前(path: string): string {
  *
  * **押せないボタンにも理由を出す。** `Button` は押せないとき `pointer-events-none` に
  * なり、ボタンの `title` は乗せても出ない。外側の `span` にも同じ文を置く。
+ * **押せないときもボタンの名前を先に残す**（6-B の判定）——理由だけにすると2つの
+ * ボタンが同じ名前になり、読み上げでも乗せたときの説明でも区別できない。
  *
  * **押した直後は薄くしない。** `aria-busy` だけを立て、二度押しは呼ぶ側で止める
  * （設計§7-4）——薄くすると「使えない」と同じ見た目になる。
@@ -33,9 +35,9 @@ export function OpenInButtons({ root, view, open, busy }: Props) {
   const 開いている = view.opened.some((entry) => entry.path === root)
   const エクスプローラの説明 = view.explorer.available
     ? `エクスプローラで開く：${名前(root)}`
-    : (view.explorer.reason ?? 'エクスプローラは使えません')
+    : `エクスプローラで開く（使えません：${view.explorer.reason ?? '理由が分かりません'}）`
   const VSCodeの説明 = !view.vscode.available
-    ? (view.vscode.reason ?? 'VSCode は使えません')
+    ? `VSCode で開く（使えません：${view.vscode.reason ?? '理由が分かりません'}）`
     : 開いている
       ? `VSCode で開いています：${名前(root)}（押すと窓を前に出します）`
       : `VSCode で開く：${名前(root)}`
