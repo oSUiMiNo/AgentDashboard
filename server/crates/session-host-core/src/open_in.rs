@@ -634,10 +634,21 @@ fn windows_users() -> Vec<String> {
     }
 }
 
+fn is_executable_file(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
 fn is_vscode_script(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
     let executable = std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .map(|meta| is_executable_file(&meta))
         .unwrap_or(false);
     executable
         && std::fs::read_to_string(path)
