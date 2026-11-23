@@ -427,12 +427,12 @@ export function FolderBrowser({
   const いまの段 = path === undefined ? undefined : 内側.at(-1)
   const 余白 = <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
   const パンくずの答え = (at: string) =>
-    copied?.場所 === "パンくず" && copied.path === at ? (
+    copied?.場所 === "パンくず" && copied.path === at && copied.state === "done" ? (
       <span
         data-testid="folder-crumb-copy-state"
         className="bg-popover text-popover-foreground pointer-events-none absolute top-full left-0 z-20 mt-0.5 rounded-md border px-1.5 py-0.5 whitespace-nowrap shadow-md"
       >
-        {copied.state === "done" ? "コピーしました" : "コピーできません"}
+        コピーしました
       </span>
     ) : null
 

@@ -1384,7 +1384,7 @@ describe("パンくずの右クリック（追加の要望 2026-11-23）", () =>
     );
   });
 
-  it("写せない環境では、パンくずの横に「コピーできません」と出て、逃げ道に値が出る", async () => {
+  it("写せない環境では、パンくずには札を出さず、一覧の上の逃げ道に値が出る", async () => {
     頼まれた場所を返す();
     置く();
     await 行たち();
@@ -1396,7 +1396,7 @@ describe("パンくずの右クリック（追加の要望 2026-11-23）", () =>
     await waitFor(() =>
       expect(screen.getByTestId("folder-copy-fallback")).toHaveTextContent(ROOT),
     );
-    expect(横の答え(段)).toBe("コピーできません");
+    expect(横の答え(段)).toBeNull();
   });
 
   it("パンくずの答えは行へ漏れず、行の答えはパンくずへ漏れない（同じフォルダを指していても）", async () => {
@@ -1409,7 +1409,10 @@ describe("パンくずの右クリック（追加の要望 2026-11-23）", () =>
       target: パンくず("MyDocs"),
     });
     await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
-    await waitFor(() => expect(横の答え(パンくず("MyDocs"))).toBe("コピーできません"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folder-copy-fallback")).toBeInTheDocument(),
+    );
+    expect(横の答え(パンくず("MyDocs"))).toBeNull();
 
     await userEvent.click(パンくず("app"));
     await waitFor(() =>
