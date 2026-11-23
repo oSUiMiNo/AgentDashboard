@@ -417,7 +417,12 @@ pub fn read_file_within(path: &Path, limit: u64) -> Result<FileContent, HostFsEr
         });
     }
 
-    let raw = std::fs::read(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    // **大きさを見た分だけ読む。** 見てから読むまでの間にファイルが育っても（ログの追記や
+    // 大きいファイルへの差し替え）、一括で読む線を超えて抱え込まない
+    let mut raw = Vec::with_capacity(usize::try_from(bytes).unwrap_or(0));
+    std::fs::File::open(path)
+        .and_then(|file| file.take(bytes).read_to_end(&mut raw))
+        .map_err(|err| HostFsError::from_io(&err, path))?;
 
     // NUL を含むならバイナリ。テキストとして出すと画面が壊れる
     if raw.contains(&0) {
@@ -501,6 +506,18 @@ pub fn read_file_range(
     }
 
     let mut file = std::fs::File::open(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    // 行頭へ寄せるとき、頼まれた位置が**もう行頭**（直前が改行）なら寄せない。寄せると、
+    // その位置から始まる1行をまるごと飛ばしてしまう
+    let already_line_start = if range.align_line && range.offset > 0 {
+        file.seek(SeekFrom::Start(range.offset - 1))
+            .map_err(|err| HostFsError::from_io(&err, path))?;
+        let mut before = [0u8; 1];
+        file.read_exact(&mut before)
+            .map_err(|err| HostFsError::from_io(&err, path))?;
+        before[0] == b'\n'
+    } else {
+        false
+    };
     file.seek(SeekFrom::Start(range.offset))
         .map_err(|err| HostFsError::from_io(&err, path))?;
     // 頼んだ長さに、字1つを入れきるための予備（続きのバイトの飛ばし3＋字1つの4）を足して読む
@@ -520,9 +537,9 @@ pub fn read_file_range(
         }
     }
     let cut = cut.min(buf.len());
-    let mut at_line_start = range.offset == 0;
+    let mut at_line_start = range.offset == 0 || already_line_start;
     let mut aligned = false;
-    if range.align_line && range.offset > 0 && head < cut {
+    if range.align_line && range.offset > 0 && !already_line_start && head < cut {
         if let Some(pos) = buf[head..cut].iter().position(|&b| b == b'\n') {
             head += pos + 1;
             at_line_start = true;

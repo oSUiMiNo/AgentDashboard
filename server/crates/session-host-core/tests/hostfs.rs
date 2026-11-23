@@ -1107,6 +1107,27 @@ fn 行頭へ寄せる_寄せられないとき_末尾の先() {
 }
 
 #[test]
+fn 行頭へ寄せるとき_頼んだ位置がもう行頭ならその行を飛ばさない() {
+    // ダメ押しのレビュー（2026-11-23）。直前が改行なのに次の改行まで寄せると、1行が丸ごと消える
+    let sandbox = Sandbox::new("range-line-start");
+    let body = "一行目\n二行目\n三行目\n";
+    let path = sandbox.file("行.txt", body.as_bytes());
+
+    // 10 は二行目の頭（直前が改行）
+    let chunk = hostfs::read_file_range(&path, 窓(10, 1024, true), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+    assert_eq!(chunk.start, 10, "二行目の頭のまま始まること");
+    assert!(chunk.at_line_start);
+    assert_eq!(chunk.text, "二行目\n三行目\n");
+
+    // 対照：行の途中からなら、これまでどおり次の行の頭へ寄る
+    let chunk = hostfs::read_file_range(&path, 窓(11, 1024, true), FILE_VIEW_LIMIT_MAX)
+        .expect("読めること");
+    assert_eq!(chunk.start, 20, "三行目の頭へ寄ること");
+    assert_eq!(chunk.text, "三行目\n");
+}
+
+#[test]
 fn 途中の窓のnulと壊れたutf8は位置つきで断る() {
     let sandbox = Sandbox::new("range-nul");
     let edge = 64 * 1024;
