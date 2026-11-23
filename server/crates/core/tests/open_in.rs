@@ -78,6 +78,7 @@ impl OpenLauncher for Fake {
         self.closers.lock().unwrap().push(tx);
         Ok(Some(Box::pin(async move {
             rx.await.ok();
+            Ok(())
         })))
     }
 }

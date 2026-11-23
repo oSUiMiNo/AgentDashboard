@@ -44,6 +44,11 @@ const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const CONVERT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOLS_TTL: Duration = Duration::from_secs(30);
 const RECORD_POLL: Duration = Duration::from_millis(200);
+/// 待ちつきの VSCode の子の標準エラーは、末尾のこれだけを持つ（長く生きる子なので溜め続けない）。
+const STDERR_TAIL: usize = 2048;
+/// 子が終わったあと、標準エラーの読み手を待つ時間。**EOF までは待たない**——Windows 側の孫
+/// （`Code.exe` の待ち）が標準エラーを握ったまま残ることがある（設計 §10 の M3）。
+const STDERR_GRACE: Duration = Duration::from_millis(500);
 
 const BLOCKED_REASON: &str =
     "この起動では外の道具を起こさない設定です（AGENTDASHBOARD_OPEN_IN=off）";
@@ -216,8 +221,16 @@ pub enum VscodeOutcome {
     Fronted,
 }
 
-/// 「閉じるまで終わらない待ち」。
-pub type Waiter = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+/// 待ちが失敗で終わった理由。帳面が `open_in_failed` に写す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitFailure {
+    /// どの段で失敗したか（`wait`＝終わりを待てなかった・`exit`＝子が失敗で終わった）
+    pub stage: &'static str,
+    pub reason: String,
+}
+
+/// 「閉じるまで終わらない待ち」。窓が閉じられたら `Ok(())`、失敗で終わったら `Err`。
+pub type Waiter = Pin<Box<dyn Future<Output = Result<(), WaitFailure>> + Send + 'static>>;
 
 // ---------------------------------------------------------------------------
 // 純関数
@@ -485,6 +498,7 @@ impl OpenLauncher for RecordLauncher {
             while !close.exists() {
                 tokio::time::sleep(RECORD_POLL).await;
             }
+            Ok(())
         })))
     }
 }
@@ -577,12 +591,71 @@ fn warn_wait_failed(app: App, path: &Path, err: &std::io::Error) {
     );
 }
 
-/// 子の終わりを待つだけの待ち。
-fn waiter_of(mut child: tokio::process::Child, path: PathBuf) -> Waiter {
-    Box::pin(async move {
-        if let Err(err) = child.wait().await {
-            warn_wait_failed(App::Vscode, &path, &err);
+/// 子の終わり方から、窓が閉じられたのか失敗したのかを決める（純関数）。
+///
+/// **0 でなければ失敗。** 窓を普通に閉じたとき `code --wait` は 0 で終わる（WSL のフォルダ・
+/// WSL のファイル・Windows のドライブのフォルダの3通りとも。レビュー直し1周目で実測）。
+/// シグナルで終わった（`code` が `None`）のも失敗として理由に「止められた」と書く。
+fn wait_end(code: Option<i32>, stderr_tail: &str) -> Result<(), WaitFailure> {
+    let head = match code {
+        Some(0) => return Ok(()),
+        Some(code) => format!("終了コード {code} で終わりました"),
+        None => "シグナルで止められました".to_string(),
+    };
+    let tail = stderr_tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reason = if tail.is_empty() {
+        head
+    } else {
+        format!("{head}（標準エラーの末尾：{tail}）")
+    };
+    Err(WaitFailure {
+        stage: "exit",
+        reason,
+    })
+}
+
+/// 標準エラーを読み続け、末尾の [`STDERR_TAIL`] バイトだけを持つ（読み残しで子のパイプが詰まらない）。
+async fn keep_tail(mut stream: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
+    use tokio::io::AsyncReadExt as _;
+    let mut buf = [0u8; 1024];
+    loop {
+        let read = match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let mut kept = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        kept.extend_from_slice(&buf[..read]);
+        if kept.len() > STDERR_TAIL {
+            let cut = kept.len() - STDERR_TAIL;
+            kept.drain(..cut);
         }
+    }
+}
+
+/// 子の終わりを待ち、終わり方を返す待ち。標準エラーが繋がっていれば末尾を理由に添える。
+fn waiter_of(mut child: tokio::process::Child) -> Waiter {
+    let stderr = child.stderr.take();
+    Box::pin(async move {
+        let tail = Arc::new(Mutex::new(Vec::new()));
+        let reader = stderr.map(|stream| tokio::spawn(keep_tail(stream, Arc::clone(&tail))));
+        let status = child.wait().await.map_err(|err| WaitFailure {
+            stage: "wait",
+            reason: err.to_string(),
+        })?;
+        if let Some(mut reader) = reader {
+            // **EOF までは待たない**（Windows 側の孫が標準エラーを握ったまま残ることがある）
+            if tokio::time::timeout(STDERR_GRACE, &mut reader)
+                .await
+                .is_err()
+            {
+                reader.abort();
+            }
+        }
+        let text = {
+            let kept = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            String::from_utf8_lossy(&kept).into_owned()
+        };
+        wait_end(status.code(), &text)
     })
 }
 
@@ -653,7 +726,7 @@ impl RealLauncher {
             .current_dir(home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr_for(wait))
             .kill_on_drop(false)
             .spawn()
             .map_err(|err| OpenError::Spawn(err.to_string()))
@@ -678,11 +751,16 @@ impl RealLauncher {
             .current_dir(WINDOWS_DIR)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr_for(wait))
             .kill_on_drop(false)
             .spawn()
             .map_err(|err| OpenError::Spawn(err.to_string()))
     }
+}
+
+/// 待ちつきの子だけ標準エラーを拾う（失敗の理由に末尾を添えるため）。待ちなしは引き取るだけ。
+fn stderr_for(wait: bool) -> Stdio {
+    if wait { Stdio::piped() } else { Stdio::null() }
 }
 
 impl OpenLauncher for RealLauncher {
@@ -750,7 +828,7 @@ impl OpenLauncher for RealLauncher {
             },
         };
         if wait {
-            Ok(Some(waiter_of(child, target.path.clone())))
+            Ok(Some(waiter_of(child)))
         } else {
             reap(child, App::Vscode, target.path.clone());
             Ok(None)
@@ -929,8 +1007,8 @@ impl OpenedBook {
                 // 入る前の帳面を消しに行き、印だけが残る
                 let book = Arc::clone(self);
                 tokio::spawn(async move {
-                    waiter.await;
-                    book.finish(&key, token);
+                    let end = waiter.await;
+                    book.finish(&key, token, end);
                 });
                 Ok(VscodeOutcome::Opened)
             }
@@ -946,7 +1024,10 @@ impl OpenedBook {
     }
 
     /// 待ちが終わった。札が一致するときだけ消して1行残す。
-    fn finish(&self, key: &Path, token: u64) {
+    ///
+    /// **終わり方で行を分ける。** 待ちが失敗で終わったのに `open_in_closed` を出すと、読む人は
+    /// 「利用者が窓を閉じた」と取り違える（レビュー直し1周目）。
+    fn finish(&self, key: &Path, token: u64, end: Result<(), WaitFailure>) {
         let removed = {
             let mut inner = self.lock();
             if inner.get(key).is_some_and(|held| held.token == token) {
@@ -955,14 +1036,27 @@ impl OpenedBook {
                 None
             }
         };
-        if let Some(held) = removed {
-            tracing::info!(
+        let Some(held) = removed else {
+            return;
+        };
+        match end {
+            Ok(()) => tracing::info!(
                 kind = "open_in_closed",
                 target_kind = held.kind.label(),
                 held_secs = held.started.elapsed().as_secs(),
                 path = %held.shown.display(),
                 "VSCode の窓が閉じられたので、開いている印を外しました"
-            );
+            ),
+            Err(failure) => tracing::warn!(
+                kind = "open_in_failed",
+                app = App::Vscode.label(),
+                stage = failure.stage,
+                reason = %failure.reason,
+                target_kind = held.kind.label(),
+                held_secs = held.started.elapsed().as_secs(),
+                path = %held.shown.display(),
+                "VSCode の待ちが失敗で終わったので、開いている印を外しました"
+            ),
         }
     }
 }
@@ -1002,7 +1096,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct 偽の起こし口 {
         呼ばれた: Mutex<Vec<(App, PathBuf, bool)>>,
-        待ちの合図: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+        待ちの合図: Mutex<Vec<tokio::sync::oneshot::Sender<Result<(), WaitFailure>>>>,
         失敗させる: AtomicBool,
     }
 
@@ -1013,8 +1107,41 @@ mod tests {
 
         fn 待ちを終わらせる(&self) {
             for tx in self.待ちの合図.lock().unwrap().drain(..) {
-                let _ = tx.send(());
+                let _ = tx.send(Ok(()));
             }
+        }
+
+        fn 待ちを失敗で終わらせる(&self, failure: WaitFailure) {
+            for tx in self.待ちの合図.lock().unwrap().drain(..) {
+                let _ = tx.send(Err(failure.clone()));
+            }
+        }
+    }
+
+    /// 本物の子（`sh -c <script>`）を標準エラーつきで起こし、製品と同じ `waiter_of` で待つ起こし口。
+    /// 偽の待ちは失敗を直接返すので、終了コードを見る行を壊しても落ちない——その確かめのため。
+    #[derive(Debug)]
+    struct Shで起こす起こし口(&'static str);
+
+    impl OpenLauncher for Shで起こす起こし口 {
+        fn tools(&self) -> Tools {
+            Tools::both(ToolState::ok())
+        }
+
+        fn explorer(&self, _target: &Target) -> Result<(), OpenError> {
+            Ok(())
+        }
+
+        fn vscode(&self, _target: &Target, wait: bool) -> Result<Option<Waiter>, OpenError> {
+            let child = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(self.0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr_for(wait))
+                .spawn()
+                .map_err(|err| OpenError::Spawn(err.to_string()))?;
+            Ok(Some(waiter_of(child)))
         }
     }
 
@@ -1044,9 +1171,7 @@ mod tests {
             }
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.待ちの合図.lock().unwrap().push(tx);
-            Ok(Some(Box::pin(async move {
-                let _ = rx.await;
-            })))
+            Ok(Some(Box::pin(async move { rx.await.unwrap_or(Ok(())) })))
         }
     }
 
@@ -1497,9 +1622,10 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
         assert!(early.is_err(), "close-2 を置く前は終わらない");
 
         std::fs::write(dir.path().join("close-2"), "").unwrap();
-        tokio::time::timeout(Duration::from_secs(2), waiter)
+        let end = tokio::time::timeout(Duration::from_secs(2), waiter)
             .await
             .expect("close-2 を置くと待ちが終わる");
+        assert_eq!(end, Ok(()), "記録の起こし口の待ちは閉じたとして終わる");
         assert!(
             dir.path().join("close-2").exists(),
             "close は消さない（置いた側が片付ける）"
@@ -1665,9 +1791,143 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
                 ready: true,
             },
         );
-        book.finish(&key, 1);
+        book.finish(&key, 1, Ok(()));
         assert_eq!(book.list().len(), 1, "札の違う古い回は消さない");
-        book.finish(&key, 99);
+        book.finish(&key, 99, Ok(()));
         assert!(book.list().is_empty());
+    }
+
+    // ---- 待ちの終わり方（レビュー直し1周目）
+
+    #[test]
+    fn 子の終わり方で閉じたか失敗かを決める() {
+        assert_eq!(wait_end(Some(0), ""), Ok(()));
+        assert_eq!(wait_end(Some(0), "何か出ていても 0 なら閉じた"), Ok(()));
+
+        let failure = wait_end(Some(3), "line1\nboom\n").unwrap_err();
+        assert_eq!(failure.stage, "exit");
+        assert!(failure.reason.contains('3'), "{}", failure.reason);
+        assert!(
+            failure.reason.contains("line1 boom"),
+            "改行は空白に：{}",
+            failure.reason
+        );
+
+        let bare = wait_end(Some(1), "  \n ").unwrap_err();
+        assert_eq!(
+            bare.reason, "終了コード 1 で終わりました",
+            "末尾が空なら括弧ごと出さない"
+        );
+
+        let signal = wait_end(None, "").unwrap_err();
+        assert_eq!(signal.stage, "exit");
+        assert!(signal.reason.contains("止められ"), "{}", signal.reason);
+    }
+
+    fn 帳面の行(
+        sink: &capture::Sink,
+        mark: usize,
+        kind: &str,
+        path: &str,
+    ) -> Vec<serde_json::Value> {
+        sink.matching(mark, "kind", kind)
+            .into_iter()
+            .filter(|line| line["path"] == path)
+            .collect()
+    }
+
+    async fn 空になるまで長く待つ(book: &OpenedBook) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !book.lock().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("待ちが終わったら帳面から消えること");
+    }
+
+    #[tokio::test]
+    async fn 待ちが失敗で終わるとopen_in_failedが出てopen_in_closedは出ない() {
+        let sink = capture::sink();
+        let mark = sink.mark();
+        let launcher = Shで起こす起こし口("echo boom >&2; exit 3");
+        let book = OpenedBook::new(OPENED_CAP);
+        let path = format!("/home/u/failed-{}", protocol::CardId::new());
+        book.open_vscode(&launcher, フォルダ(&path)).unwrap();
+        空になるまで長く待つ(&book).await;
+
+        let failed = 帳面の行(sink, mark, "open_in_failed", &path);
+        assert_eq!(failed.len(), 1, "open_in_failed が1行：{failed:#?}");
+        assert_eq!(failed[0]["stage"], "exit");
+        assert_eq!(failed[0]["app"], "vscode");
+        let reason = failed[0]["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains('3') && reason.contains("boom"), "{reason}");
+        assert!(
+            帳面の行(sink, mark, "open_in_closed", &path).is_empty(),
+            "失敗で終わった待ちに open_in_closed を出さない"
+        );
+    }
+
+    #[tokio::test]
+    async fn 待ちが0で終わるとopen_in_closedが出る() {
+        let sink = capture::sink();
+        let mark = sink.mark();
+        let launcher = Shで起こす起こし口("exit 0");
+        let book = OpenedBook::new(OPENED_CAP);
+        let path = format!("/home/u/zero-{}", protocol::CardId::new());
+        book.open_vscode(&launcher, フォルダ(&path)).unwrap();
+        空になるまで長く待つ(&book).await;
+
+        assert_eq!(帳面の行(sink, mark, "open_in_closed", &path).len(), 1);
+        assert!(帳面の行(sink, mark, "open_in_failed", &path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn 偽の待ちが失敗を返すと帳面から消えて失敗の行が出る() {
+        let sink = capture::sink();
+        let mark = sink.mark();
+        let launcher = 偽の起こし口::default();
+        let book = OpenedBook::new(OPENED_CAP);
+        let path = format!("/home/u/fake-failed-{}", protocol::CardId::new());
+        book.open_vscode(&launcher, フォルダ(&path)).unwrap();
+        launcher.待ちを失敗で終わらせる(WaitFailure {
+            stage: "wait",
+            reason: "偽の失敗".to_string(),
+        });
+        空になるまで待つ(&book).await;
+
+        let failed = 帳面の行(sink, mark, "open_in_failed", &path);
+        assert_eq!(failed.len(), 1, "{failed:#?}");
+        assert_eq!(failed[0]["stage"], "wait");
+        assert!(帳面の行(sink, mark, "open_in_closed", &path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn エクスプローラの引き取りは終了コード1でも失敗を書かない() {
+        let sink = capture::sink();
+        let mark = sink.mark();
+        let path = format!("/home/u/explorer-{}", protocol::CardId::new());
+        let child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().expect("起こした子の番号");
+        reap(child, App::Explorer, PathBuf::from(&path));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Path::new(&format!("/proc/{pid}")).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("子が引き取られる");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            帳面の行(sink, mark, "open_in_failed", &path).is_empty(),
+            "explorer.exe は成功でも 1 を返すので、終了コードで失敗と書かない"
+        );
     }
 }
