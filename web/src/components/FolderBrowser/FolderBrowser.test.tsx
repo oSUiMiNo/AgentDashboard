@@ -631,9 +631,9 @@ describe("名前の全体を読む道", () => {
     // **見出しが押せるものの中に居ないこと**を、実際の並びで見る。
     // `role` を直接見るだけだと、空のときも通ってしまい何も見張れない
     expect(押せるもの).not.toContain(見出し);
-    // フォルダの行なので、押せるのは「絶対パスをコピー」の1つだけ。
-    // `Label` を `Item` に取り替えると、ここが2つになって落ちる
-    expect(押せるもの).toHaveLength(1);
+    // フォルダの行なので、押せるのは「絶対パスをコピー」と「フォルダ名をコピー」の2つだけ。
+    // `Label` を `Item` に取り替えると、ここが3つになって落ちる
+    expect(押せるもの).toHaveLength(2);
   });
 
   it("見出しを足しても、コピーの道は今までどおり効く", async () => {
@@ -879,7 +879,11 @@ describe("ファイルの行は、ブラウザの新しいタブへ開けるリ�
         中身.querySelectorAll("[data-testid^='folder-menu-']"),
       ).map((e) => e.getAttribute("data-testid"));
 
-      expect(並び).toEqual(["folder-menu-open-tab", "folder-menu-copy-abs"]);
+      expect(並び).toEqual([
+        "folder-menu-open-tab",
+        "folder-menu-copy-abs",
+        "folder-menu-copy-name",
+      ]);
     });
 
     it("フォルダのメニューには出さない（行き先の URL が無い）", async () => {
@@ -1635,5 +1639,177 @@ describe("一覧の余白の右クリック（追加の要望 2026-11-23）", ()
       "MyDocs",
     );
     expect(screen.getAllByTestId("folder-menu")).toHaveLength(1);
+  });
+});
+
+describe("名前をコピー（追加の要望 2026-11-23）", () => {
+  function 頼まれた場所を返す(
+    entries: { name: string; kind: "dir" | "file" | "symlink" }[] = [
+      { name: "MyDocs", kind: "dir" },
+      { name: "計画.md", kind: "file" },
+    ],
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const 頼まれた =
+          new URL(url, "http://x").searchParams.get("path") ?? ROOT;
+        return new Response(
+          JSON.stringify({
+            path: 頼まれた,
+            entries: entries.map((e) => ({ ...e, is_project: false })),
+            truncated: false,
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+  }
+
+  function 写したものを控える() {
+    const 写した: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async (v: string) => void 写した.push(v)) },
+    });
+    return 写した;
+  }
+
+  async function 名前をコピーする(target: HTMLElement, 文字: string) {
+    await userEvent.pointer({ keys: "[MouseRight]", target });
+    const 項目 = await screen.findByTestId("folder-menu-copy-name");
+    expect(項目).toHaveTextContent(文字);
+    await userEvent.click(項目);
+  }
+
+  function パンくず(名前: string) {
+    const 段 = screen
+      .getAllByTestId("folder-crumb")
+      .find((e) => e.textContent === 名前);
+    if (段 === undefined) {
+      throw new Error(`パンくず ${名前} が無い`);
+    }
+    return 段;
+  }
+
+  it("フォルダの行では「フォルダ名をコピー」で名前だけが写り、行の横に「コピーしました」と出る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await 名前をコピーする(行, "フォルダ名をコピー");
+
+    await waitFor(() => expect(写した).toEqual(["MyDocs"]));
+    const ボタン = (await 行たち())[0];
+    await waitFor(() => expect(答え(ボタン)).toBe("コピーしました"));
+    expect(screen.queryAllByTestId("folder-crumb-copy-state")).toHaveLength(0);
+  });
+
+  it("ファイルの行では「ファイル名をコピー」で名前だけが写る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    render(
+      <FolderBrowser host="local" start={ROOT} root={ROOT} onPickFile={vi.fn()} />,
+    );
+    const 行 = (await screen.findAllByTestId("folder-entry"))[1];
+
+    await 名前をコピーする(行, "ファイル名をコピー");
+
+    await waitFor(() => expect(写した).toEqual(["計画.md"]));
+    const ボタン = (await 行たち())[1];
+    await waitFor(() => expect(答え(ボタン)).toBe("コピーしました"));
+  });
+
+  it("リンク（symlink）の行は、指す先が分からないので「名前をコピー」", async () => {
+    頼まれた場所を返す([{ name: "近道", kind: "symlink" }]);
+    const 写した = 写したものを控える();
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await 名前をコピーする(行.closest("li") as HTMLElement, "名前をコピー");
+
+    await waitFor(() => expect(写した).toEqual(["近道"]));
+  });
+
+  it("パンくずのフォルダ名・「…」・ルートでは、その段の名前が写り、横に「コピーしました」と出る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    置く();
+    await 行たち();
+
+    await 名前をコピーする(パンくず("app"), "フォルダ名をコピー");
+    await waitFor(() => expect(写した).toEqual(["app"]));
+    await waitFor(() =>
+      expect(
+        パンくず("app").parentElement?.querySelector(
+          '[data-testid="folder-crumb-copy-state"]',
+        ),
+      ).toHaveTextContent("コピーしました"),
+    );
+
+    await 名前をコピーする(
+      パンくず("…").parentElement as HTMLElement,
+      "フォルダ名をコピー",
+    );
+    await waitFor(() => expect(写した).toEqual(["app", "dev"]));
+    await waitFor(() =>
+      expect(
+        パンくず("…").parentElement?.querySelector(
+          '[data-testid="folder-crumb-copy-state"]',
+        ),
+      ).toHaveTextContent("コピーしました"),
+    );
+    expect(screen.getAllByTestId("folder-crumb-copy-state")).toHaveLength(1);
+  });
+
+  it("ルートの段では「/」が写る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    render(<FolderBrowser host="local" start="/home/me" />);
+    await 行たち();
+
+    await 名前をコピーする(パンくず("/"), "フォルダ名をコピー");
+
+    await waitFor(() => expect(写した).toEqual(["/"]));
+  });
+
+  it("余白では、いまのフォルダの名前が写り、パンくずの末尾の横に「コピーしました」と出る", async () => {
+    頼まれた場所を返す();
+    const 写した = 写したものを控える();
+    置く();
+    await userEvent.click((await screen.findAllByTestId("folder-entry"))[0]);
+    await waitFor(() =>
+      expect(screen.getByTestId("folder-browser")).toHaveAttribute(
+        "data-path",
+        `${ROOT}/MyDocs`,
+      ),
+    );
+    await screen.findAllByTestId("folder-entry");
+
+    await 名前をコピーする(screen.getByTestId("folder-blank"), "フォルダ名をコピー");
+
+    await waitFor(() => expect(写した).toEqual(["MyDocs"]));
+    await waitFor(() =>
+      expect(
+        パンくず("MyDocs").parentElement?.querySelector(
+          '[data-testid="folder-crumb-copy-state"]',
+        ),
+      ).toHaveTextContent("コピーしました"),
+    );
+  });
+
+  it("写せない環境では、名前の値が逃げ道に出る", async () => {
+    頼まれた場所を返す();
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await 名前をコピーする(行, "フォルダ名をコピー");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("folder-copy-fallback").textContent).toBe(
+        "MyDocs",
+      ),
+    );
   });
 });

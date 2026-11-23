@@ -495,6 +495,7 @@ export function FolderBrowser({
           <PathMenu
             name={外側.label}
             path={外側.path}
+            kind="dir"
             openIn={開く口}
             onCopy={(value) => copy(外側.path, value, "パンくず")}
           />
@@ -517,6 +518,7 @@ export function FolderBrowser({
             <PathMenu
               name={crumb.label}
               path={crumb.path}
+              kind="dir"
               openIn={開く口}
               onCopy={(value) => copy(crumb.path, value, "パンくず")}
             />
@@ -650,6 +652,7 @@ export function FolderBrowser({
             <PathMenu
               name={いまの段.label}
               path={いまの段.path}
+              kind="dir"
               openIn={開く口}
               onCopy={(value) => copy(いまの段.path, value, "パンくず")}
             />
@@ -893,6 +896,7 @@ function Row({
       <PathMenu
         name={entry.name}
         path={full}
+        kind={entry.kind}
         tabUrl={linkable ? rawUrl(host, full) : undefined}
         openIn={openIn}
         onCopy={onCopy}
@@ -904,12 +908,14 @@ function Row({
 function PathMenu({
   name,
   path,
+  kind,
   tabUrl,
   openIn,
   onCopy,
 }: {
   name: string
   path: string
+  kind: DirEntry["kind"]
   tabUrl?: string
   openIn?: OpenInProp
   onCopy: (value: string) => void
@@ -975,6 +981,12 @@ function PathMenu({
         onSelect={() => onCopy(path)}
       >
         絶対パスをコピー
+      </ContextMenuItem>
+      <ContextMenuItem
+        data-testid="folder-menu-copy-name"
+        onSelect={() => onCopy(name)}
+      >
+        {kind === "dir" ? "フォルダ名をコピー" : kind === "file" ? "ファイル名をコピー" : "名前をコピー"}
       </ContextMenuItem>
     </ContextMenuContent>
   )

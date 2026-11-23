@@ -155,6 +155,7 @@ describe('サイドバーの出し分けと押した先', () => {
       'folder-menu-open-explorer',
       'folder-menu-open-vscode',
       'folder-menu-copy-abs',
+      'folder-menu-copy-name',
     ])
   })
 
@@ -315,7 +316,12 @@ describe('サイドバーの出し分けと押した先', () => {
       Array.from(メニュー.querySelectorAll("[data-testid^='folder-menu-']")).map((e) =>
         e.getAttribute('data-testid'),
       ),
-    ).toEqual(['folder-menu-open-explorer', 'folder-menu-open-vscode', 'folder-menu-copy-abs'])
+    ).toEqual([
+      'folder-menu-open-explorer',
+      'folder-menu-open-vscode',
+      'folder-menu-copy-abs',
+      'folder-menu-copy-name',
+    ])
     await userEvent.click(within(メニュー).getByTestId('folder-menu-open-vscode'))
     await waitFor(() => expect(screen.queryByTestId('folder-menu')).toBeNull())
 
