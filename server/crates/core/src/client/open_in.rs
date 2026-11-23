@@ -7,7 +7,7 @@
 use super::{ClientError, Target, http, output};
 use crate::open_api::{OpenInView, OpenResult, Outcome};
 use session_host_core::open_in::{App, TargetKind};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// `--app` に渡す道具。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -66,16 +66,38 @@ pub async fn open(
     }
 }
 
-/// 相対パスを `cwd` からの絶対パスへ直す。絶対パスはそのまま。
+/// 相対パスを `cwd` からの絶対パスへ直す。
 ///
-/// 正規化はしない（在るかはサーバが確かめる。シンボリックリンクを辿ると、画面の印と
-/// 突き合わせるパスがずれる）。
+/// **字面だけ整える**（`.` を落とし、`..` で1つ戻り、末尾の `/` を落とす）。絶対パスにも当てる——
+/// 整えないと、画面の印（整った形）と突き合わない。シンボリックリンクは辿らない（辿ると画面の印と
+/// 突き合わせるパスがずれる）。在るかはサーバが確かめる。
 pub fn absolutize(path: &str, cwd: &Path) -> String {
-    if Path::new(path).is_absolute() {
-        path.to_string()
+    let path = Path::new(path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        cwd.join(path).to_string_lossy().into_owned()
+        cwd.join(path)
+    };
+    lexical(&joined).to_string_lossy().into_owned()
+}
+
+/// パスの字面だけを整える。`/` より上へは出ない。
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::RootDir => out.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if out.parent().is_some() {
+                    out.pop();
+                }
+            }
+            Component::Normal(name) => out.push(name),
+            Component::Prefix(_) => {}
+        }
     }
+    out
 }
 
 fn tool_line(name: &str, available: bool, reason: Option<&str>) -> String {
@@ -175,8 +197,18 @@ mod tests {
     }
 
     #[test]
+    fn 相対パスは字面を整えて絶対パスにする() {
+        let cwd = Path::new("/home/u/pjt");
+        assert_eq!(absolutize(".", cwd), "/home/u/pjt");
+        assert_eq!(absolutize("./sub/", cwd), "/home/u/pjt/sub");
+        assert_eq!(absolutize("../x", cwd), "/home/u/x");
+    }
+
+    #[test]
     fn 絶対パスはそのまま送る() {
         assert_eq!(absolutize("/x/y", Path::new("/base")), "/x/y");
+        assert_eq!(absolutize("/x/y/", Path::new("/base")), "/x/y");
+        assert_eq!(absolutize("/../x", Path::new("/base")), "/x");
     }
 
     #[test]
