@@ -1470,8 +1470,9 @@ export function FileView({
       )}
 
       {/* **箱で描いているときは出さない。** 描いた形は全部届いているので、「途中まで」と
-          言うと嘘になる（生テキストへ切り替えたときに出る） */}
-      {content?.truncated === true && !箱で描いている && (
+          言うと嘘になる（生テキストへ切り替えたときに出る）。**設定を待っている間も出さない**
+          ——箱で描くかがまだ決まっていないので、窓で読むと言い切れない */}
+      {content?.truncated === true && !箱で描いている && !天井を待つ && (
         <p data-testid="file-truncated" className="text-xs text-amber-300">
           このファイルは大きいので（{formatBytes(content.bytes)}）、生テキストで少しずつ読んでいます。整形と編集はできません。
         </p>

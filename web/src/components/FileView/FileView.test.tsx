@@ -1973,6 +1973,8 @@ describe("大きいファイル（窓で読む面と上限の導線）", () => {
       expect(screen.queryByTestId("file-window")).toBeNull();
       expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
       expect(screen.queryByTestId("file-open-tab")).toBeNull();
+      // 「生テキストで少しずつ読んでいます」はまだ言わない（箱で描くかが決まっていない）
+      expect(screen.queryByTestId("file-truncated")).toBeNull();
     });
 
     it("設定が届いたら箱で描き、窓で読む面を一度も出さない", async () => {
