@@ -135,6 +135,10 @@ impl Outcome {
     }
 }
 
+fn opened_message(app: App, outcome: Outcome) -> String {
+    format!("{} で開きました（{}）", app.label(), outcome.label())
+}
+
 /// POST の答え。`view` は起こした後の様子（画面が次の読み直しを待たずに差し替える）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenResult {
@@ -518,7 +522,8 @@ async fn api_open(
             path_class = class.label(),
             outcome = outcome.label(),
             path = %log_path,
-            "外の道具で開きました"
+            "{}",
+            opened_message(app, outcome)
         );
         Ok(outcome)
     });
@@ -607,6 +612,29 @@ mod tests {
 
     fn peer(s: &str) -> Option<SocketAddr> {
         Some(s.parse().unwrap())
+    }
+
+    #[test]
+    fn 開いた行の本文は道具と結果ごとに先頭24文字が違う() {
+        let heads: Vec<String> = [App::Explorer, App::Vscode]
+            .into_iter()
+            .flat_map(|app| {
+                [
+                    Outcome::Launched,
+                    Outcome::Opened,
+                    Outcome::Fronted,
+                    Outcome::Starting,
+                ]
+                .into_iter()
+                .map(move |outcome| opened_message(app, outcome).chars().take(24).collect())
+            })
+            .collect();
+        let distinct: std::collections::HashSet<&String> = heads.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            heads.len(),
+            "ログの間引きの鍵（本文の先頭24文字）が、道具と結果の組ごとに分かれること: {heads:?}"
+        );
     }
 
     #[test]
