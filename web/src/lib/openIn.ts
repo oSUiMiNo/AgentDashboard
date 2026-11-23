@@ -52,7 +52,7 @@ export interface OpenInView {
   opened: OpenedView[]
 }
 
-export type OpenOutcome = 'launched' | 'opened' | 'fronted'
+export type OpenOutcome = 'launched' | 'opened' | 'fronted' | 'starting'
 
 /** Rust 側の `OpenResult` と同じ綴り。 */
 export interface OpenResult {
@@ -195,7 +195,8 @@ export async function postOpenIn(
     typeof result === 'object' &&
     (result.outcome === 'launched' ||
       result.outcome === 'opened' ||
-      result.outcome === 'fronted') &&
+      result.outcome === 'fronted' ||
+      result.outcome === 'starting') &&
     isOpenInView(result.view)
   ) {
     return { ok: true, result: { outcome: result.outcome, view: result.view } }

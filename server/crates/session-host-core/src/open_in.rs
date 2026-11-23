@@ -223,6 +223,8 @@ pub enum VscodeOutcome {
     Opened,
     /// 既に抱えていたので、窓を前へ出しただけ（待ちは増やさない）
     Fronted,
+    /// 同じものを起こしている最中だったので、何もしなかった（窓は1回目の起こしで開く）
+    Starting,
 }
 
 /// 待ちが失敗で終わった理由。帳面が `open_in_failed` に写す。
@@ -1075,8 +1077,9 @@ impl OpenedBook {
 
         let token = match reserved {
             Reserve::New(token) => token,
-            // 起こしている最中の2回目は何も起こさない（2本目の `code` を起こすと窓が2つ開き、印が別の子に結び付く）
-            Reserve::Busy => return Ok(VscodeOutcome::Fronted),
+            // 起こしている最中の2回目は何も起こさない（2本目の `code` を起こすと窓が2つ開き、印が別の子に結び付く）。
+            // **「前へ出した」とは答えない。** 何も起こしていないのに、ログと画面が窓を前へ出したと言うことになる
+            Reserve::Busy => return Ok(VscodeOutcome::Starting),
             Reserve::Front => {
                 // **待ちを増やさない。** 同じものの2回目も待たせると印が二重になる（設計 §10 の M1）
                 if let Some(waiter) = launcher.vscode(&target, false)? {
@@ -1862,7 +1865,7 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
     }
 
     #[tokio::test]
-    async fn 起こしている最中の2回目は起こし口を呼ばずに前に出すだけ() {
+    async fn 起こしている最中の2回目は起こし口を呼ばずに起こしている最中と答える() {
         let (入った_tx, 入った_rx) = std::sync::mpsc::channel();
         let (放す_tx, 放す_rx) = std::sync::mpsc::channel();
         let launcher = Arc::new(止まる起こし口 {
@@ -1886,7 +1889,11 @@ ELECTRON="$VSCODE_PATH/$NAME.exe"
         let outcome = book
             .open_vscode(launcher.as_ref(), フォルダ("/home/u/p"))
             .unwrap();
-        assert_eq!(outcome, VscodeOutcome::Fronted);
+        assert_eq!(
+            outcome,
+            VscodeOutcome::Starting,
+            "起こしている最中の2回目は、前へ出したではなく起こしている最中と答えること"
+        );
         assert!(
             launcher.前へ出した.lock().unwrap().is_empty(),
             "起こしている最中の2回目で起こし口が呼ばれないこと"

@@ -118,6 +118,8 @@ pub enum Outcome {
     Opened,
     /// 既に抱えていたので、窓を前に出しただけ
     Fronted,
+    /// 同じものを起こしている最中だったので、何もしなかった
+    Starting,
 }
 
 impl Outcome {
@@ -126,6 +128,7 @@ impl Outcome {
             Self::Launched => "launched",
             Self::Opened => "opened",
             Self::Fronted => "fronted",
+            Self::Starting => "starting",
         }
     }
 }
@@ -495,6 +498,7 @@ async fn api_open(
                     .map(|outcome| match outcome {
                         VscodeOutcome::Opened => Outcome::Opened,
                         VscodeOutcome::Fronted => Outcome::Fronted,
+                        VscodeOutcome::Starting => Outcome::Starting,
                     })
             }
         })
@@ -734,6 +738,102 @@ mod tests {
         ) -> Result<Option<open_in::Waiter>, OpenError> {
             Ok(None)
         }
+    }
+
+    /// VSCode の起こしの途中で止まる偽の起こし口。入ったら `entered` へ知らせ、`release` を待つ。
+    #[derive(Debug)]
+    struct HoldVscode {
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl open_in::OpenLauncher for HoldVscode {
+        fn tools(&self) -> Tools {
+            Tools {
+                explorer: open_in::ToolState::ok(),
+                vscode: open_in::ToolState::ok(),
+            }
+        }
+
+        fn explorer(&self, _target: &Target) -> Result<(), OpenError> {
+            Ok(())
+        }
+
+        fn vscode(
+            &self,
+            _target: &Target,
+            _wait: bool,
+        ) -> Result<Option<open_in::Waiter>, OpenError> {
+            self.entered.lock().unwrap().send(()).ok();
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                release.recv().ok();
+            }
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn 起こしている最中の2回目は起こしている最中と答えてそう書く() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdashboard-open-api-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let state = OpenApiState {
+            launcher: Arc::new(HoldVscode {
+                entered: Mutex::new(entered_tx),
+                release: Mutex::new(Some(held)),
+            }),
+            book: open_in::OpenedBook::new(open_in::OPENED_CAP),
+            link: Arc::new(WslLinkCache::fixed(None)),
+            serves_local: true,
+        };
+        let press = |state: OpenApiState, path: String| {
+            api_open(
+                AxumPath("local".to_string()),
+                State(state),
+                Peer(peer("127.0.0.1:5000")),
+                HeaderMap::new(),
+                Json(OpenRequest {
+                    app: App::Vscode,
+                    path,
+                }),
+            )
+        };
+        let first = tokio::spawn(press(state.clone(), path.clone()));
+        tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("1回目が起こし口に入ること");
+
+        let sink = session_host_core::logging::capture::sink();
+        let mark = sink.mark();
+        let second = press(state, path.clone()).await.expect("2回目は断らない");
+        let rows: Vec<_> = sink
+            .matching(mark, "path", &path)
+            .into_iter()
+            .filter(|row| row["kind"] == "open_in")
+            .collect();
+        release.send(()).unwrap();
+        let first = first.await.unwrap().expect("1回目は開ける");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            second.0.outcome,
+            Outcome::Starting,
+            "起こしている最中の2回目は、前へ出したではなく起こしている最中と答えること"
+        );
+        assert_eq!(first.0.outcome, Outcome::Opened);
+        assert_eq!(rows.len(), 1, "2回目の open_in の行がちょうど1行: {rows:?}");
+        assert_eq!(
+            rows[0]["outcome"], "starting",
+            "ログも起こしている最中と書くこと: {rows:?}"
+        );
     }
 
     #[tokio::test]

@@ -159,6 +159,7 @@ pub fn render_open_result(result: &OpenResult) -> String {
         Outcome::Launched => "エクスプローラで開きました",
         Outcome::Opened => "VSCode で開きました。閉じるまで印が付きます",
         Outcome::Fronted => "もう VSCode で開いていたので、窓を前に出しました",
+        Outcome::Starting => "VSCode を起こしている最中です。少し待つと窓が開きます",
     }
     .to_string()
 }
@@ -239,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn 開いた結果を3つの文で言う() {
+    fn 開いた結果を4つの文で言う() {
         let result = |outcome| OpenResult {
             outcome,
             view: view(true),
@@ -255,6 +256,10 @@ mod tests {
         assert_eq!(
             render_open_result(&result(Outcome::Fronted)),
             "もう VSCode で開いていたので、窓を前に出しました"
+        );
+        assert_eq!(
+            render_open_result(&result(Outcome::Starting)),
+            "VSCode を起こしている最中です。少し待つと窓が開きます"
         );
     }
 }

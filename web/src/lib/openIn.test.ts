@@ -149,6 +149,19 @@ describe('postOpenIn', () => {
     })
   })
 
+  it('起こしている最中（starting）の答えも成功として返す', async () => {
+    答える(
+      () =>
+        new Response(JSON.stringify({ outcome: 'starting', view: VIEW }), {
+          status: 200,
+        }),
+    )
+    expect(await postOpenIn('local', 'vscode', '/home/me/dev/app')).toEqual({
+      ok: true,
+      result: { outcome: 'starting', view: VIEW },
+    })
+  })
+
   it('線が切れたら ok:false', async () => {
     vi.stubGlobal(
       'fetch',
