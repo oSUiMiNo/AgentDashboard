@@ -43,6 +43,7 @@
  * 同じことに気づいて訂正した経緯を残している）。`host` と `project` は**引数で受け取る**。
  */
 
+import { ancestorsOf, capExpanded, MAX_EXPANDED } from '@/lib/folderTree'
 import { isUnder } from '@/lib/hostfs'
 
 const PLACE_KEY = 'agentdashboard.project-files-place'
@@ -84,7 +85,13 @@ export interface Place {
 }
 
 /** 行の中身。読むときに1件ずつ確かめるので、置くときは緩く持つ */
-type Row = { dir?: unknown; pick?: unknown; picks?: unknown }
+type Row = {
+  dir?: unknown
+  pick?: unknown
+  picks?: unknown
+  expanded?: unknown
+  dirSeen?: unknown
+}
 type Table = Record<string, Row>
 
 function 既定(): Place {
@@ -270,4 +277,46 @@ export function putPicks(
   pick: string | null,
 ): void {
   書き換える(host, project, { picks, pick })
+}
+
+export function readExpanded(host: string, project: string): string[] {
+  const row = readTable()[行の鍵(host, project)]
+  if (row === undefined) {
+    return []
+  }
+  const dir = 通す(project, row.dir)
+  if (!Array.isArray(row.expanded)) {
+    return capExpanded(
+      dir === null ? [] : ancestorsOf(project, dir),
+      MAX_EXPANDED,
+      project,
+      [],
+    )
+  }
+  const 並び: string[] = []
+  for (const item of row.expanded) {
+    const path = 通す(project, item)
+    if (path !== null && !isUnder(path, project) && !並び.includes(path)) {
+      並び.push(path)
+    }
+  }
+  const 守る = dir !== null && dir !== row.dirSeen ? ancestorsOf(project, dir) : []
+  for (const path of 守る) {
+    if (!並び.includes(path)) {
+      並び.push(path)
+    }
+  }
+  return capExpanded(並び, MAX_EXPANDED, project, 守る)
+}
+
+export function putExpanded(
+  host: string,
+  project: string,
+  expanded: readonly string[],
+): void {
+  const 前の場所 = readTable()[行の鍵(host, project)]?.dir
+  書き換える(host, project, {
+    expanded: [...expanded],
+    dirSeen: typeof 前の場所 === 'string' ? 前の場所 : null,
+  })
 }

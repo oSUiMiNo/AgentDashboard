@@ -1,4 +1,5 @@
-import { MAX_PLACES, putDir, putPicks, readPlace } from '@/lib/filesPlace'
+import { MAX_PLACES, putDir, putExpanded, putPicks, readExpanded, readPlace } from '@/lib/filesPlace'
+import { MAX_EXPANDED } from '@/lib/folderTree'
 
 /*
   鍵の綴りは**こちらでも直書きする**。実装から import すると、綴りを変えたときに
@@ -414,6 +415,184 @@ describe('lib/filesPlace', () => {
         JSON.stringify({ [行('local', ROOT)]: { dir: `${ROOT}/docs` } }),
       )
       expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/docs`)
+    })
+  })
+
+  describe('展開の覚え', () => {
+    function 置く(row: Record<string, unknown>, host = 'local', project = ROOT): void {
+      globalThis.localStorage.setItem(PLACE_KEY, JSON.stringify({ [行(host, project)]: row }))
+    }
+
+    function 前の版が掘る(host: string, project: string, dir: string): void {
+      const 表 = 置いてある() as Record<string, Record<string, unknown>>
+      表[行(host, project)] = { ...(表[行(host, project)] ?? {}), dir }
+      globalThis.localStorage.setItem(PLACE_KEY, JSON.stringify(表))
+    }
+
+    function D(n: number): string {
+      return `${ROOT}/d${n}`
+    }
+
+    function 行の展開(host = 'local', project = ROOT): unknown {
+      const 行の中身 = 置いてある()[行(host, project)] as { expanded?: unknown }
+      return 行の中身.expanded
+    }
+
+    it('展開を書いて読むと、順序ごと戻る', () => {
+      putExpanded('local', ROOT, [`${ROOT}/b`, `${ROOT}/a`, `${ROOT}/a/c`])
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/b`, `${ROOT}/a`, `${ROOT}/a/c`])
+    })
+
+    it('空の並びを書いたら、前の版の掘った位置から作り直さずに「何も展開していない」と読む', () => {
+      置く({ dir: `${ROOT}/a/b` })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/a/b`])
+      putExpanded('local', ROOT, [])
+      expect(readExpanded('local', ROOT)).toEqual([])
+    })
+
+    it('前の版が書いた行（`expanded` が無い）は、`dir` の祖先を展開として読む', () => {
+      置く({ dir: `${ROOT}/a/b`, pick: `${ROOT}/a/b/x.md` })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/a/b`])
+    })
+
+    it('前の版が書いた行で `dir` も無ければ、展開は空', () => {
+      置く({ pick: `${ROOT}/x.md` })
+      expect(readExpanded('local', ROOT)).toEqual([])
+      置く({ dir: ROOT })
+      expect(readExpanded('local', ROOT)).toEqual([])
+      置く({ dir: '/etc' })
+      expect(readExpanded('local', ROOT)).toEqual([])
+    })
+
+    it('`expanded` が配列でなければ、前の版の行として読む', () => {
+      置く({ dir: `${ROOT}/a/b`, expanded: '壊れている' })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/a/b`])
+    })
+
+    it('`dirSeen` と今の `dir` が違えば、`dir` の祖先のうち入っていないものを末尾に足す', () => {
+      置く({
+        dir: `${ROOT}/a/b/c`,
+        dirSeen: `${ROOT}/old`,
+        expanded: [`${ROOT}/x`, `${ROOT}/a`],
+      })
+      expect(readExpanded('local', ROOT)).toEqual([
+        `${ROOT}/x`,
+        `${ROOT}/a`,
+        `${ROOT}/a/b`,
+        `${ROOT}/a/b/c`,
+      ])
+    })
+
+    it('`dirSeen` と今の `dir` が同じなら、何も足さない', () => {
+      置く({ dir: `${ROOT}/a/b/c`, dirSeen: `${ROOT}/a/b/c`, expanded: [`${ROOT}/x`] })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/x`])
+    })
+
+    it('新しい版で書いた後に前の版で掘っても、次に新しい版で読むと掘った先まで展開している', () => {
+      置く({ dir: `${ROOT}/a` })
+      putExpanded('local', ROOT, [`${ROOT}/a`])
+      前の版が掘る('local', ROOT, `${ROOT}/q/r`)
+      const 読んだ = readExpanded('local', ROOT)
+      expect(読んだ).toEqual([`${ROOT}/a`, `${ROOT}/q`, `${ROOT}/q/r`])
+      putExpanded('local', ROOT, 読んだ)
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/q`, `${ROOT}/q/r`])
+      putExpanded('local', ROOT, [`${ROOT}/a`, `${ROOT}/q/r`])
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/q/r`])
+    })
+
+    it('`putExpanded` は `expanded` と `dirSeen` だけを書き、`dir`・`pick`・`picks` を書き換えない', () => {
+      置く({ dir: `${ROOT}/a`, pick: `${ROOT}/a/x.md`, picks: [`${ROOT}/a/x.md`] })
+      putExpanded('local', ROOT, [`${ROOT}/a`, `${ROOT}/b`])
+      expect(置いてある()[行('local', ROOT)]).toEqual({
+        dir: `${ROOT}/a`,
+        pick: `${ROOT}/a/x.md`,
+        picks: [`${ROOT}/a/x.md`],
+        expanded: [`${ROOT}/a`, `${ROOT}/b`],
+        dirSeen: `${ROOT}/a`,
+      })
+      expect(readPlace('local', ROOT)).toEqual({
+        dir: `${ROOT}/a`,
+        pick: `${ROOT}/a/x.md`,
+        picks: [`${ROOT}/a/x.md`],
+      })
+    })
+
+    it('行に `dir` が無いときは、`dirSeen` に null を書く', () => {
+      putExpanded('local', ROOT, [`${ROOT}/a`])
+      expect(置いてある()[行('local', ROOT)]).toEqual({
+        expanded: [`${ROOT}/a`],
+        dirSeen: null,
+      })
+    })
+
+    it('起点の外と `..` を含む要素だけを捨て、行ごとは捨てない', () => {
+      置く({
+        expanded: [`${ROOT}/a`, '/etc', 42, `${ROOT}/../外`, `${ROOT}-old/x`, `${ROOT}/b`],
+      })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/b`])
+    })
+
+    it('ルートそのものは、展開の並びに入れない', () => {
+      置く({ expanded: [ROOT, `${ROOT}/a`] })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`])
+    })
+
+    it('展開の並びに同じパスが二重に入っていたら、先に出たほうを残す', () => {
+      置く({ expanded: [`${ROOT}/a`, `${ROOT}/b`, `${ROOT}/a`] })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/b`])
+    })
+
+    it('読んだ並びが上限を超えていたら、見えていない枝から古い順に落として上限に収める', () => {
+      const 並び = Array.from({ length: MAX_EXPANDED }, (_, n) => D(n))
+      並び.splice(Math.floor(MAX_EXPANDED / 2), 0, `${ROOT}/h/inner`)
+      expect(並び).toHaveLength(MAX_EXPANDED + 1)
+      置く({ expanded: 並び })
+      const 読んだ = readExpanded('local', ROOT)
+      expect(読んだ).toHaveLength(MAX_EXPANDED)
+      expect(読んだ).not.toContain(`${ROOT}/h/inner`)
+      expect(読んだ).toContain(D(0))
+    })
+
+    it('`dir` の祖先を足して上限を超えても、`dir` の祖先は落ちない', () => {
+      const 並び = [`${ROOT}/p`, ...Array.from({ length: MAX_EXPANDED - 1 }, (_, n) => D(n + 1))]
+      expect(並び).toHaveLength(MAX_EXPANDED)
+      置く({ dir: `${ROOT}/p/q/r`, dirSeen: `${ROOT}/old`, expanded: 並び })
+      const 読んだ = readExpanded('local', ROOT)
+      expect(読んだ).toHaveLength(MAX_EXPANDED)
+      expect(読んだ).toContain(`${ROOT}/p`)
+      expect(読んだ).toContain(`${ROOT}/p/q`)
+      expect(読んだ).toContain(`${ROOT}/p/q/r`)
+      expect(読んだ).not.toContain(D(1))
+      expect(読んだ).not.toContain(D(2))
+      expect(読んだ).toContain(D(3))
+    })
+
+    it('`putExpanded` は受け取った並びを落とさずに、そのまま書く', () => {
+      const 並び = Array.from({ length: MAX_EXPANDED + 50 }, (_, n) => D(n))
+      putExpanded('local', ROOT, 並び)
+      expect(行の展開()).toEqual(並び)
+    })
+
+    it('展開の覚えも、PC が違えば別の行', () => {
+      putExpanded('local', ROOT, [`${ROOT}/a`])
+      putExpanded('pc-2', ROOT, [`${ROOT}/b`])
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`])
+      expect(readExpanded('pc-2', ROOT)).toEqual([`${ROOT}/b`])
+    })
+
+    it('展開の覚えも、PJT が違えば別の行', () => {
+      putExpanded('local', ROOT, [`${ROOT}/a`])
+      putExpanded('local', OTHER, [`${OTHER}/lib`])
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`])
+      expect(readExpanded('local', OTHER)).toEqual([`${OTHER}/lib`])
+    })
+
+    it('展開を読んでも覚えの行は書き換えず、後で別の欄を書いても `expanded` は元のまま', () => {
+      置く({ dir: `${ROOT}/a/b`, dirSeen: `${ROOT}/old`, expanded: [`${ROOT}/x`] })
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/x`, `${ROOT}/a`, `${ROOT}/a/b`])
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/x`, `${ROOT}/a`, `${ROOT}/a/b`])
+      putPicks('local', ROOT, [`${ROOT}/m.md`], `${ROOT}/m.md`)
+      expect(行の展開()).toEqual([`${ROOT}/x`])
     })
   })
 })
