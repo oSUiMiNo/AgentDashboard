@@ -13,6 +13,7 @@ import { useCopyAnswer } from '@/components/FolderBrowser/useCopyAnswer'
 import { useFolderTree } from '@/components/FolderBrowser/useFolderTree'
 import { listingOf, rowScrollFor, type Branch } from '@/lib/folderTree'
 import { childOf, crumbsOf, rawUrl, type DirEntry } from '@/lib/hostfs'
+import { isOpenedIn } from '@/lib/openIn'
 
 interface Props {
   host: string
@@ -53,7 +54,7 @@ interface TreeRowProps {
   copyState: 'idle' | 'done' | 'failed'
   host: string
   root: string
-  openIn: OpenInProp | undefined
+  開いている印: boolean
   onToggle: (path: string) => void
   onPickFile: ((path: string) => void) | undefined
   onCopy: (at: string, value: string) => void
@@ -68,7 +69,7 @@ const TreeRow = memo(function TreeRow({
   copyState,
   host,
   root,
-  openIn,
+  開いている印,
   onToggle,
   onPickFile,
   onCopy,
@@ -90,7 +91,7 @@ const TreeRow = memo(function TreeRow({
       onPickFile={onPickFile === undefined ? undefined : () => onPickFile(full)}
       copyState={copyState}
       onCopy={(value) => onCopy(full, value)}
-      openIn={openIn}
+      opened={開いている印}
       menu="outside"
     />
   )
@@ -273,7 +274,7 @@ function Tree({ host, root, loadExpanded, onExpandedChange, onPickFile, current,
                 copyState={copied?.場所 === '行' && copied.path === full ? copied.state : 'idle'}
                 host={host}
                 root={root}
-                openIn={開く口}
+                開いている印={開く口 !== undefined && isOpenedIn(開く口.view, full)}
                 onToggle={toggle}
                 onPickFile={onPickFile}
                 onCopy={copy}

@@ -1006,6 +1006,38 @@ describe("印と名前", () => {
     expect(await screen.findAllByTestId("folder-entry")).not.toHaveLength(0);
     expect(document.querySelectorAll(".folder-tree-row")).toHaveLength(0);
   });
+
+  it("ツリーの行末は、開いている行だけ印と PJT の札が1つの入れ物に並び、開いていない行の PJT の札は、開く口があっても札そのものが行末へ寄る", async () => {
+    偽の口({
+      [ROOT]: [
+        { name: "甲", kind: "dir", is_project: true },
+        { name: "乙", kind: "dir", is_project: true },
+        "計画.md",
+      ],
+    });
+    const 口: OpenInProp = {
+      view: view({ opened: [{ path: `${ROOT}/甲`, real: `${ROOT}/甲`, kind: "dir", since_ms: 0 }] }),
+      open: vi.fn(),
+      busy: false,
+    };
+    const { unmount } = 置く({ openIn: 口 });
+    const 甲 = await 出るまで(`${ROOT}/甲`);
+    const 甲の印 = 甲.querySelector('[data-testid="folder-opened-mark"]');
+    const 甲の札 = 甲.querySelector('[data-testid="folder-project-mark"]');
+    expect(甲の印).not.toBeNull();
+    expect(甲の札).not.toBeNull();
+    expect(甲の印?.parentElement).toBe(甲の札?.parentElement);
+    expect(甲の札?.parentElement).toHaveClass("ml-auto");
+    expect(甲の札).not.toHaveClass("ml-auto");
+    const 乙 = 要る行(`${ROOT}/乙`);
+    expect(乙.querySelector('[data-testid="folder-opened-mark"]')).toBeNull();
+    expect(乙.querySelector('[data-testid="folder-project-mark"]')).toHaveClass("ml-auto");
+    unmount();
+
+    置く();
+    const 乙2 = await 出るまで(`${ROOT}/乙`);
+    expect(乙2.querySelector('[data-testid="folder-project-mark"]')).toHaveClass("ml-auto");
+  });
 });
 
 describe("コピー（深い枝）", () => {

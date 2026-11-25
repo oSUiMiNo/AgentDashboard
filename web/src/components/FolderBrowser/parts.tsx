@@ -155,6 +155,7 @@ export function FolderRow({
   onCopy,
   openIn,
   menu = "row",
+  opened,
 }: {
   as?: "li" | "div"
   density?: "list" | "tree"
@@ -177,13 +178,14 @@ export function FolderRow({
   /** エクスプローラ・VSCode で開く口。**親PC の画面のサイドバーだけ**が渡す（設計§7-1） */
   openIn?: OpenInProp
   menu?: "row" | "outside"
+  opened?: boolean
 }) {
   const openable = entry.kind === "dir"
   // **`file` に限る。** `symlink` を混ぜると、いままで押せなかった行が押せるようになる
   const linkable = entry.kind === "file" && onPickFile !== undefined
   const pressable = openable || linkable
   // 送ったパスの文字のままと、正規化した実体のパスの両方で突き合わせる（設計§3-6）
-  const 開いている = openIn !== undefined && isOpenedIn(openIn.view, full)
+  const 開いている = opened ?? (openIn !== undefined && isOpenedIn(openIn.view, full))
 
   const ツリー = density === "tree"
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
@@ -242,16 +244,25 @@ export function FolderRow({
       <span title={entry.name} className="min-w-0 truncate">
         {entry.name}
       </span>
-      {openIn === undefined
-        ? entry.is_project && 札("ml-auto")
-        : (開いている || entry.is_project) && (
-            // **行末へ寄せるのは入れ物の側。** 印だけ・札だけ・両方のどれでも行末に並ぶ
-            // （開く口の設計§7-4）
-            <span className="ml-auto flex shrink-0 items-center gap-1">
-              {開いている && <OpenedMark />}
-              {entry.is_project && 札("")}
-            </span>
-          )}
+      {ツリー
+        ? 開いている
+          ? (
+              <span className="ml-auto flex shrink-0 items-center gap-1">
+                <OpenedMark />
+                {entry.is_project && 札("")}
+              </span>
+            )
+          : entry.is_project && 札("ml-auto")
+        : openIn === undefined
+          ? entry.is_project && 札("ml-auto")
+          : (開いている || entry.is_project) && (
+              // **行末へ寄せるのは入れ物の側。** 印だけ・札だけ・両方のどれでも行末に並ぶ
+              // （開く口の設計§7-4）
+              <span className="ml-auto flex shrink-0 items-center gap-1">
+                {開いている && <OpenedMark />}
+                {entry.is_project && 札("")}
+              </span>
+            )}
     </>
   )
 
