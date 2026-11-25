@@ -532,6 +532,16 @@ async function hostIdOf(page: Page, agentName?: string): Promise<string> {
  * 専用画面の既定は構造化ビューなので、**ターミナルのタブへ切り替えてから**返す。
  * 隠れている要素はクリックできず、端末へ打ち込む手順（[`typeLine`]）が使えないため。
  */
+export async function フォルダを展開した状態にする(panel: Locator, name: string, path?: string) {
+  const row =
+    path === undefined
+      ? panel.locator(`[data-testid="folder-entry"][data-name="${name}"]`)
+      : panel.locator(`[data-testid="folder-entry"][data-path="${path}"]`)
+  await expect(row).toHaveCount(1)
+  if ((await row.getAttribute('aria-expanded')) !== 'true') await row.click()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+}
+
 export async function openSession(page: Page, tile: Locator) {
   // **開くのはダブルクリック**（並べ替え設計§4-1）。シングルは「選ぶ」になった
   await tile.dblclick()

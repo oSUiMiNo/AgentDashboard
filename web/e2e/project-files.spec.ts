@@ -8,6 +8,7 @@ import {
   openDashboard,
   spawnSession,
   WORK_DIR,
+  フォルダを展開した状態にする,
 } from "./helpers";
 
 /**
@@ -1503,7 +1504,7 @@ test("変えた幅は、読み込み直しても残る", async ({ page }) => {
   );
 });
 
-test("掘った位置は、読み込み直しても残る", async ({ page }) => {
+test("展開していたフォルダは、読み込み直しても展開したまま残る", async ({ page }) => {
   await openDashboard(page);
   const group = await addProject(page, PROJECT_DIR);
   await group.dblclick({ position: { x: 5, y: 5 } });
@@ -1511,22 +1512,20 @@ test("掘った位置は、読み込み直しても残る", async ({ page }) => 
   const panel = page.getByTestId("project-files-panel");
   await expect(panel).toBeVisible();
 
-  // **2段掘る。** 1段では、覚えていなくても同じ場所に見えてしまう
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
-  await panel.getByTestId("folder-entry").filter({ hasText: DEEP }).click();
-  const 掘った先 = path.join(PROJECT_DIR, "MyDocs", DEEP);
-  await expect(page.getByTestId("folder-browser")).toHaveAttribute(
-    "data-path",
-    掘った先,
-  );
+  // **2段展開する。** 1段では、覚えていなくても同じ場所に見えてしまう
+  const 中 = path.join(PROJECT_DIR, "MyDocs");
+  const 掘った先 = path.join(中, DEEP);
+  const 奥 = path.join(掘った先, "奥.md");
+  await フォルダを展開した状態にする(panel, "MyDocs", 中);
+  await フォルダを展開した状態にする(panel, DEEP, 掘った先);
+  await expect(行(panel, 奥)).toHaveCount(1);
 
   await page.reload();
 
-  // **押し直さない。** 開閉も覚えているので、開いた状態で戻ってくる
-  await expect(page.getByTestId("folder-browser")).toHaveAttribute(
-    "data-path",
-    掘った先,
-  );
+  // **押し直さない。** 開閉も展開も覚えているので、開いて展開した状態で戻ってくる
+  await expect(行(panel, 中)).toHaveAttribute("aria-expanded", "true");
+  await expect(行(panel, 掘った先)).toHaveAttribute("aria-expanded", "true");
+  await expect(行(panel, 奥)).toHaveCount(1);
 });
 
 test("開いていたファイルは、読み込み直しても残る", async ({ page }) => {
@@ -1546,40 +1545,75 @@ test("開いていたファイルは、読み込み直しても残る", async ({
   );
 });
 
-test("覚えていた場所が消えていたら、黙って起点へ落ちる", async ({ page }) => {
+function 行(panel: Locator, full: string): Locator {
+  return panel.locator(`[data-testid="folder-entry"][data-path="${full}"]`);
+}
+
+async function 覚えの展開(page: Page): Promise<unknown> {
+  return await page.evaluate((key) => {
+    const table = JSON.parse(globalThis.localStorage.getItem("agentdashboard.project-files-place") ?? "{}") as Record<
+      string,
+      { expanded?: unknown }
+    >;
+    return table[key]?.expanded ?? null;
+  }, JSON.stringify(["local", PROJECT_DIR]));
+}
+
+async function 消えるを展開する(page: Page, 消える: string): Promise<Locator> {
+  await openDashboard(page);
+  const group = await addProject(page, PROJECT_DIR);
+  await group.dblclick({ position: { x: 5, y: 5 } });
+  await page.getByTestId("project-files-toggle").click();
+  const panel = page.getByTestId("project-files-panel");
+  await expect(panel).toBeVisible();
+  await フォルダを展開した状態にする(panel, "MyDocs", path.join(PROJECT_DIR, "MyDocs"));
+  await フォルダを展開した状態にする(panel, "消える", 消える);
+  await expect.poll(() => 覚えの展開(page)).toContain(消える);
+  return panel;
+}
+
+test("覚えていた展開中のフォルダが消えていたら、断り文を出さずにその枝を畳む", async ({ page }) => {
   const 消える = path.join(PROJECT_DIR, "MyDocs", "消える");
   fs.mkdirSync(消える, { recursive: true });
   try {
-    await openDashboard(page);
-    const group = await addProject(page, PROJECT_DIR);
-    await group.dblclick({ position: { x: 5, y: 5 } });
-    await page.getByTestId("project-files-toggle").click();
-    const panel = page.getByTestId("project-files-panel");
-    await expect(panel).toBeVisible();
+    const panel = await 消えるを展開する(page, 消える);
 
-    await panel
-      .getByTestId("folder-entry")
-      .filter({ hasText: "MyDocs" })
-      .click();
-    await panel
-      .getByTestId("folder-entry")
-      .filter({ hasText: "消える" })
-      .click();
-    await expect(page.getByTestId("folder-browser")).toHaveAttribute(
-      "data-path",
-      消える,
+    let 断った = 0;
+    await page.route(
+      (url) => url.pathname.endsWith("/dir") && url.searchParams.get("path") === 消える,
+      async (route) => {
+        断った += 1;
+        await route.fulfill({ status: 404, body: "その場所は見つかりません" });
+      },
     );
+    await page.reload();
+
+    await expect.poll(() => 断った, "その枝の問い合わせが 404 を受け取ったこと").toBeGreaterThan(0);
+    await expect(行(panel, 消える)).toHaveAttribute("aria-expanded", "false");
+    await expect(panel.getByTestId("folder-error")).toHaveCount(0);
+    await expect(行(panel, path.join(PROJECT_DIR, "MyDocs"))).toHaveAttribute("aria-expanded", "true");
+    await expect.poll(() => 覚えの展開(page)).not.toContain(消える);
+  } finally {
+    await page.unroute(() => true);
+    fs.rmSync(消える, { recursive: true, force: true });
+  }
+});
+
+test("覚えていた展開中のフォルダを本当に消して読み込み直しても、断り文を出さず、ほかの行は出ている", async ({ page }) => {
+  const 消える = path.join(PROJECT_DIR, "MyDocs", "消える");
+  fs.mkdirSync(消える, { recursive: true });
+  try {
+    const panel = await 消えるを展開する(page, 消える);
 
     // **実際に消してから読み込み直す。** 覚えている先が無くなった状況を作る
     fs.rmSync(消える, { recursive: true, force: true });
     await page.reload();
 
-    await expect(page.getByTestId("folder-browser")).toHaveAttribute(
-      "data-path",
-      PROJECT_DIR,
-    );
+    await expect(行(panel, path.join(PROJECT_DIR, "MyDocs"))).toHaveAttribute("aria-expanded", "true");
+    await expect(行(panel, path.join(PROJECT_DIR, "MyDocs", DEEP))).toHaveCount(1);
+    await expect(行(panel, 消える)).toHaveCount(0);
     // **断り文を出さない。** 覚えていた場所は、利用者がいま押したものではない
-    await expect(page.getByTestId("folder-error")).toHaveCount(0);
+    await expect(panel.getByTestId("folder-error")).toHaveCount(0);
   } finally {
     fs.rmSync(消える, { recursive: true, force: true });
   }

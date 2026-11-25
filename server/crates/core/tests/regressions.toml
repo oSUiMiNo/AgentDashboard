@@ -437,6 +437,7 @@ tests       = [
 ]
 breaks_when = "filesPlace.ts の isUnder の判定を外す（実行レポート フェーズ2 の表で2本が落ちた）"
 verified    = false
+retired     = { by = "サイドバーのフォルダ一覧をVSCodeのように展開と畳み込みで辿るツリーにする", on = "2026-11-25" }
 
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/リロードするとファイルビューが勝手に閉じる"
