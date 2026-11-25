@@ -8,6 +8,7 @@ import {
   holdTouch,
   openDashboard,
   WORK_DIR,
+  フォルダを展開した状態にする,
 } from './helpers'
 
 /**
@@ -160,6 +161,7 @@ test.describe('指で触る画面', () => {
     // メニュー自体は出る（コピーは使える）
     await expect(page.getByTestId('folder-menu-copy-abs')).toBeVisible()
     await expect(page.getByTestId('folder-menu-open-tab')).toHaveCount(0)
+    await expect(MyDocsの行(panel)).toHaveAttribute('aria-expanded', 'false')
   })
 })
 
@@ -174,13 +176,18 @@ function 横の答え(段: Locator): Locator {
   return 段.locator('xpath=..').getByTestId('folder-crumb-copy-state')
 }
 
-async function MyDocsへ入る(panel: Locator) {
-  await panel.getByTestId('folder-entry').filter({ hasText: DIR }).click()
-  await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
-    'data-path',
-    path.join(PROJECT_DIR, DIR),
-  )
-  await expect(panel.getByTestId('folder-entry')).toHaveCount(長い一覧の数)
+function MyDocsの行(panel: Locator): Locator {
+  return panel.locator(`[data-testid="folder-entry"][data-path="${path.join(PROJECT_DIR, DIR)}"]`)
+}
+
+async function MyDocsを展開する(panel: Locator) {
+  await フォルダを展開した状態にする(panel, DIR, path.join(PROJECT_DIR, DIR))
+  await expect(panel.getByTestId('folder-entry')).toHaveCount(2 + 長い一覧の数)
+}
+
+async function 動いていない(panel: Locator, 行の数: number, MyDocsが展開している: boolean) {
+  await expect(MyDocsの行(panel)).toHaveAttribute('aria-expanded', String(MyDocsが展開している))
+  await expect(panel.getByTestId('folder-entry')).toHaveCount(行の数)
 }
 
 async function 止まった真ん中(page: Page, target: Locator): Promise<{ x: number; y: number }> {
@@ -203,11 +210,11 @@ async function 写したもの(page: Page): Promise<string> {
 test.describe('マウスで右クリック（パンくずと余白・追加の要望 2026-11-23）', () => {
   test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
-  test('パンくずのフォルダ名を右クリックすると、そのフォルダを相手にメニューが出て、移動はしない', async ({
+  test('PJT 名の段を右クリックすると、PJT のルートを相手にメニューが出て、展開は動かない', async ({
     page,
   }) => {
     const panel = await openSidebar(page)
-    await MyDocsへ入る(panel)
+    await MyDocsを展開する(panel)
 
     const 段 = パンくず(panel, PJT_NAME)
     await 段.click({ button: 'right' })
@@ -219,10 +226,7 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
     await expect(横の答え(段)).toHaveText('コピーしました')
     expect(await 写したもの(page)).toBe(PROJECT_DIR)
     await expect(panel.getByTestId('folder-crumb-copy-state')).toHaveCount(1)
-    await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
-      'data-path',
-      path.join(PROJECT_DIR, DIR),
-    )
+    await 動いていない(panel, 2 + 長い一覧の数, true)
   })
 
   test('「…」は押しても移動せず、本物のマウスで右クリックすると起点より上のフォルダのメニューが出る', async ({
@@ -238,6 +242,7 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
     await page.waitForTimeout(300)
     await expect(page.getByTestId('folder-menu')).toHaveCount(0)
     await expect(panel.getByTestId('folder-browser')).toHaveAttribute('data-path', PROJECT_DIR)
+    await 動いていない(panel, 2, false)
 
     await page.mouse.click(真ん中.x, 真ん中.y, { button: 'right' })
     await expect(page.getByTestId('folder-menu')).toHaveCount(1)
@@ -247,9 +252,10 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
     await expect(横の答え(点)).toHaveText('コピーしました')
     expect(await 写したもの(page)).toBe(path.basename(起点より上))
     await expect(panel.getByTestId('folder-browser')).toHaveAttribute('data-path', PROJECT_DIR)
+    await 動いていない(panel, 2, false)
   })
 
-  test('一覧の余白を右クリックすると、いまのフォルダを相手にメニューが出て、答えはパンくずの末尾の横に出る', async ({
+  test('一覧の余白を右クリックすると、PJT のルートを相手にメニューが出て、答えは PJT 名の段の下に出る（MyDocs を展開していても）', async ({
     page,
   }) => {
     const panel = await openSidebar(page)
@@ -261,13 +267,20 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
 
     await expect(横の答え(パンくず(panel, PJT_NAME))).toHaveText('コピーしました')
     expect(await 写したもの(page)).toBe(PROJECT_DIR)
+
+    await MyDocsを展開する(panel)
+    await panel.getByTestId('folder-blank').click({ button: 'right' })
+    await expect(page.getByTestId('folder-menu')).toHaveCount(1)
+    await expect(page.getByTestId('folder-name-full')).toHaveText(PJT_NAME)
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('folder-menu')).toHaveCount(0)
   })
 
   test('余白の行を足しても、行の高さと並びは変わらない（短い一覧でも長い一覧でも）', async ({
     page,
   }) => {
     const panel = await openSidebar(page)
-    const 一覧 = panel.getByTestId('folder-browser').locator('ul')
+    const 一覧 = panel.locator(`[data-testid="folder-children"][data-path="${PROJECT_DIR}"]`)
 
     const 測る = () =>
       一覧.evaluate((ul) => {
@@ -315,9 +328,9 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
     expect(短い.中身の高さ).toBe(短い.器の高さ)
     expect(短い.余白の高さ).toBeGreaterThan(100)
 
-    await MyDocsへ入る(panel)
+    await MyDocsを展開する(panel)
     const 長い = await 測る()
-    expect(長い.行).toHaveLength(長い一覧の数)
+    expect(長い.行).toHaveLength(2)
     expect(長い.行).toEqual(await 余白なしで測る())
     expect(長い.余白の上と最後の行の下).toBeLessThan(0.5)
     expect(長い.中身の高さ).toBeGreaterThan(長い.器の高さ)
@@ -329,7 +342,7 @@ test.describe('マウスで右クリック（パンくずと余白・追加の�
 test.describe('指で触る画面（パンくずと余白・追加の要望 2026-11-23）', () => {
   test.use({ hasTouch: true })
 
-  test('余白を長押しすると、いまのフォルダのメニューが1つだけ出る', async ({ page }) => {
+  test('余白を長押しすると、PJT のルートのメニューが1つだけ出る', async ({ page }) => {
     const panel = await openSidebar(page)
 
     await 長押しで開く(page, panel.getByTestId('folder-blank'))
@@ -349,9 +362,9 @@ test.describe('指で触る画面（パンくずと余白・追加の要望 2026
     await expect(page.getByTestId('folder-name-full')).toHaveText(DIR)
   })
 
-  test('パンくずのフォルダ名を長押しすると、メニューが出て、移動はしない', async ({ page }) => {
+  test('PJT 名の段を長押しすると、メニューが出て、展開は動かない', async ({ page }) => {
     const panel = await openSidebar(page)
-    await MyDocsへ入る(panel)
+    await MyDocsを展開する(panel)
 
     await 長押しで開く(page, パンくず(panel, PJT_NAME))
 
@@ -360,23 +373,20 @@ test.describe('指で触る画面（パンくずと余白・追加の要望 2026
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('folder-menu')).toHaveCount(0)
     await page.waitForTimeout(500)
-    await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
-      'data-path',
-      path.join(PROJECT_DIR, DIR),
-    )
+    await 動いていない(panel, 2 + 長い一覧の数, true)
   })
 })
 
 test.describe('パンくずの答えは場所を取らない（追加の要望 2026-11-23）', () => {
   test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
-  for (const 場面 of ['PJT のルート', 'MyDocs の中'] as const) {
+  for (const 場面 of ['PJT のルート', 'MyDocs を展開した状態'] as const) {
     test(`${場面}でパンくずから写して答えが出ても、パンくずの段と一覧の行は動かない`, async ({
       page,
     }) => {
       const panel = await openSidebar(page)
-      if (場面 === 'MyDocs の中') {
-        await MyDocsへ入る(panel)
+      if (場面 === 'MyDocs を展開した状態') {
+        await MyDocsを展開する(panel)
       }
       const 段 = パンくず(panel, PJT_NAME)
       const 先頭の行 = panel.getByTestId('folder-entry').first()
