@@ -124,22 +124,65 @@ function 送り直しを見張る(
   return 外す
 }
 
+const 送る前の手 = [...利用者の手, 'click'] as const
+
+function 触るまで待つ(箱: HTMLElement, 触った: () => void): () => void {
+  const 初め = 箱.scrollTop
+  let 待っている = true
+  function 外す() {
+    if (!待っている) {
+      return
+    }
+    待っている = false
+    for (const 名 of 送る前の手) {
+      箱.removeEventListener(名, 手)
+    }
+    箱.removeEventListener('scroll', 動いた)
+  }
+  function 手() {
+    外す()
+    触った()
+  }
+  function 動いた() {
+    if (Math.abs(箱.scrollTop - 初め) > 1) {
+      手()
+    }
+  }
+  for (const 名 of 送る前の手) {
+    箱.addEventListener(名, 手, { passive: true })
+  }
+  箱.addEventListener('scroll', 動いた, { passive: true })
+  return 外す
+}
+
 function useRevealCurrent(器: RefObject<HTMLUListElement | null>, current: string | undefined) {
   const 送った = useRef(false)
+  const 取り付けた時のファイル = useRef(current)
   const 今のファイル = useRef(current)
+  const 待ちを外す = useRef<(() => void) | null>(null)
   const 見張りを外す = useRef<(() => void) | null>(null)
 
   useLayoutEffect(() => {
     今のファイル.current = current
     const 箱 = 器.current
-    if (送った.current || current === undefined || 箱 === null) {
+    if (送った.current || 箱 === null) {
       return
     }
+    const 待ちを終える = () => {
+      送った.current = true
+      待ちを外す.current?.()
+      待ちを外す.current = null
+    }
+    if (current === undefined || current !== 取り付けた時のファイル.current) {
+      待ちを終える()
+      return
+    }
+    待ちを外す.current ??= 触るまで待つ(箱, 待ちを終える)
     const 行 = 行を引く(箱, current)
     if (行 === undefined) {
       return
     }
-    送った.current = true
+    待ちを終える()
     const 置いた = 送る(箱, 行)
     見張りを外す.current = 送り直しを見張る(箱, 置いた, () =>
       今のファイル.current === current ? 行を引く(箱, current) : null,
@@ -148,6 +191,8 @@ function useRevealCurrent(器: RefObject<HTMLUListElement | null>, current: stri
 
   useLayoutEffect(
     () => () => {
+      待ちを外す.current?.()
+      待ちを外す.current = null
       見張りを外す.current?.()
       見張りを外す.current = null
       送った.current = false

@@ -949,7 +949,7 @@ describe("送り", () => {
 
   const 送り直しの目当て = `${ROOT}/MyDocs/sub/a.md`;
 
-  function 送りの場() {
+  function 送りの場(目当て: string[] = [送り直しの目当て]) {
     let 器の高さ = 100;
     const 器か = (each: Element) =>
       each.getAttribute("data-testid") === "folder-children" &&
@@ -964,7 +964,7 @@ describe("送り", () => {
         }
         if (
           this.getAttribute("data-testid") === "folder-entry" &&
-          this.getAttribute("data-path") === 送り直しの目当て
+          目当て.includes(this.getAttribute("data-path") ?? "")
         ) {
           return 矩形(500 - (子の一覧(ROOT)?.scrollTop ?? 0), 28);
         }
@@ -1169,6 +1169,238 @@ describe("送り", () => {
       場.縮める(86);
       場.知らせる();
       expect(器.scrollTop).toBe(428);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  const 止める枝 = `${ROOT}/MyDocs/sub`;
+
+  async function 止まるまで(口: 偽の口の記録, path: string) {
+    await waitFor(() => expect(口.止めた.some((each) => each.path === path)).toBe(true));
+  }
+
+  function 止めたのを返す(口: 偽の口の記録, path: string, 中身: 定義) {
+    for (const each of 口.止めた.filter((e) => e.path === path)) {
+      each.返す(中身);
+    }
+  }
+
+  function 最上段の器(): HTMLElement {
+    const 器 = 子の一覧(ROOT);
+    if (器 === null) {
+      throw new Error("最上段の器が無い");
+    }
+    return 器;
+  }
+
+  it("畳んだ枝の中のファイルを開いたまま取り付け、利用者がその枝を押しても、キーで展開しても、器を送らない", async () => {
+    const 的 = `${ROOT}/src/main.ts`;
+    const 場面: [string, () => Promise<void>][] = [
+      [
+        "押して展開",
+        async () => {
+          await userEvent.click(要る行(`${ROOT}/src`));
+        },
+      ],
+      [
+        "キーで展開",
+        async () => {
+          要る行(`${ROOT}/src`).focus();
+          await userEvent.keyboard("{Enter}");
+        },
+      ],
+    ];
+    for (const [名, 展開する] of 場面) {
+      resetListings();
+      const 場 = 送りの場([的]);
+      try {
+        偽の口(基本);
+        const { unmount } = 置く({ current: 的 });
+        await 出るまで(`${ROOT}/src`);
+        await 展開する();
+        await 出るまで(的);
+        await 流す();
+        const 器 = 最上段の器();
+        expect(要る行(的).getBoundingClientRect().top + 器.scrollTop, 名).toBeGreaterThanOrEqual(100);
+        expect(器.scrollTop, 名).toBe(0);
+        expect(場.器を見張っている(), 名).toBe(false);
+        unmount();
+      } finally {
+        場.戻す();
+      }
+    }
+  });
+
+  it("取り付けた後、行が描かれる前に利用者が器に触ったら（ホイール・指・押す・click だけ・キー・送りの位置が動く scroll）、あとで行が描かれても送らない", async () => {
+    const 操作: [string, (器: HTMLElement) => void, number][] = [
+      ["ホイール", (器) => fireEvent.wheel(器), 0],
+      ["指", (器) => fireEvent.touchStart(器), 0],
+      ["押す", (器) => fireEvent.pointerDown(器), 0],
+      ["click だけ", (器) => fireEvent.click(器), 0],
+      ["キー", (器) => fireEvent.keyDown(器, { key: "PageDown" }), 0],
+      [
+        "送りの位置が動く scroll",
+        (器) => {
+          器.scrollTop = 300;
+          fireEvent.scroll(器);
+        },
+        300,
+      ],
+    ];
+    for (const [名, 触る, 触った後] of 操作) {
+      resetListings();
+      const 場 = 送りの場();
+      try {
+        const 口 = 偽の口({ ...基本, [止める枝]: "止める" });
+        const { unmount } = 置く({ loadExpanded: 送り直しの覚え, current: 送り直しの目当て });
+        await 出るまで(止める枝);
+        await 止まるまで(口, 止める枝);
+        const 器 = 最上段の器();
+        expect(行(送り直しの目当て), 名).toBeNull();
+        expect(器.scrollTop, 名).toBe(0);
+
+        触る(器);
+        止めたのを返す(口, 止める枝, ["a.md"]);
+        await 流す();
+        await 出るまで(送り直しの目当て);
+        expect(器.scrollTop, 名).toBe(触った後);
+        expect(場.器を見張っている(), 名).toBe(false);
+        unmount();
+      } finally {
+        場.戻す();
+      }
+    }
+  });
+
+  it("利用者が器に触る前に読みが届いて行が遅れて描かれたら、そのとき1回送って見張る（送りの位置が動かない scroll は触ったとみなさない）", async () => {
+    const 場 = 送りの場();
+    try {
+      const 口 = 偽の口({ ...基本, [止める枝]: "止める" });
+      置く({ loadExpanded: 送り直しの覚え, current: 送り直しの目当て });
+      await 出るまで(止める枝);
+      await 止まるまで(口, 止める枝);
+      const 器 = 最上段の器();
+      expect(行(送り直しの目当て)).toBeNull();
+      expect(器.scrollTop).toBe(0);
+
+      fireEvent.scroll(器);
+      止めたのを返す(口, 止める枝, ["a.md"]);
+      await 流す();
+      await 出るまで(送り直しの目当て);
+      expect(器.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(true);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("取り付けた後にいま開いているファイルが変わったら、その後どの行が描かれても送らない（取り付けた時のファイルへ戻しても送らない）", async () => {
+    const 取り付けた時 = `${ROOT}/src/main.ts`;
+    const 別の = 送り直しの目当て;
+    const 場 = 送りの場([取り付けた時, 別の]);
+    try {
+      const 口 = 偽の口({ ...基本, [止める枝]: "止める", [`${ROOT}/src`]: "止める" });
+      const 覚え = () => [`${ROOT}/MyDocs`, 止める枝, `${ROOT}/src`];
+      const 描く = (current: string) => (
+        <FolderTree
+          host="local"
+          root={ROOT}
+          loadExpanded={覚え}
+          onExpandedChange={vi.fn()}
+          onPickFile={vi.fn()}
+          current={current}
+        />
+      );
+      const { rerender } = 置く({ loadExpanded: 覚え, current: 取り付けた時 });
+      await 出るまで(止める枝);
+      await 止まるまで(口, 止める枝);
+      await 止まるまで(口, `${ROOT}/src`);
+      const 器 = 最上段の器();
+
+      rerender(描く(別の));
+      止めたのを返す(口, 止める枝, ["a.md"]);
+      await 流す();
+      await 出るまで(別の);
+      expect(器.scrollTop, "別のファイルへ変わった後").toBe(0);
+      expect(場.器を見張っている(), "別のファイルへ変わった後").toBe(false);
+
+      rerender(描く(取り付けた時));
+      止めたのを返す(口, `${ROOT}/src`, ["main.ts"]);
+      await 流す();
+      await 出るまで(取り付けた時);
+      expect(器.scrollTop, "取り付けた時のファイルへ戻した後").toBe(0);
+      expect(場.器を見張っている(), "取り付けた時のファイルへ戻した後").toBe(false);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("打ち切った後は、描き直しても行を探さない", async () => {
+    偽の口(基本);
+    const 的 = `${ROOT}/src/main.ts`;
+    const 覚え = (): string[] => [];
+    const 描く = () => (
+      <FolderTree
+        host="local"
+        root={ROOT}
+        loadExpanded={覚え}
+        onExpandedChange={vi.fn()}
+        onPickFile={vi.fn()}
+        current={的}
+      />
+    );
+    const { rerender } = 置く({ loadExpanded: 覚え, current: 的 });
+    await 出るまで(`${ROOT}/src`);
+    await 流す();
+    const 器 = 最上段の器();
+    const 探す = vi.spyOn(器, "querySelectorAll");
+    const 探した = () =>
+      探す.mock.calls.filter(([what]) => what === '[data-testid="folder-entry"]').length;
+    try {
+      rerender(描く());
+      expect(探した(), "打ち切る前の描き直し").toBeGreaterThan(0);
+
+      fireEvent.wheel(器);
+      const 打ち切った時 = 探した();
+      rerender(描く());
+      rerender(描く());
+      fireEvent.click(要る行(`${ROOT}/MyDocs`));
+      await 出るまで(`${ROOT}/MyDocs/sub`);
+      await 流す();
+      expect(探した(), "打ち切った後の描き直し").toBe(打ち切った時);
+    } finally {
+      探す.mockRestore();
+    }
+  });
+
+  it("StrictMode で取り付けても、行が描かれる前に利用者が器に触ったら、あとで行が描かれても送らない", async () => {
+    const 場 = 送りの場();
+    try {
+      const 口 = 偽の口({ ...基本, [止める枝]: "止める" });
+      render(
+        <StrictMode>
+          <FolderTree
+            host="local"
+            root={ROOT}
+            loadExpanded={送り直しの覚え}
+            onExpandedChange={vi.fn()}
+            onPickFile={vi.fn()}
+            current={送り直しの目当て}
+          />
+        </StrictMode>,
+      );
+      await 出るまで(止める枝);
+      await 止まるまで(口, 止める枝);
+      const 器 = 最上段の器();
+      expect(行(送り直しの目当て)).toBeNull();
+
+      fireEvent.wheel(器);
+      止めたのを返す(口, 止める枝, ["a.md"]);
+      await 流す();
+      await 出るまで(送り直しの目当て);
+      expect(器.scrollTop).toBe(0);
+      expect(場.器を見張っている()).toBe(false);
     } finally {
       場.戻す();
     }
