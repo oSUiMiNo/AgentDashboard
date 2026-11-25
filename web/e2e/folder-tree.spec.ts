@@ -643,6 +643,109 @@ test.describe("サイドバーのツリー（マウス）", () => {
     expect(Math.abs(縮めた.scrollTop - 回した.S2)).toBeLessThanOrEqual(1);
   });
 
+  test("開き直した後に、いま開いているファイルが器より下に来る畳んだ枝を押して展開しても、器の送りの位置は動かない", async ({ page }) => {
+    const panel = await PJT専用画面を開く(page);
+    await フォルダを展開した状態にする(panel, "たくさん", たくさん);
+    const 的 = path.join(たくさん, "項目-100.md");
+    await 行(panel, 的).click();
+    await expect(行(panel, 的)).toHaveAttribute("aria-current", "page");
+    await 行(panel, たくさん).click();
+    await expect(行(panel, たくさん)).toHaveAttribute("aria-expanded", "false");
+    await 閉じる(page, panel);
+    await page.getByTestId("project-files-toggle").click();
+    await expect(panel).toBeVisible();
+    await expect(panel.getByTestId("folder-crumbs-row")).toBeVisible();
+    await expect(行(panel, 的)).toHaveCount(0);
+    const 前 = await page.evaluate((sel) => document.querySelector<HTMLElement>(sel)?.scrollTop ?? null, 最上段);
+    expect(前).not.toBeNull();
+    await 行(panel, たくさん).click();
+    await expect(行(panel, 的)).toHaveAttribute("aria-current", "page");
+    await 二つの絵(page);
+    await page.waitForTimeout(300);
+    const 値 = await page.evaluate(
+      ({ sel, p, 押した }) => {
+        const ul = document.querySelector<HTMLElement>(sel);
+        const row = document.querySelector<HTMLElement>(`${sel} [data-testid="folder-entry"][data-path="${p}"]`);
+        const pressed = document.querySelector<HTMLElement>(`${sel} [data-testid="folder-entry"][data-path="${押した}"]`);
+        if (ul === null || row === null || pressed === null) return null;
+        const u = ul.getBoundingClientRect();
+        const r = row.getBoundingClientRect();
+        const q = pressed.getBoundingClientRect();
+        return {
+          scrollTop: ul.scrollTop,
+          clientHeight: ul.clientHeight,
+          ulTop: u.top,
+          ulBottom: u.bottom,
+          pressedTop: q.top,
+          pressedBottom: q.bottom,
+          rowTop: r.top,
+        };
+      },
+      { sel: 最上段, p: 的, 押した: たくさん },
+    );
+    確かめを書く("N23", { 前, ...値 });
+    expect(値).not.toBeNull();
+    if (値 === null || 前 === null) return;
+    expect(値.rowTop - 値.ulTop + 値.scrollTop).toBeGreaterThanOrEqual(値.clientHeight);
+    expect(Math.abs(値.scrollTop - 前)).toBeLessThanOrEqual(1);
+    expect(値.pressedTop).toBeGreaterThanOrEqual(値.ulTop - 0.5);
+    expect(値.pressedBottom).toBeLessThanOrEqual(値.ulBottom + 0.5);
+  });
+
+  test("読み込み直した直後（中身の控えが空で、行が遅れて描かれる）にサイドバーを開いても、いま開いているファイルの行が最上段の器の中に見える", async ({ page }) => {
+    const panel0 = await URLでPJT専用画面を開く(page);
+    await フォルダを展開した状態にする(panel0, "たくさん", たくさん);
+    const 的 = path.join(たくさん, "項目-100.md");
+    await 行(panel0, 的).click();
+    await expect(行(panel0, 的)).toHaveAttribute("aria-current", "page");
+    let 遅らせた = 0;
+    await page.route(
+      (url) => url.pathname.endsWith("/dir") && url.searchParams.get("path") === たくさん,
+      async (route) => {
+        遅らせた += 1;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        await route.continue();
+      },
+    );
+    try {
+      await page.reload();
+      await expect(page.getByTestId("group-view")).toBeVisible();
+      const panel = await サイドバーを開く(page);
+      const 開いた直後 = await 行(panel, 的).count();
+      await expect(行(panel, 的)).toHaveAttribute("aria-current", "page", { timeout: 15_000 });
+      await expect(panel.getByTestId("folder-crumbs-row")).toBeVisible();
+      await page.waitForTimeout(2_100);
+      const 値 = await page.evaluate(
+        ({ sel, p }) => {
+          const ul = document.querySelector<HTMLElement>(sel);
+          const row = document.querySelector<HTMLElement>(`${sel} [data-testid="folder-entry"][data-path="${p}"]`);
+          if (ul === null || row === null) return null;
+          const u = ul.getBoundingClientRect();
+          const r = row.getBoundingClientRect();
+          return {
+            scrollTop: ul.scrollTop,
+            ulTop: u.top,
+            ulBottom: u.bottom,
+            rowTop: r.top,
+            rowBottom: r.bottom,
+            ariaCurrent: row.getAttribute("aria-current"),
+          };
+        },
+        { sel: 最上段, p: 的 },
+      );
+      確かめを書く("N24", { 遅らせた, 開いた直後, ...値 });
+      expect(遅らせた).toBeGreaterThan(0);
+      expect(開いた直後).toBe(0);
+      expect(値).not.toBeNull();
+      if (値 === null) return;
+      expect(値.scrollTop).toBeGreaterThan(0);
+      expect(値.rowTop).toBeGreaterThanOrEqual(値.ulTop - 0.5);
+      expect(値.rowBottom).toBeLessThanOrEqual(値.ulBottom + 0.5);
+    } finally {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+    }
+  });
+
   test("前の版が書いた覚え（掘った場所だけで展開の並びが無い）を読むと、その場所までの枝が展開した形で出る", async ({ page }) => {
     await openDashboard(page);
     const group = await addProject(page, ROOT);
