@@ -341,9 +341,18 @@ test.describe("サイドバーのツリー（マウス）", () => {
     await 行(panel, MYDOCS).click();
     await expect(行(panel, MYDOCS)).toHaveAttribute("aria-expanded", "false");
     const 畳んだ後 = await 印の色(MYDOCS);
-    確かめを書く("N5", { 展開, 閉じ, 畳んだ後 });
+    const 試し札 = await page.evaluate(() => {
+      const 札 = document.createElement("span");
+      札.style.color = "color-mix(in oklch, var(--type-folder) 55%, var(--card))";
+      document.body.appendChild(札);
+      const 色 = getComputedStyle(札).color;
+      札.remove();
+      return 色;
+    });
+    確かめを書く("N5", { 展開, 閉じ, 畳んだ後, 試し札 });
     expect(展開).not.toBe(閉じ);
     expect(畳んだ後).toBe(閉じ);
+    expect(閉じ).toBe(試し札);
   });
 
   test("展開した行には灰色の面が付かず、乗せたときは閉じた行に乗せたときと同じ色になる", async ({ page }) => {
