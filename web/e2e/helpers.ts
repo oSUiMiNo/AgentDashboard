@@ -526,12 +526,6 @@ async function hostIdOf(page: Page, agentName?: string): Promise<string> {
   return connected.length === 1 ? connected[0].id : 'local'
 }
 
-/**
- * 小窓をクリックして専用画面を開き、擬似 claude の起動を待つ。
- *
- * 専用画面の既定は構造化ビューなので、**ターミナルのタブへ切り替えてから**返す。
- * 隠れている要素はクリックできず、端末へ打ち込む手順（[`typeLine`]）が使えないため。
- */
 export async function フォルダを展開した状態にする(panel: Locator, name: string, path?: string) {
   const row =
     path === undefined
@@ -542,6 +536,12 @@ export async function フォルダを展開した状態にする(panel: Locator,
   await expect(row).toHaveAttribute('aria-expanded', 'true')
 }
 
+/**
+ * 小窓をクリックして専用画面を開き、擬似 claude の起動を待つ。
+ *
+ * 専用画面の既定は構造化ビューなので、**ターミナルのタブへ切り替えてから**返す。
+ * 隠れている要素はクリックできず、端末へ打ち込む手順（[`typeLine`]）が使えないため。
+ */
 export async function openSession(page: Page, tile: Locator) {
   // **開くのはダブルクリック**（並べ替え設計§4-1）。シングルは「選ぶ」になった
   await tile.dblclick()
