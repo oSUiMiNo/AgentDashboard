@@ -16,8 +16,9 @@
  * 黙って切ると「あるはずのフォルダが無い」に見え、原因まで辿れない（設計§8）。
  * 断られた理由もそのまま出す——権限・不在・版が古い、はどれも利用者が直せる（§17）。
  *
- * この部品は**追加のシートと PJT 専用画面の左パネルで共有する**（設計§13）。
- * 同じ列挙の口を使う部品が2つの作法を持つと、片方だけ直したときに食い違う。
+ * この部品は**PJT を足すときのフォルダ選び（追加シート）用**である。サイドバーは、その場で
+ * 展開・畳むツリー（`FolderTree`）を使う。行・メニュー・コピーは `parts.tsx` を共有するので、
+ * 片方だけ直したときに食い違う形は作れない。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -27,11 +28,9 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 import { ArrowUpGlyph } from '@/components/ui/glyphs'
-import { OpenInButtons } from '@/components/OpenIn/OpenInButtons'
 import {
   childOf,
   crumbsOf,
-  HostFsError,
   isUnder,
   listDir,
   sameListing,
@@ -45,7 +44,6 @@ import {
   CrumbCopyState,
   FolderRow,
   PathMenu,
-  type OpenInProp,
 } from '@/components/FolderBrowser/parts'
 
 export { コピー表示を畳むまで } from '@/components/FolderBrowser/useCopyAnswer'
@@ -59,53 +57,26 @@ interface Props {
    * 変わると辿り直す。呼び出し側が「最近使った場所」を押したときの移動もこれで起きる。
    */
   start?: string
-  /** ここより上へは辿らせない（PJT 専用画面の左パネル用。設計§15） */
-  root?: string
   /**
-   * `start` が**無かった**ときに、黙って行き直す先（`イシューグループ_2026-0813-1804` 設計§6-2）。
-   *
-   * **省略すると断り文を出す。追加シートはこちら**——あちらの `start` は利用者が
-   * 押した場所なので、着けなかったなら理由を見せるのが正しい。渡すのは左パネルだけで、
-   * あちらの `start` は**覚えていた場所**＝利用者がいま押したものではないため、
-   * 開いた瞬間に赤い1行が出迎えるのを避ける。
-   *
-   * **黙るのは「無い」（404）ときだけ。** 権限・未接続・時間切れでは理由を出す。
+   * ここより上へは辿らせない（設計§15）。**追加シートは渡さない。** 残してあるのは、
+   * 試験の大半が `root` 付きで組まれていて、外すとコピーの値とパンくずの期待値が変わるため
    */
-  fallback?: string
+  root?: string
   /** いま見ている場所が変わるたびに呼ばれる。確定ボタンの相手を呼び出し側が持つため */
   onPathChange?: (path: string) => void
-  /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
-  onPickFile?: (path: string) => void
-  current?: string
-  /**
-   * エクスプローラ・VSCode で開く口（サイドバーにエクスプローラで開くボタンが欲しい 設計§7-1）。
-   *
-   * **サイドバーだけが渡す。** 追加シートは渡さないので、ボタン・右クリックの項目・
-   * 行の印はどれも出ない（今の DOM のまま）。親PC でない（`same_machine: false`）ときも同じ
-   * ——押しても何も起きないものを置かない。
-   */
-  openIn?: OpenInProp
 }
 
 /**
  * 辿った結果。**`stale` を `failed` に混ぜない**——追い越された失敗で起点へ行き直すと、
  * **利用者が新しく開いた場所を上書きする**。
- *
- * `gone` と `failed` を分けるのは、**行き直してよいのが「無い」ときだけ**だから
- * （設計§6-3）。寝ている PC で全部の失敗を拾うと、時間切れが2回並んで倍待たされ、
- * しかも起点も同じ理由で失敗するので**見える結果は変わらない**。
  */
-type Arrival = "ok" | "gone" | "failed" | "stale"
+type Arrival = "ok" | "failed" | "stale"
 
 export function FolderBrowser({
   host,
   start,
   root,
-  fallback,
   onPathChange,
-  onPickFile,
-  current,
-  openIn,
 }: Props) {
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -127,7 +98,7 @@ export function FolderBrowser({
   const { copied, copy, dismiss } = useCopyAnswer()
 
   const go = useCallback(
-    async (next: string | undefined, 黙る = false): Promise<Arrival> => {
+    async (next: string | undefined): Promise<Arrival> => {
       const mine = ++asked.current
       setLoading(true)
       setError(null)
@@ -146,10 +117,6 @@ export function FolderBrowser({
         // 古い問いの失敗も捨てる。拾うと、**新しい場所の正しい一覧が消える**
         if (mine !== asked.current) {
           return "stale"
-        }
-        // **黙るのは「無い」ときだけ。** 権限・未接続・時間切れは理由をそのまま出す
-        if (黙る && err instanceof HostFsError && err.status === 404) {
-          return "gone"
         }
         setError(err instanceof Error ? err.message : "読めませんでした")
         setListing(null)
@@ -261,18 +228,10 @@ export function FolderBrowser({
     // `start` が変わった描画では `path` はまだ古く、渡すと「古い場所を引き直して
     // 上書きする」ことになる。症状は**一瞬だけ新しい場所が見えて元へ戻る**で、
     // 状態の更新が非同期であることに由来するので、目で追っても原因が見えない。
-    void (async () => {
-      const 着いたか = await go(start, fallback !== undefined)
-      // **行き直すのは1度だけ。** `go` の中から自分を呼ぶ形にすると、消えた先が
-      // 連なっていたときに止まらなくなる
-      if (着いたか === "gone" && fallback !== undefined) {
-        // 着けば `onPathChange` が飛ぶので、**死んだ記憶はその場で上書きされる**
-        await go(fallback)
-      }
-    })()
-  }, [host, start, fallback, go])
+    void go(start)
+  }, [host, start, go])
 
-  // ルートより上は出さない（左パネル用）。現在地までの道筋は見せて、外側だけを塞ぐ。
+  // ルートより上は出さない（`root` を渡したとき）。現在地までの道筋は見せて、外側だけを塞ぐ。
   // **内側かどうかの判定は `isUnder` に寄せる**——区切りを見ない前方一致で書くと、
   // `app` の内側に `app-old` が通り、起点の外へ抜ける段ができる
   const 全部 = crumbsOf(path ?? "/")
@@ -299,22 +258,18 @@ export function FolderBrowser({
   const 上へ行ける =
     ひとつ上 !== undefined &&
     (root === undefined || isUnder(root, ひとつ上.path))
-  // **親PC の画面で、口が読めたときだけ。** それ以外は何も描かない（設計§7-1）
-  const 開く口 = openIn?.view.same_machine === true ? openIn : undefined
   const いまの段 = path === undefined ? undefined : 内側.at(-1)
   const 余白 = <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
   const パンくずの答え = (at: string) => (
     <CrumbCopyState show={copied?.場所 === "パンくず" && copied.path === at && copied.state === "done"} />
   )
 
-  // **中身は1文字も変えずに外へ出しただけ。** 開く口があるときだけ外枠で包んで、右に
-  // 2つのボタンを置く（設計§7-2）。`folder-crumbs` の testid と中の並びは既存のテストと
-  // E2E が読んでいる
+  // `folder-crumbs` の testid と中の並びは既存のテストと E2E が読んでいる
   const パンくず = (
     <nav
       data-testid="folder-crumbs"
       aria-label="いまの場所"
-      className={`flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs${開く口 === undefined ? "" : " min-w-0 flex-1"}`}
+      className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs"
     >
       {/*
         **パンくずの左に置く**（要件3）。行き先はパンくずの中にあるが、**押す場所が
@@ -352,7 +307,6 @@ export function FolderBrowser({
       {外側 !== undefined && (
         <AboveRootCrumb
           crumb={外側}
-          openIn={開く口}
           onCopy={(value) => copy(外側.path, value, "パンくず")}
           answer={パンくずの答え(外側.path)}
         />
@@ -375,7 +329,6 @@ export function FolderBrowser({
               name={crumb.label}
               path={crumb.path}
               kind="dir"
-              openIn={開く口}
               onCopy={(value) => copy(crumb.path, value, "パンくず")}
             />
           </ContextMenu>
@@ -393,21 +346,7 @@ export function FolderBrowser({
       // `ul` の `overflow-y-auto` が効かずに親ごとはみ出す
       className="flex h-full min-h-0 flex-col gap-2"
     >
-      {開く口 === undefined ? (
-        パンくず
-      ) : (
-        <div data-testid="folder-crumbs-row" className="flex items-start gap-1">
-          {パンくず}
-          {root !== undefined && (
-            <OpenInButtons
-              root={root}
-              view={開く口.view}
-              open={開く口.open}
-              busy={開く口.busy}
-            />
-          )}
-        </div>
-      )}
+      {パンくず}
 
       {error !== null && (
         <p data-testid="folder-error" className="text-xs text-red-400">
@@ -458,14 +397,9 @@ export function FolderBrowser({
                 host={host}
                 root={root}
                 onOpen={() => void go(full)}
-                current={current === full}
-                onPickFile={
-                  onPickFile === undefined ? undefined : () => onPickFile(full)
-                }
                 // **答えを持っているのは1行だけ。** 他の行は常に手つかずへ戻る
                 copyState={copied?.場所 === "行" && copied.path === full ? copied.state : "idle"}
                 onCopy={(value) => copy(full, value)}
-                openIn={開く口}
               />
             )
           })}
@@ -478,7 +412,6 @@ export function FolderBrowser({
               name={いまの段.label}
               path={いまの段.path}
               kind="dir"
-              openIn={開く口}
               onCopy={(value) => copy(いまの段.path, value, "パンくず")}
             />
           </ContextMenu>
