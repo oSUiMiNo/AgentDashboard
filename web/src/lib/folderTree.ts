@@ -116,9 +116,10 @@ export function branchesToRefresh(
   visible: readonly string[],
   branches: ReadonlyMap<string, Branch>,
   inFlight: ReadonlySet<string>,
+  root: string,
 ): string[] {
   return visible.filter(
-    (path) => branches.get(path)?.state !== 'failed' && !inFlight.has(path),
+    (path) => (path === root || branches.get(path)?.state !== 'failed') && !inFlight.has(path),
   )
 }
 

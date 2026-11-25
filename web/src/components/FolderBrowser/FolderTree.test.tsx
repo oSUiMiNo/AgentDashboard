@@ -467,6 +467,69 @@ describe("読めないとき", () => {
   });
 });
 
+describe("読めないルートの読み直し", () => {
+  it("取り付けた時にルートが読めず断り文が出た後、10秒の読み直しでルートが読めると、断り文が消えて中身が並び、覚えていた枝も読まれる", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 口 = 偽の口({ ...基本, [ROOT]: { status: 504, body: "PC が応じません" } });
+    置く({ loadExpanded: () => [`${ROOT}/MyDocs`] });
+    await 流す();
+    const 断り = screen.getAllByTestId("folder-error");
+    expect(断り).toHaveLength(1);
+    expect(断り[0].getAttribute("data-path")).toBe(ROOT);
+    expect(断り[0].textContent).toBe("PC が応じません");
+    口.表.set(ROOT, 基本[ROOT]);
+    口.問い.length = 0;
+
+    await 十秒進める();
+    await 流す();
+
+    expect(口.問い).toContain(ROOT);
+    expect(screen.queryAllByTestId("folder-error")).toHaveLength(0);
+    expect(行(`${ROOT}/計画.md`)).not.toBeNull();
+    expect(行(`${ROOT}/MyDocs/メモ.md`)).not.toBeNull();
+  });
+
+  it("読めないルートの読み直しが飛んでいる間も、また失敗しても、断り文はそのまま出続け、「読み込み中…」や控えの行に入れ替わらない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    putListing("local", ROOT, {
+      path: ROOT,
+      truncated: false,
+      entries: [{ name: "古い.md", kind: "file", is_project: false }],
+    });
+    const 口 = 偽の口({ [ROOT]: { status: 504, body: "PC が応じません" } });
+    置く();
+    await 流す();
+    expect(screen.getByTestId("folder-error").textContent).toBe("PC が応じません");
+    expect(行(`${ROOT}/古い.md`)).toBeNull();
+    口.表.set(ROOT, "止める");
+    口.問い.length = 0;
+    const 見張り = new MutationObserver(() => {});
+    見張り.observe(document.body, { childList: true, subtree: true });
+
+    await 十秒進める();
+
+    expect(口.問い).toEqual([ROOT]);
+    expect(口.止めた.map((each) => each.path)).toEqual([ROOT]);
+    expect(screen.getByTestId("folder-error").textContent).toBe("PC が応じません");
+
+    口.止めた.shift()?.返す({ status: 504, body: "まだ応じません" });
+    await 流す();
+    const 足された = 見張り.takeRecords().flatMap((each) => Array.from(each.addedNodes));
+    見張り.disconnect();
+    const 出た = 足された.filter(
+      (node) =>
+        node instanceof Element &&
+        (node.matches('[data-testid="folder-branch-loading"], [data-testid="folder-entry"]') ||
+          node.querySelector('[data-testid="folder-branch-loading"], [data-testid="folder-entry"]') !==
+            null),
+    );
+
+    expect(screen.getByTestId("folder-error").textContent).toBe("PC が応じません");
+    expect(行(`${ROOT}/古い.md`)).toBeNull();
+    expect(出た).toHaveLength(0);
+  });
+});
+
 describe("知らせ", () => {
   it("空・読み込み中・打ち切りの知らせは、その枝の最初の行に、子と同じ字下げで出る", async () => {
     偽の口({

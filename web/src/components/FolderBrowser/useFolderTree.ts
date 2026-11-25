@@ -156,6 +156,11 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
           return
         }
         const 前 = 表の今.current.get(path)
+        if (前?.state === 'failed' && path === root) {
+          putListing(host, path, result)
+          枝を置く(path, { state: 'ready', listing: result })
+          return
+        }
         const 前の一覧 = listingOf(前)
         if (前 === undefined || 前.state === 'failed' || 前の一覧 === null) {
           return
@@ -169,7 +174,7 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
         return
       }
     },
-    [host, 枝を置く],
+    [host, root, 枝を置く],
   )
 
   const 読み直しの回 = useCallback(async (): Promise<void> => {
@@ -177,7 +182,7 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
       return
     }
     const 見える = visibleBranches(root, 並びの今.current, 表の今.current)
-    const 相手 = branchesToRefresh(見える, 表の今.current, 飛んでいる.current).filter((path) =>
+    const 相手 = branchesToRefresh(見える, 表の今.current, 飛んでいる.current, root).filter((path) =>
       表の今.current.has(path),
     )
     await Promise.all(相手.map((path) => 並べる(() => 読み直す(path))))

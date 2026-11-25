@@ -180,7 +180,7 @@ describe('lib/folderTree', () => {
         [`${R}/c`, 読めた(`${R}/c`, [])],
       ])
       const 見えている = [R, `${R}/a`, `${R}/b`, `${R}/c`]
-      expect(branchesToRefresh(見えている, 表, new Set([`${R}/b`]))).toEqual([
+      expect(branchesToRefresh(見えている, 表, new Set([`${R}/b`]), R)).toEqual([
         R,
         `${R}/c`,
       ])
@@ -192,11 +192,20 @@ describe('lib/folderTree', () => {
         [R, 読めた(R, [])],
         [`${R}/b`, { state: 'loading', listing: null }],
       ])
-      expect(branchesToRefresh([R, `${R}/a`, `${R}/b`], 表, new Set())).toEqual([
+      expect(branchesToRefresh([R, `${R}/a`, `${R}/b`], 表, new Set(), R)).toEqual([
         R,
         `${R}/a`,
         `${R}/b`,
       ])
+    })
+
+    it('読めないルートは外さず、ほかの読めない枝は外す。ルートでも読みが飛んでいれば外す', () => {
+      const 表 = new Map<string, Branch>([
+        [R, { state: 'failed', reason: '読めません' }],
+        [`${R}/a`, { state: 'failed', reason: '読めません' }],
+      ])
+      expect(branchesToRefresh([R, `${R}/a`], 表, new Set(), R)).toEqual([R])
+      expect(branchesToRefresh([R, `${R}/a`], 表, new Set([R]), R)).toEqual([])
     })
   })
 
