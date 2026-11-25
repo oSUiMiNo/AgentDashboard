@@ -21,7 +21,7 @@ import {
 } from '@/components/FolderBrowser/parts'
 import { useCopyAnswer } from '@/components/FolderBrowser/useCopyAnswer'
 import { useFolderTree } from '@/components/FolderBrowser/useFolderTree'
-import { listingOf, rowScrollFor, 送り直しを見張る間, type Branch } from '@/lib/folderTree'
+import { branchesSettled, listingOf, rowScrollFor, 送り直しを見張る間, type Branch } from '@/lib/folderTree'
 import { childOf, crumbsOf, rawUrl, type DirEntry } from '@/lib/hostfs'
 import { isOpenedIn } from '@/lib/openIn'
 
@@ -155,7 +155,11 @@ function 触るまで待つ(箱: HTMLElement, 触った: () => void): () => void
   return 外す
 }
 
-function useRevealCurrent(器: RefObject<HTMLUListElement | null>, current: string | undefined) {
+function useRevealCurrent(
+  器: RefObject<HTMLUListElement | null>,
+  current: string | undefined,
+  出揃ったか: () => boolean,
+) {
   const 送った = useRef(false)
   const 取り付けた時のファイル = useRef(current)
   const 今のファイル = useRef(current)
@@ -178,6 +182,9 @@ function useRevealCurrent(器: RefObject<HTMLUListElement | null>, current: stri
       return
     }
     待ちを外す.current ??= 触るまで待つ(箱, 待ちを終える)
+    if (!出揃ったか()) {
+      return
+    }
     const 行 = 行を引く(箱, current)
     if (行 === undefined) {
       return
@@ -336,7 +343,7 @@ function Tree({ host, root, loadExpanded, onExpandedChange, onPickFile, current,
   const 根 = 段.at(-1) ?? { label: root, path: root }
   const 外側 = 段.length >= 2 ? 段[段.length - 2] : undefined
   const 器 = useRef<HTMLUListElement>(null)
-  useRevealCurrent(器, current)
+  useRevealCurrent(器, current, () => branchesSettled(root, expanded, branches))
 
   const 札 = (at: string) => (
     <CrumbCopyState show={copied?.場所 === 'パンくず' && copied.path === at && copied.state === 'done'} />

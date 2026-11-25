@@ -1450,6 +1450,52 @@ describe("送り", () => {
     }
   });
 
+  it("いま開いているファイルの行が描かれても、見えている枝（その上で展開していた兄弟のフォルダ）の読みが出揃うまでは送らず、出揃ったら1回送って見張る", async () => {
+    const 目当て = `${ROOT}/MyDocs/メモ.md`;
+    const 場 = 送りの場([目当て]);
+    try {
+      const 口 = 偽の口({ ...基本, [止める枝]: "止める" });
+      置く({ loadExpanded: 送り直しの覚え, current: 目当て });
+      await 出るまで(目当て);
+      await 止まるまで(口, 止める枝);
+      await 流す();
+      const 器 = 最上段の器();
+      expect(器.scrollTop, "兄弟のフォルダを読んでいる間").toBe(0);
+      expect(場.器を見張っている(), "兄弟のフォルダを読んでいる間").toBe(false);
+
+      止めたのを返す(口, 止める枝, ["a.md"]);
+      await 出るまで(送り直しの目当て);
+      await 流す();
+      expect(器.scrollTop, "出揃った後").toBe(428);
+      expect(場.器を見張っている(), "出揃った後").toBe(true);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("見えている枝の読みが出揃うのを待つ間に利用者が器に触ったら、出揃っても送らない", async () => {
+    const 目当て = `${ROOT}/MyDocs/メモ.md`;
+    const 場 = 送りの場([目当て]);
+    try {
+      const 口 = 偽の口({ ...基本, [止める枝]: "止める" });
+      置く({ loadExpanded: 送り直しの覚え, current: 目当て });
+      await 出るまで(目当て);
+      await 止まるまで(口, 止める枝);
+      await 流す();
+      const 器 = 最上段の器();
+      expect(器.scrollTop).toBe(0);
+
+      fireEvent.wheel(器);
+      止めたのを返す(口, 止める枝, ["a.md"]);
+      await 出るまで(送り直しの目当て);
+      await 流す();
+      expect(器.scrollTop).toBe(0);
+      expect(場.器を見張っている()).toBe(false);
+    } finally {
+      場.戻す();
+    }
+  });
+
   it("取り付けた後にいま開いているファイルが変わったら、その後どの行が描かれても送らない（取り付けた時のファイルへ戻しても送らない）", async () => {
     const 取り付けた時 = `${ROOT}/src/main.ts`;
     const 別の = 送り直しの目当て;

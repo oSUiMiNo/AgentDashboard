@@ -112,6 +112,17 @@ export function visibleBranches(
   return out
 }
 
+export function branchesSettled(
+  root: string,
+  expanded: readonly string[],
+  branches: ReadonlyMap<string, Branch>,
+): boolean {
+  return visibleBranches(root, expanded, branches).every((path) => {
+    const 枝 = branches.get(path)
+    return 枝?.state === 'failed' || listingOf(枝) !== null
+  })
+}
+
 export function branchesToRefresh(
   visible: readonly string[],
   branches: ReadonlyMap<string, Branch>,

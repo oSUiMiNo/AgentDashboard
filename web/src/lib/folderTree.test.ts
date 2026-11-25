@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import type { DirEntry, DirListing } from '@/lib/hostfs'
 import {
   ancestorsOf,
+  branchesSettled,
   branchesToRefresh,
   capExpanded,
   rowScrollFor,
@@ -168,6 +169,58 @@ describe('lib/folderTree', () => {
     it('ルートが空文字なら、何も出さない', () => {
       const 表 = new Map<string, Branch>([[R, 読めた(R, [['a', 'dir']])]])
       expect(visibleBranches('', [`${R}/a`], 表)).toEqual([])
+    })
+  })
+
+  describe('見えている枝の読みが出揃ったか', () => {
+    it('見えている枝が全部、一覧を持つか読めないなら出揃っている', () => {
+      const 表 = new Map<string, Branch>([
+        [
+          R,
+          読めた(R, [
+            ['a', 'dir'],
+            ['b', 'dir'],
+            ['c', 'dir'],
+          ]),
+        ],
+        [`${R}/a`, 読めた(`${R}/a`, [])],
+        [`${R}/b`, { state: 'failed', reason: '読めません' }],
+        [`${R}/c`, { state: 'loading', listing: 一覧(`${R}/c`, []) }],
+      ])
+      expect(branchesSettled(R, [`${R}/a`, `${R}/b`, `${R}/c`], 表)).toBe(true)
+    })
+
+    it('見えている枝のうち、表にまだ無いもの・控えの無い読み込み中のものがあれば出揃っていない', () => {
+      const 表 = new Map<string, Branch>([
+        [
+          R,
+          読めた(R, [
+            ['a', 'dir'],
+            ['b', 'dir'],
+          ]),
+        ],
+        [`${R}/b`, 読めた(`${R}/b`, [])],
+      ])
+      expect(branchesSettled(R, [`${R}/a`, `${R}/b`], 表)).toBe(false)
+      表.set(`${R}/a`, { state: 'loading', listing: null })
+      expect(branchesSettled(R, [`${R}/a`, `${R}/b`], 表)).toBe(false)
+      表.set(`${R}/a`, 読めた(`${R}/a`, []))
+      expect(branchesSettled(R, [`${R}/a`, `${R}/b`], 表)).toBe(true)
+    })
+
+    it('ルートを読んでいなければ出揃っておらず、畳んだ枝や親が読めない枝は数えない', () => {
+      expect(branchesSettled(R, [], new Map())).toBe(false)
+      const 表 = new Map<string, Branch>([
+        [
+          R,
+          読めた(R, [
+            ['a', 'dir'],
+            ['c', 'dir'],
+          ]),
+        ],
+        [`${R}/c`, { state: 'failed', reason: '読めません' }],
+      ])
+      expect(branchesSettled(R, [`${R}/c`, `${R}/c/d`], 表)).toBe(true)
     })
   })
 
