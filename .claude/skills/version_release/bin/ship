@@ -126,7 +126,7 @@ if [ "$skip_commit" -eq 0 ]; then
 fi
 
 if ! "${push_main_cmd[@]}"; then
-  echo "ship: push origin main が失敗した（tag はまだ作っていない）" >&2
+  echo "ship: push origin main が失敗した（tag はまだ作っていない。コミットは残っている。通信が戻ったら、同じ ship をもう一度流せばコミットを飛ばして push から続ける）" >&2
   exit 1
 fi
 
@@ -136,6 +136,6 @@ if ! "${tag_cmd[@]}"; then
 fi
 
 if ! "${push_tag_cmd[@]}"; then
-  echo "ship: push origin ${tag} が失敗した" >&2
+  echo "ship: push origin ${tag} が失敗した（main とタグは手元に在る。通信が戻ったら git push origin ${tag} だけを流す。ship をもう一度流すとタグが既に在るので止まる）" >&2
   exit 1
 fi
