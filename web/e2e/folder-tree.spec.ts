@@ -355,6 +355,44 @@ test.describe("サイドバーのツリー（マウス）", () => {
     expect(閉じ).toBe(試し札);
   });
 
+  test("サイドバーを最小の幅にして6段まで展開しても、深い行の印はコピーのボタンへ重ならない", async ({ page }) => {
+    await openDashboard(page);
+    await page.evaluate(() =>
+      globalThis.localStorage?.setItem(
+        "agentdashboard.project-files-width",
+        JSON.stringify({ folder: 160, file: 672 }),
+      ),
+    );
+    const panel = await URLでPJT専用画面を開く(page);
+    await expect.poll(async () => (await panel.boundingBox())?.width ?? 0).toBeLessThanOrEqual(160.5);
+    await MyDocsを展開する(panel);
+    for (const p of 段たち) {
+      await フォルダを展開した状態にする(panel, path.basename(p), p);
+    }
+    const 奥 = 行(panel, path.join(段たち[5], "奥.md"));
+    await expect(奥).toHaveCount(1);
+    const 値 = await 奥.evaluate((e) => {
+      const row = e.closest(".folder-tree-row");
+      const 印 = e.querySelector('[data-testid="folder-entry-icon"]');
+      const コピー = row?.querySelector('[data-testid="folder-copy"]');
+      if (row === null || row === undefined || 印 === null || コピー === null || コピー === undefined) return null;
+      const b = e.getBoundingClientRect();
+      const i = 印.getBoundingClientRect();
+      const overflowX = getComputedStyle(e).overflowX;
+      return {
+        はみ出す: e.scrollWidth > e.clientWidth,
+        overflowX,
+        見える右端: overflowX === "visible" ? i.right : Math.min(i.right, b.right),
+        コピーの左端: コピー.getBoundingClientRect().left,
+      };
+    });
+    確かめを書く("N22", 値);
+    expect(値).not.toBeNull();
+    if (値 === null) return;
+    expect(値.はみ出す).toBe(true);
+    expect(値.見える右端).toBeLessThanOrEqual(値.コピーの左端);
+  });
+
   test("展開した行には灰色の面が付かず、乗せたときは閉じた行に乗せたときと同じ色になる", async ({ page }) => {
     const panel = await PJT専用画面を開く(page);
     await MyDocsを展開する(panel);
