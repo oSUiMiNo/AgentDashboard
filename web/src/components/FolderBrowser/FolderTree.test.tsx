@@ -921,6 +921,23 @@ describe("印と名前", () => {
     await 右クリック(深い);
     expect(screen.getByTestId("folder-name-full")).toHaveTextContent(長い);
   });
+
+  it("ツリーの行の外枠には、画面の外では描かない印（folder-tree-row）が付き、追加シートの行には付かない", async () => {
+    偽の口(基本);
+    const { unmount } = 置く();
+    fireEvent.click(await 出るまで(`${ROOT}/MyDocs`));
+    await 出るまで(`${ROOT}/MyDocs/sub`);
+    const 行たち = screen.getAllByTestId("folder-entry");
+    expect(行たち).toHaveLength(6);
+    for (const each of 行たち) {
+      expect(each.parentElement).toHaveClass("folder-tree-row");
+    }
+    unmount();
+
+    render(<FolderBrowser host="local" start={ROOT} root={ROOT} />);
+    expect(await screen.findAllByTestId("folder-entry")).not.toHaveLength(0);
+    expect(document.querySelectorAll(".folder-tree-row")).toHaveLength(0);
+  });
 });
 
 describe("コピー（深い枝）", () => {

@@ -30,3 +30,14 @@
     transition: none;
   }
 }
+
+.folder-tree-row {
+  content-visibility: auto;
+  contain-intrinsic-height: auto 28px;
+}
+
+@media (pointer: coarse) and (hover: none) {
+  .folder-tree-row {
+    contain-intrinsic-height: auto 38px;
+  }
+}

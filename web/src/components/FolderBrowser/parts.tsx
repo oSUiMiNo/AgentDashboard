@@ -271,7 +271,7 @@ export function FolderRow({
     */
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <Outer className="flex items-center gap-1">
+        <Outer className={ツリー ? "folder-tree-row flex items-center gap-1" : "flex items-center gap-1"}>
           {linkable ? (
             <Button asChild variant="ghost" className={行のクラス}>
               <a
