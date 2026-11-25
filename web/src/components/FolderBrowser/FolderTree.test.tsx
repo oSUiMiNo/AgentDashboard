@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Profiler, useState, type ReactNode } from "react";
+import { Profiler, StrictMode, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FolderBrowser } from "@/components/FolderBrowser/FolderBrowser";
 import { FolderTree } from "@/components/FolderBrowser/FolderTree";
@@ -1115,6 +1115,40 @@ describe("送り", () => {
       場.知らせる();
       expect(器.scrollTop).toBe(428);
       expect(場.器を見張っている()).toBe(false);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("取り外すと見張りを外し、StrictMode の2回目の取り付けでも送って見張る", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 場 = 送りの場();
+    try {
+      const { 器, unmount } = await 送った器を開く();
+      expect(器.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(true);
+      unmount();
+      expect(場.器を見張っている()).toBe(false);
+
+      render(
+        <StrictMode>
+          <FolderTree
+            host="local"
+            root={ROOT}
+            loadExpanded={送り直しの覚え}
+            onExpandedChange={vi.fn()}
+            onPickFile={vi.fn()}
+            current={送り直しの目当て}
+          />
+        </StrictMode>,
+      );
+      const 二度目の器 = 子の一覧(ROOT);
+      expect(行(送り直しの目当て)).not.toBeNull();
+      expect(二度目の器?.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(true);
+      場.縮める(86);
+      場.知らせる();
+      expect(二度目の器?.scrollTop).toBe(442);
     } finally {
       場.戻す();
     }
