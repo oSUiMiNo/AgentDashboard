@@ -1132,8 +1132,8 @@ tests       = [
   { file = "web/src/components/FolderBrowser/FolderBrowser.test.tsx", name = "名前に、全体が読める指定が付く" },
   { file = "web/src/components/FolderBrowser/FolderBrowser.test.tsx", name = "長押し（右クリック）のメニューに、名前の全体が見出しとして出る" },
 ]
-breaks_when = "FolderBrowser.tsx から、名前に全体を読ませる指定を外す"
-verified    = false
+breaks_when = "parts.tsx の行（FolderRow）とそのメニュー（PathMenu）から、名前に全体を読ませる指定（名前の title と、見出し folder-name-full の名前）を外す"
+verified    = true
 
 [[entry]]
 issue       = "クローズ/ファイル閲覧で画像とHTMLも表示する"
