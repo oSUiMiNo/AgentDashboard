@@ -666,7 +666,21 @@ describe("10秒の読み直し", () => {
 
     口.表.set(ROOT, "止める");
     口.表.set(`${ROOT}/MyDocs`, "止める");
+    const 見張り = new MutationObserver(() => {});
+    見張り.observe(document.body, { childList: true, subtree: true });
     置く({ loadExpanded: () => [`${ROOT}/MyDocs`] });
+    const 出入り = 見張り
+      .takeRecords()
+      .flatMap((each) => [...Array.from(each.addedNodes), ...Array.from(each.removedNodes)]);
+    見張り.disconnect();
+    const 一度でも出た = 出入り.filter(
+      (node) =>
+        node instanceof Element &&
+        (node.matches('[data-testid="folder-branch-loading"]') ||
+          node.querySelector('[data-testid="folder-branch-loading"]') !== null),
+    );
+    expect(出入り.length).toBeGreaterThan(0);
+    expect(一度でも出た).toHaveLength(0);
 
     expect(screen.queryAllByTestId("folder-branch-loading")).toHaveLength(0);
     expect(行(`${ROOT}/計画.md`)).not.toBeNull();
