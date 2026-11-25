@@ -1,4 +1,4 @@
-import { MAX_PLACES, putDir, putExpanded, putPicks, readExpanded, readPlace } from '@/lib/filesPlace'
+import { MAX_PLACES, putExpanded, putPicks, readExpanded, readPlace } from '@/lib/filesPlace'
 import { MAX_EXPANDED } from '@/lib/folderTree'
 
 /*
@@ -23,6 +23,13 @@ function 置いてある(): Record<string, unknown> {
   >
 }
 
+function 前の版の行を置く(host: string, project: string, 欄: Record<string, unknown>): void {
+  globalThis.localStorage.setItem(
+    PLACE_KEY,
+    JSON.stringify({ ...置いてある(), [行(host, project)]: 欄 }),
+  )
+}
+
 describe('lib/filesPlace', () => {
   beforeEach(() => {
     globalThis.localStorage.clear()
@@ -37,40 +44,44 @@ describe('lib/filesPlace', () => {
       expect(readPlace('local', ROOT)).toEqual({ dir: null, pick: null, picks: [] })
     })
 
-    it('掘った位置と開いていたファイルが、同じ行に載る', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
+    it('展開の覚えと開いていたファイルが、同じ行に載る', () => {
+      putExpanded('local', ROOT, [`${ROOT}/src`])
       putPicks('local', ROOT, [`${ROOT}/src/main.ts`], `${ROOT}/src/main.ts`)
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/src`])
       expect(readPlace('local', ROOT)).toEqual({
-        dir: `${ROOT}/src`,
+        dir: null,
         pick: `${ROOT}/src/main.ts`,
         picks: [`${ROOT}/src/main.ts`],
       })
+      expect(globalThis.localStorage.length).toBe(1)
+      expect(Object.keys(置いてある())).toEqual([行('local', ROOT)])
     })
 
     it('片方だけ書いても、もう片方が消えない', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
+      putExpanded('local', ROOT, [`${ROOT}/src`])
       putPicks('local', ROOT, [`${ROOT}/src/main.ts`], `${ROOT}/src/main.ts`)
-      putDir('local', ROOT, `${ROOT}/docs`)
+      putExpanded('local', ROOT, [`${ROOT}/docs`])
       expect(readPlace('local', ROOT).pick).toBe(`${ROOT}/src/main.ts`)
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/docs`])
     })
 
     it('PC が違えば別の行。PJT が同じでも混ざらない', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
-      putDir('pc-2', ROOT, `${ROOT}/docs`)
-      expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/src`)
-      expect(readPlace('pc-2', ROOT).dir).toBe(`${ROOT}/docs`)
+      putPicks('local', ROOT, [`${ROOT}/src/a.md`], `${ROOT}/src/a.md`)
+      putPicks('pc-2', ROOT, [`${ROOT}/docs/b.md`], `${ROOT}/docs/b.md`)
+      expect(readPlace('local', ROOT).picks).toEqual([`${ROOT}/src/a.md`])
+      expect(readPlace('pc-2', ROOT).picks).toEqual([`${ROOT}/docs/b.md`])
     })
 
     it('PJT が違えば別の行。PC が同じでも混ざらない', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
-      putDir('local', OTHER, `${OTHER}/lib`)
-      expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/src`)
-      expect(readPlace('local', OTHER).dir).toBe(`${OTHER}/lib`)
+      putPicks('local', ROOT, [`${ROOT}/src/a.md`], `${ROOT}/src/a.md`)
+      putPicks('local', OTHER, [`${OTHER}/lib/b.md`], `${OTHER}/lib/b.md`)
+      expect(readPlace('local', ROOT).picks).toEqual([`${ROOT}/src/a.md`])
+      expect(readPlace('local', OTHER).picks).toEqual([`${OTHER}/lib/b.md`])
     })
 
     it('PJT を10件書いても、鍵は1つのまま', () => {
       for (let i = 0; i < 10; i++) {
-        putDir('local', `/home/me/p${i}`, `/home/me/p${i}/src`)
+        putExpanded('local', `/home/me/p${i}`, [`/home/me/p${i}/src`])
       }
       // **区画ごとに鍵を作らない**ことの担保
       expect(globalThis.localStorage.length).toBe(1)
@@ -232,38 +243,41 @@ describe('lib/filesPlace', () => {
   describe('増え続けない', () => {
     it('上限を超えたら、最後に触ってから最も古い行が落ちる', () => {
       for (let i = 0; i < MAX_PLACES; i++) {
-        putDir('local', `/home/me/p${i}`, `/home/me/p${i}/src`)
+        putExpanded('local', `/home/me/p${i}`, [`/home/me/p${i}/src`])
       }
-      putDir('local', '/home/me/新入り', '/home/me/新入り/src')
+      putExpanded('local', '/home/me/新入り', ['/home/me/新入り/src'])
 
-      expect(readPlace('local', '/home/me/p0').dir).toBeNull()
-      expect(readPlace('local', '/home/me/p1').dir).toBe('/home/me/p1/src')
-      expect(readPlace('local', '/home/me/新入り').dir).toBe('/home/me/新入り/src')
+      expect(Object.keys(置いてある())).not.toContain(行('local', '/home/me/p0'))
+      expect(readExpanded('local', '/home/me/p0')).toEqual([])
+      expect(readExpanded('local', '/home/me/p1')).toEqual(['/home/me/p1/src'])
+      expect(readExpanded('local', '/home/me/新入り')).toEqual(['/home/me/新入り/src'])
     })
 
     it('書き直した行は末尾へ動くので、落ちるのは2番目になる', () => {
       for (let i = 0; i < MAX_PLACES; i++) {
-        putDir('local', `/home/me/p${i}`, `/home/me/p${i}/src`)
+        putExpanded('local', `/home/me/p${i}`, [`/home/me/p${i}/src`])
       }
       // 先頭を書き直して末尾へ送る
-      putDir('local', '/home/me/p0', '/home/me/p0/docs')
-      putDir('local', '/home/me/新入り', '/home/me/新入り/src')
+      putExpanded('local', '/home/me/p0', ['/home/me/p0/docs'])
+      putExpanded('local', '/home/me/新入り', ['/home/me/新入り/src'])
 
-      expect(readPlace('local', '/home/me/p0').dir).toBe('/home/me/p0/docs')
-      expect(readPlace('local', '/home/me/p1').dir).toBeNull()
+      expect(readExpanded('local', '/home/me/p0')).toEqual(['/home/me/p0/docs'])
+      expect(Object.keys(置いてある())).not.toContain(行('local', '/home/me/p1'))
+      expect(readExpanded('local', '/home/me/p1')).toEqual([])
     })
 
     it('溢れて落ちた PJT は、覚えが無いのと同じ姿になる', () => {
       for (let i = 0; i <= MAX_PLACES; i++) {
-        putDir('local', `/home/me/p${i}`, `/home/me/p${i}/src`)
+        putExpanded('local', `/home/me/p${i}`, [`/home/me/p${i}/src`])
       }
       // 例外にならず、既定（起点から始まる）へ戻るだけ
       expect(readPlace('local', '/home/me/p0')).toEqual({ dir: null, pick: null, picks: [] })
+      expect(readExpanded('local', '/home/me/p0')).toEqual([])
     })
 
     it('行の数が上限を超えない', () => {
       for (let i = 0; i < MAX_PLACES + 5; i++) {
-        putDir('local', `/home/me/p${i}`, `/home/me/p${i}/src`)
+        putExpanded('local', `/home/me/p${i}`, [`/home/me/p${i}/src`])
       }
       expect(Object.keys(置いてある()).length).toBe(MAX_PLACES)
     })
@@ -317,8 +331,8 @@ describe('lib/filesPlace', () => {
 
     it('壊れた表へ書いても投げない', () => {
       globalThis.localStorage.setItem(PLACE_KEY, '{壊れている')
-      expect(() => putDir('local', ROOT, `${ROOT}/src`)).not.toThrow()
-      expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/src`)
+      expect(() => putExpanded('local', ROOT, [`${ROOT}/src`])).not.toThrow()
+      expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/src`])
     })
   })
 
@@ -347,7 +361,7 @@ describe('lib/filesPlace', () => {
     })
 
     it('起点そのものは内側として通る', () => {
-      putDir('local', ROOT, ROOT)
+      前の版の行を置く('local', ROOT, { dir: ROOT })
       expect(readPlace('local', ROOT).dir).toBe(ROOT)
     })
 
@@ -363,7 +377,7 @@ describe('lib/filesPlace', () => {
     })
 
     it('名前に `..` を含むだけのフォルダは落とさない', () => {
-      putDir('local', ROOT, `${ROOT}/a..b`)
+      前の版の行を置く('local', ROOT, { dir: `${ROOT}/a..b` })
       expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/a..b`)
     })
   })
@@ -392,14 +406,14 @@ describe('lib/filesPlace', () => {
     it('書きが投げない', () => {
       使えなくする()
       // **投げないこと自体が主張。** 覚えられないだけで、その回の移動は成立する
-      expect(() => putDir('local', ROOT, `${ROOT}/src`)).not.toThrow()
+      expect(() => putExpanded('local', ROOT, [`${ROOT}/src`])).not.toThrow()
       expect(() => putPicks('local', ROOT, [`${ROOT}/a.md`], `${ROOT}/a.md`)).not.toThrow()
     })
   })
 
   describe('読み書きの回数', () => {
     it('1回読むのに、表を1回しか取り出さない', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
+      前の版の行を置く('local', ROOT, { dir: `${ROOT}/src` })
       const 覗く = vi.spyOn(Storage.prototype, 'getItem')
       readPlace('local', ROOT)
       expect(覗く).toHaveBeenCalledTimes(1)
@@ -407,7 +421,7 @@ describe('lib/filesPlace', () => {
     })
 
     it('控えるのは解析だけなので、外から書き換えると追随する', () => {
-      putDir('local', ROOT, `${ROOT}/src`)
+      前の版の行を置く('local', ROOT, { dir: `${ROOT}/src` })
       expect(readPlace('local', ROOT).dir).toBe(`${ROOT}/src`)
       // `getItem` は毎回するので、生の文字列が変われば気づく
       globalThis.localStorage.setItem(
