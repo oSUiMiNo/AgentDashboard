@@ -18,6 +18,7 @@ import {
   spawnSession,
   typeLine,
   WORK_DIR,
+  フォルダを展開した状態にする,
 } from './helpers'
 
 /**
@@ -160,7 +161,7 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
   // ```
   await openDashboard(page)
   const group = await addProject(page, CROSS_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await page.getByTestId('project-files-toggle').click()
 
   const panel = page.getByTestId('project-files-panel')
@@ -169,8 +170,10 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
     'data-path',
     CROSS_DIR,
   )
-  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
-  await panel.getByTestId('folder-entry').filter({ hasText: '計画.md' }).click()
+  await フォルダを展開した状態にする(panel, 'MyDocs', path.join(CROSS_DIR, 'MyDocs'))
+  await panel
+    .locator(`[data-testid="folder-entry"][data-path="${path.join(CROSS_DIR, 'MyDocs', '計画.md')}"]`)
+    .click()
 
   // 中身も返る。**大きさの上限が効くのはこの経路を守るため**（設計§7）
   await expect(page.getByTestId('file-view')).toBeVisible()
