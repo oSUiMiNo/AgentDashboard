@@ -267,7 +267,7 @@ test("左パネルを開き、ファイルを読み、相対パスをコピー�
     "data-path",
     PROJECT_DIR,
   );
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: PLAN }).click();
 
   // 整形されて、進捗（チェックボックス）がそのまま読める
@@ -297,8 +297,8 @@ test("左パネルを開き、ファイルを読み、相対パスをコピー�
   // **写す道はサイドバーだけになった**（要件24）。値がそのまま貼れる形で入ること
   await expect(view.getByTestId("file-copy")).toHaveCount(0);
   /*
-    **値を固定で書かない。** ここへ来るまでに `MyDocs` の中へ入っているので、一覧の
-    最初の行は**その時点で開いているフォルダの中身**である（`MyDocs/設計/` だった）。
+    **値を固定で書かない。** ここへ来るまでに `MyDocs` を展開しているので、一覧の
+    最初の行は**それまでの手順で決まる**（中へ入る作りだった頃は `MyDocs/設計/` だった）。
     階層をどこまで辿ったかに寄りかかると、途中の手順を1つ足しただけで落ちる。
 
     **ボタンが「写す」と言っている値と突き合わせる。** 確かめたいのは
@@ -480,7 +480,7 @@ test("どちらの口も無いとき、一覧とファイルの両方で値を�
     写せない環境で詰まる形にはならない——写す道はサイドバーに残っており、
     そちらの逃げ道は上で出ている。
   */
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: PLAN }).click();
   const view = page.getByTestId("file-view");
   await expect(view.getByTestId("file-copy")).toHaveCount(0);
@@ -564,7 +564,7 @@ test("狭い画面でファイルを開いても、セッションの面が潰�
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
   await expect(panel).toBeVisible();
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: LONG }).click();
   await expect(page.getByTestId("file-view")).toBeVisible();
 
@@ -679,7 +679,9 @@ test("長い文書を末尾まで辿れる（整形と編集の両方）", async
 
   // **一覧のほうも遡れること。** 同じ器の中で高さを取り合うので、片方を直した
   // 拍子にもう片方が伸び放題になっていないかを、同じ場所で見る
-  await expectScrollable(panel.getByTestId("folder-browser").locator("ul"));
+  await expectScrollable(
+    panel.locator(`[data-testid="folder-children"][data-path="${PROJECT_DIR}"]`),
+  );
 
   const body = page.getByTestId("file-body");
 
@@ -791,7 +793,7 @@ async function openLongFile(page: Page) {
   const panel = page.getByTestId("project-files-panel");
   await expect(panel).toBeVisible();
 
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: LONG }).click();
   await expect(page.getByTestId("file-view")).toBeVisible();
   return panel;
@@ -812,7 +814,7 @@ async function 開いて選ぶ(page: Page, name: string) {
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
   await expect(panel).toBeVisible();
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: name }).click();
   return panel;
 }
@@ -1236,7 +1238,7 @@ test("一覧の印が、種別ごとに分かれている", async ({ page }) => 
   await group.dblclick({ position: { x: 5, y: 5 } });
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
 
   const 印 = async (name: string) =>
     panel
@@ -1412,7 +1414,7 @@ test("広い窓では、サイドバーが被さらずに右のものを押し�
 
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: LONG }).click();
   const column = page.getByTestId("file-column");
   const rail = page.getByTestId("group-rail");
@@ -1773,7 +1775,7 @@ test("セッションを横へ流すと、中身の列も一緒に流れる", as
 
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: LONG }).click();
   const column = page.getByTestId("file-column");
   await expect(column).toBeVisible();
@@ -1845,7 +1847,7 @@ test("中身の列の上で横へ回すと、セッションのレールが動�
 
   await page.getByTestId("project-files-toggle").click();
   const panel = page.getByTestId("project-files-panel");
-  await panel.getByTestId("folder-entry").filter({ hasText: "MyDocs" }).click();
+  await フォルダを展開した状態にする(panel, "MyDocs");
   await panel.getByTestId("folder-entry").filter({ hasText: LONG }).click();
   await expect(page.getByTestId("file-column")).toBeVisible();
   // フォルダを畳む——被さったままだと列の上を押せない
