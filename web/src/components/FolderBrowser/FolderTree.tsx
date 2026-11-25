@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { OpenInButtons } from '@/components/OpenIn/OpenInButtons'
 import {
@@ -12,7 +12,7 @@ import {
 import { useCopyAnswer } from '@/components/FolderBrowser/useCopyAnswer'
 import { useFolderTree } from '@/components/FolderBrowser/useFolderTree'
 import { listingOf, rowScrollFor, type Branch } from '@/lib/folderTree'
-import { childOf, crumbsOf, type DirEntry } from '@/lib/hostfs'
+import { childOf, crumbsOf, rawUrl, type DirEntry } from '@/lib/hostfs'
 
 interface Props {
   host: string
@@ -91,9 +91,84 @@ const TreeRow = memo(function TreeRow({
       copyState={copyState}
       onCopy={(value) => onCopy(full, value)}
       openIn={openIn}
+      menu="outside"
     />
   )
 })
+
+interface 相手 {
+  path: string
+  name: string
+  kind: DirEntry['kind']
+  場所: '行' | 'パンくず'
+}
+
+function 相手を引く(target: EventTarget | null, ルート: 相手): 相手 {
+  const 行 = target instanceof Element ? target.closest<HTMLElement>('[data-row-path]') : null
+  const 印 = 行?.querySelector<HTMLElement>('[data-testid="folder-entry"]') ?? null
+  const path = 行?.dataset.rowPath
+  const name = 印?.dataset.name
+  const kind = 印?.dataset.kind
+  if (path === undefined || name === undefined || (kind !== 'dir' && kind !== 'file' && kind !== 'symlink')) {
+    return ルート
+  }
+  return { path, name, kind, 場所: '行' }
+}
+
+function TreeMenu({
+  host,
+  root,
+  根の名,
+  onPickFile,
+  openIn,
+  copy,
+  children,
+}: {
+  host: string
+  root: string
+  根の名: string
+  onPickFile: ((path: string) => void) | undefined
+  openIn: OpenInProp | undefined
+  copy: (at: string, value: string, 場所?: '行' | 'パンくず') => void
+  children: ReactElement
+}) {
+  const ルート = useMemo<相手>(() => ({ path: root, name: 根の名, kind: 'dir', 場所: 'パンくず' }), [root, 根の名])
+  const [開いている, set開いている] = useState(false)
+  const [今の相手, set今の相手] = useState<相手>(ルート)
+  const 候補 = useRef<相手>(ルート)
+  return (
+    <ContextMenu
+      open={開いている}
+      onOpenChange={(next) => {
+        if (next) {
+          set今の相手(候補.current)
+        }
+        set開いている(next)
+      }}
+    >
+      <ContextMenuTrigger
+        asChild
+        onPointerDown={(event) => {
+          候補.current = 相手を引く(event.target, ルート)
+        }}
+        onContextMenu={(event) => {
+          候補.current = 相手を引く(event.target, ルート)
+          set今の相手(候補.current)
+        }}
+      >
+        {children}
+      </ContextMenuTrigger>
+      <PathMenu
+        name={今の相手.name}
+        path={今の相手.path}
+        kind={今の相手.kind}
+        tabUrl={今の相手.kind === 'file' && onPickFile !== undefined ? rawUrl(host, 今の相手.path) : undefined}
+        openIn={openIn}
+        onCopy={(value) => copy(今の相手.path, value, 今の相手.場所)}
+      />
+    </ContextMenu>
+  )
+}
 
 function Tree({ host, root, loadExpanded, onExpandedChange, onPickFile, current, openIn }: Props) {
   const { expanded, branches, toggle } = useFolderTree({ host, root, loadExpanded, onExpandedChange })
@@ -266,26 +341,17 @@ function Tree({ host, root, loadExpanded, onExpandedChange, onPickFile, current,
         </div>
       )}
       {copied?.state === 'failed' && <CopyFallback value={copied.value} onDismiss={dismiss} />}
-      <ul
-        ref={器}
-        data-testid="folder-children"
-        data-path={root}
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto text-sm"
-      >
-        {中身(root, 0)}
-        <ContextMenu>
-          <ContextMenuTrigger asChild>
-            <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
-          </ContextMenuTrigger>
-          <PathMenu
-            name={根.label}
-            path={root}
-            kind="dir"
-            openIn={開く口}
-            onCopy={(value) => copy(root, value, 'パンくず')}
-          />
-        </ContextMenu>
-      </ul>
+      <TreeMenu host={host} root={root} 根の名={根.label} onPickFile={onPickFile} openIn={開く口} copy={copy}>
+        <ul
+          ref={器}
+          data-testid="folder-children"
+          data-path={root}
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto text-sm"
+        >
+          {中身(root, 0)}
+          <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
+        </ul>
+      </TreeMenu>
     </div>
   )
 }

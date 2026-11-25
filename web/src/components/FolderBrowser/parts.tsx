@@ -154,6 +154,7 @@ export function FolderRow({
   copyState,
   onCopy,
   openIn,
+  menu = "row",
 }: {
   as?: "li" | "div"
   density?: "list" | "tree"
@@ -175,6 +176,7 @@ export function FolderRow({
   onCopy: (value: string) => void
   /** エクスプローラ・VSCode で開く口。**親PC の画面のサイドバーだけ**が渡す（設計§7-1） */
   openIn?: OpenInProp
+  menu?: "row" | "outside"
 }) {
   const openable = entry.kind === "dir"
   // **`file` に限る。** `symlink` を混ぜると、いままで押せなかった行が押せるようになる
@@ -253,6 +255,65 @@ export function FolderRow({
     </>
   )
 
+  const 行 = (
+    <Outer
+      className={ツリー ? "folder-tree-row flex items-center gap-1" : "flex items-center gap-1"}
+      data-row-path={menu === "outside" ? full : undefined}
+    >
+      {linkable ? (
+        <Button asChild variant="ghost" className={行のクラス}>
+          <a
+            data-testid="folder-entry"
+            aria-current={current ? "page" : undefined}
+            data-kind={entry.kind}
+            data-name={entry.name}
+            data-path={ツリー ? full : undefined}
+            style={字下げ}
+            href={rawUrl(host, full)}
+            // **開いた先から元の窓を触らせない。** `FileView` と揃える
+            rel="noopener"
+            onClick={(event) => {
+              // **修飾キー付きと中ボタンは、止めずにブラウザへ渡す。**
+              // ここで `preventDefault` を呼ばないことが、新しいタブが開く条件
+              if (!素の左クリックか(event)) return
+              event.preventDefault()
+              onPickFile()
+            }}
+          >
+            {中身}
+          </a>
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          variant="ghost"
+          data-testid="folder-entry"
+          data-kind={entry.kind}
+          data-name={entry.name}
+          data-path={ツリー ? full : undefined}
+          aria-expanded={ツリー && entry.kind === "dir" ? expanded : undefined}
+          style={字下げ}
+          disabled={!pressable}
+          onClick={openable ? onOpen : undefined}
+          className={行のクラス}
+        >
+          {中身}
+        </Button>
+      )}
+      <CopyPath
+        full={full}
+        root={root}
+        isDir={entry.kind === "dir"}
+        state={copyState}
+        onCopy={onCopy}
+      />
+    </Outer>
+  )
+
+  if (menu === "outside") {
+    return 行
+  }
+
   return (
     /*
       **右クリックでメニューを出す**（要件27・設計§8-4）。`radix-ui` の `ContextMenu` は
@@ -270,57 +331,7 @@ export function FolderRow({
       2つだけで、**指で触る画面には1本も無かった**。
     */
     <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <Outer className={ツリー ? "folder-tree-row flex items-center gap-1" : "flex items-center gap-1"}>
-          {linkable ? (
-            <Button asChild variant="ghost" className={行のクラス}>
-              <a
-                data-testid="folder-entry"
-                aria-current={current ? "page" : undefined}
-                data-kind={entry.kind}
-                data-name={entry.name}
-                data-path={ツリー ? full : undefined}
-                style={字下げ}
-                href={rawUrl(host, full)}
-                // **開いた先から元の窓を触らせない。** `FileView` と揃える
-                rel="noopener"
-                onClick={(event) => {
-                  // **修飾キー付きと中ボタンは、止めずにブラウザへ渡す。**
-                  // ここで `preventDefault` を呼ばないことが、新しいタブが開く条件
-                  if (!素の左クリックか(event)) return
-                  event.preventDefault()
-                  onPickFile()
-                }}
-              >
-                {中身}
-              </a>
-            </Button>
-          ) : (
-            <Button
-              type="button"
-              variant="ghost"
-              data-testid="folder-entry"
-              data-kind={entry.kind}
-              data-name={entry.name}
-              data-path={ツリー ? full : undefined}
-              aria-expanded={ツリー && entry.kind === "dir" ? expanded : undefined}
-              style={字下げ}
-              disabled={!pressable}
-              onClick={openable ? onOpen : undefined}
-              className={行のクラス}
-            >
-              {中身}
-            </Button>
-          )}
-          <CopyPath
-            full={full}
-            root={root}
-            isDir={entry.kind === "dir"}
-            state={copyState}
-            onCopy={onCopy}
-          />
-        </Outer>
-      </ContextMenuTrigger>
+      <ContextMenuTrigger asChild>{行}</ContextMenuTrigger>
       <PathMenu
         name={entry.name}
         path={full}

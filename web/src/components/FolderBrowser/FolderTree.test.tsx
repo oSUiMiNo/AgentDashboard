@@ -804,6 +804,74 @@ describe("右クリックと長押し", () => {
     expect(screen.queryAllByTestId("folder-menu")).toHaveLength(0);
     expect(要る行(`${ROOT}/MyDocs`).getAttribute("aria-expanded")).toBe("false");
   });
+  it("右クリックの的はツリーに1つで、行ごとには持たない", async () => {
+    偽の口(基本);
+    置く();
+    fireEvent.click(await 出るまで(`${ROOT}/MyDocs`));
+    await 出るまで(`${ROOT}/MyDocs/sub`);
+
+    expect(子の一覧(ROOT)).toHaveAttribute("data-state", "closed");
+    const 行たち = screen.getAllByTestId("folder-entry");
+    expect(行たち).toHaveLength(6);
+    for (const each of 行たち) {
+      expect(each.parentElement).not.toHaveAttribute("data-state");
+    }
+    expect(screen.getByTestId("folder-blank")).not.toHaveAttribute("data-state");
+    for (const each of 行たち) {
+      expect(each.parentElement).toHaveAttribute("data-row-path", each.getAttribute("data-path") ?? "");
+    }
+  });
+
+  it("キーボード（メニューキー・Shift+F10）で開くと、焦点のある行が相手になる", async () => {
+    偽の口(基本);
+    const 写した = 写せる();
+    置く();
+    fireEvent.click(await 出るまで(`${ROOT}/MyDocs`));
+    (await 出るまで(`${ROOT}/MyDocs/sub`)).focus();
+
+    fireEvent.contextMenu(document.activeElement as Element);
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent("sub");
+    await 項目を押す("folder-menu-copy-abs");
+    expect(写した).toEqual([`${ROOT}/MyDocs/sub`]);
+    await waitFor(() => expect(screen.queryAllByTestId("folder-menu")).toHaveLength(0));
+
+    コピーの的(`${ROOT}/src`).focus();
+    fireEvent.contextMenu(document.activeElement as Element);
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent("src");
+  });
+
+  it("押した行が相手になる：別の行を続けて右クリック・長押ししても、見出しと写す値はそのつど押した行で、知らせの行は PJT のルート", async () => {
+    偽の口({ ...基本, [`${ROOT}/src`]: [] });
+    const 写した = 写せる();
+    置く();
+    fireEvent.click(await 出るまで(`${ROOT}/MyDocs`));
+    await 出るまで(`${ROOT}/MyDocs/sub`);
+    fireEvent.click(要る行(`${ROOT}/src`));
+    const 空 = await screen.findByTestId("folder-branch-empty");
+    expect(空.getAttribute("data-path")).toBe(`${ROOT}/src`);
+
+    await 右クリック(要る行(`${ROOT}/MyDocs`));
+    expect(screen.getByTestId("folder-name-full")).toHaveTextContent("MyDocs");
+    await メニューを閉じる();
+
+    await 右クリック(要る行(`${ROOT}/MyDocs/メモ.md`));
+    expect(screen.getByTestId("folder-name-full")).toHaveTextContent("メモ.md");
+    await 項目を押す("folder-menu-copy-abs");
+    expect(写した).toEqual([`${ROOT}/MyDocs/メモ.md`]);
+    await waitFor(() => expect(screen.queryAllByTestId("folder-menu")).toHaveLength(0));
+
+    await 長押し(要る行(`${ROOT}/MyDocs/sub`));
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent("sub");
+    await メニューを閉じる();
+
+    await 右クリック(空);
+    expect(screen.getByTestId("folder-name-full")).toHaveTextContent("app");
+    await 項目を押す("folder-menu-copy-abs");
+    expect(写した).toEqual([`${ROOT}/MyDocs/メモ.md`, ROOT]);
+    const 札 = screen.getByTestId("folder-crumb-copy-state");
+    expect(札.parentElement).toBe(PJT名の段().parentElement);
+    expect(札).toHaveTextContent("コピーしました");
+  });
 });
 
 describe("送り", () => {
