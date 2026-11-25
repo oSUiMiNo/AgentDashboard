@@ -41,6 +41,13 @@ describe('lib/folderTree', () => {
       expect(toggleExpanded([`${R}/a`], R, 100, R)).toEqual([`${R}/a`])
       expect(toggleExpanded([`${R}/a`], '/etc', 100, R)).toEqual([`${R}/a`])
     })
+
+    it('ルートが `/` で始まらない形でも、展開と畳みを切り替える', () => {
+      const ウィンドウズ = 'C:\\Users\\me\\proj'
+      const 開いた = toggleExpanded([], `${ウィンドウズ}/src`, 100, ウィンドウズ)
+      expect(開いた).toEqual([`${ウィンドウズ}/src`])
+      expect(toggleExpanded(開いた, `${ウィンドウズ}/src`, 100, ウィンドウズ)).toEqual([])
+    })
   })
 
   describe('上限に収める', () => {
@@ -194,6 +201,10 @@ describe('lib/folderTree', () => {
   })
 
   describe('祖先', () => {
+    const ウィンドウズ = 'C:\\Users\\me\\proj'
+    const そのまま = '\\\\?\\C:\\Users\\me\\proj'
+    const 重なり = '/home//me/app'
+
     it('ルートの1つ下からパス自身までを返し、ルートは含まない', () => {
       expect(ancestorsOf(R, `${R}/a/b/c`)).toEqual([`${R}/a`, `${R}/a/b`, `${R}/a/b/c`])
       expect(ancestorsOf(`${R}/`, `${R}/a`)).toEqual([`${R}/a`])
@@ -204,6 +215,18 @@ describe('lib/folderTree', () => {
       expect(ancestorsOf(R, R)).toEqual([])
       expect(ancestorsOf(R, '/etc/x')).toEqual([])
       expect(ancestorsOf(R, `${R}-old/x`)).toEqual([])
+    })
+
+    it('ルートが `/` で始まらない形でも、ルートの1つ下からパス自身までを、行のパスと同じ形で返す', () => {
+      expect(ancestorsOf(ウィンドウズ, `${ウィンドウズ}/src/a`)).toEqual([`${ウィンドウズ}/src`, `${ウィンドウズ}/src/a`])
+      expect(ancestorsOf(そのまま, `${そのまま}/src`)).toEqual([`${そのまま}/src`])
+      expect(ancestorsOf(重なり, `${重なり}/a/b`)).toEqual([`${重なり}/a`, `${重なり}/a/b`])
+    })
+
+    it('ルートが `/` で始まらない形でも、ルートそのものとルートの外は空', () => {
+      expect(ancestorsOf(ウィンドウズ, ウィンドウズ)).toEqual([])
+      expect(ancestorsOf(ウィンドウズ, 'C:\\Users\\me')).toEqual([])
+      expect(ancestorsOf(ウィンドウズ, 'C:\\Users\\me\\proj-old/x')).toEqual([])
     })
   })
 

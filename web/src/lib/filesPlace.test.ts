@@ -478,6 +478,12 @@ describe('lib/filesPlace', () => {
       expect(readExpanded('local', ROOT)).toEqual([])
     })
 
+    it('ルートが `/` で始まらない形でも、前の版の `dir` から祖先を展開として読む', () => {
+      const ウィンドウズ = 'C:\\Users\\me\\proj'
+      置く({ dir: `${ウィンドウズ}/src/a` }, 'local', ウィンドウズ)
+      expect(readExpanded('local', ウィンドウズ)).toEqual([`${ウィンドウズ}/src`, `${ウィンドウズ}/src/a`])
+    })
+
     it('`expanded` が配列でなければ、前の版の行として読む', () => {
       置く({ dir: `${ROOT}/a/b`, expanded: '壊れている' })
       expect(readExpanded('local', ROOT)).toEqual([`${ROOT}/a`, `${ROOT}/a/b`])

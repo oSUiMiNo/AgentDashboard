@@ -1,4 +1,4 @@
-import { childOf, crumbsOf, isUnder, type DirListing } from '@/lib/hostfs'
+import { childOf, isUnder, relativeOf, type DirListing } from '@/lib/hostfs'
 
 export const MAX_EXPANDED = 100
 
@@ -15,12 +15,19 @@ export function listingOf(branch: Branch | undefined): DirListing | null {
 }
 
 export function ancestorsOf(root: string, path: string): string[] {
-  if (!isUnder(root, path)) {
+  if (!isUnder(root, path) || isUnder(path, root)) {
     return []
   }
-  return crumbsOf(path)
-    .map((crumb) => crumb.path)
-    .filter((each) => isUnder(root, each) && !isUnder(each, root))
+  const 段たち: string[] = []
+  let 段 = root
+  for (const 名 of relativeOf(root, path).split('/')) {
+    if (名 === '') {
+      continue
+    }
+    段 = childOf(段, 名)
+    段たち.push(段)
+  }
+  return 段たち
 }
 
 function 見えていない(root: string, 並び: ReadonlySet<string>, path: string): boolean {
