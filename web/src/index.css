@@ -109,7 +109,7 @@
     --type-document: #a3abb6;
     --type-code: #a58bd6;
     --type-image: #d48b98;
-    --type-folder-closed: color-mix(in oklch, var(--type-folder) 55%, var(--background));
+    --type-folder-closed: color-mix(in oklch, var(--type-folder) 55%, var(--card));
     --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
     --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
 
