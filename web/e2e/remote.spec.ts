@@ -22,6 +22,7 @@ import {
   typeLine,
   watchSentFrames,
   WORK_DIR,
+  フォルダを展開した状態にする,
 } from './helpers'
 
 /**
@@ -683,5 +684,35 @@ test.describe('大きいファイル（サーバモード）', () => {
     await expect(page.getByTestId('file-window-text')).toBeVisible()
     await page.getByTestId('file-window-end').click()
     await expect(page.getByTestId('file-window-text')).toContainText('末尾の印')
+  })
+})
+
+test.describe('サイドバーのツリー（サーバモード）', () => {
+  let projectDir = ''
+
+  test.beforeAll(() => {
+    projectDir = fs.mkdtempSync(path.join(WORK_DIR, 'adash-e2e-remote-tree-'))
+    fs.mkdirSync(path.join(projectDir, 'MyDocs'), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, 'MyDocs', '計画.md'), '# 計画\n', 'utf8')
+  })
+
+  test.afterAll(() => {
+    if (projectDir) fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  test('サーバ越しでも、サイドバーのフォルダをその場で展開して中のファイルが出る', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page, projectDir)
+    await openSession(page, tile)
+    const toggle = page.getByTestId('project-files-toggle')
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const panel = page.getByTestId('project-files-panel')
+    await フォルダを展開した状態にする(panel, 'MyDocs', path.join(projectDir, 'MyDocs'))
+    await expect(
+      panel.locator(`[data-testid="folder-entry"][data-path="${path.join(projectDir, 'MyDocs', '計画.md')}"]`),
+    ).toBeVisible()
+    await expect(panel.getByTestId('folder-crumb').last()).toHaveText(path.basename(projectDir))
+    await expect(panel.getByTestId('folder-browser')).toHaveAttribute('data-path', projectDir)
   })
 })
