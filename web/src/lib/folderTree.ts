@@ -115,39 +115,6 @@ export function branchesToRefresh(
   )
 }
 
-export async function runLimited<T>(
-  jobs: readonly (() => Promise<T>)[],
-  limit: number,
-): Promise<PromiseSettledResult<T>[]> {
-  const results: PromiseSettledResult<T>[] = new Array(jobs.length)
-  let next = 0
-  const 流す = async (): Promise<void> => {
-    while (next < jobs.length) {
-      const i = next
-      next += 1
-      try {
-        results[i] = { status: 'fulfilled', value: await jobs[i]() }
-      } catch (reason) {
-        results[i] = { status: 'rejected', reason }
-      }
-    }
-  }
-  const 本数 = Math.min(Math.max(1, limit), jobs.length)
-  await Promise.all(Array.from({ length: 本数 }, () => 流す()))
-  return results
-}
-
-export function visibleRowCount(
-  visible: readonly string[],
-  branches: ReadonlyMap<string, Branch>,
-): number {
-  let 数 = 0
-  for (const path of visible) {
-    数 += listingOf(branches.get(path))?.entries.length ?? 0
-  }
-  return 数
-}
-
 export const 送り直しを見張る間 = 2_000
 
 export function rowScrollFor(
