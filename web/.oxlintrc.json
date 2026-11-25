@@ -4,7 +4,7 @@
   "ignorePatterns": ["dist", "src/components/ui"],
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    "react/only-export-components": ["warn", { "allowConstantExport": true, "allowExportNames": ["コピー表示を畳むまで"] }],
     "no-console": "error"
   },
   "overrides": [
