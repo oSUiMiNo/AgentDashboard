@@ -85,7 +85,7 @@
 
 import { motion } from 'motion/react'
 import type { CSSProperties } from 'react'
-import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
+import { FolderTree } from '@/components/FolderBrowser/FolderTree'
 import { useOpenIn } from '@/components/OpenIn/useOpenIn'
 import { FilesResizer } from '@/components/ProjectFiles/FilesResizer'
 import { Button } from '@/components/ui/button'
@@ -109,15 +109,14 @@ interface Props {
   /** その枠のパス。起点であり、相対パスの基準でもある */
   project: string
   /**
-   * 最初に見せる場所。**覚えていた場所がここへ来る**（`イシューグループ_2026-0813-1804` 設計§5-1）。
+   * 覚えていた展開を返す。**ツリーを取り付けたときに1回だけ呼ばれる**
+   * （`イシューグループ_2026-0813-1804` 設計§5-1 の「読み込み直しても覚えている」を、展開で引き継ぐ）。
    *
-   * `project` と分けてあるのが要点で、**辿らせる範囲（`root`）は起点のままに、
-   * 始める場所だけを動かす**。同じ値を両方へ渡していた頃は、覚えた場所を渡すと
-   * 辿れる範囲まで動いてしまう形だった。
+   * 値ではなく関数で受けるのが要点で、**読むのはサイドバーを実際に描く1か所だけ**になる。
    */
-  start: string
-  /** いま見ている場所が変わるたびに呼ばれる。**覚えるのは受け取った側**（設計§4） */
-  onPathChange: (path: string) => void
+  loadExpanded: () => string[]
+  /** 展開の並びが変わるたびに呼ばれる。**覚えるのは受け取った側**（設計§4） */
+  onExpandedChange: (expanded: string[]) => void
   /** 幅（px）。**利用者が縁で決める**ので動的 */
   width: number
   /** 縁を掴んでいるか。**場所取りの動きを止めるためだけに使う** */
@@ -134,8 +133,8 @@ interface Props {
 export function Sidebar({
   host,
   project,
-  start,
-  onPathChange,
+  loadExpanded,
+  onExpandedChange,
   width,
   dragging,
   onPickFile,
@@ -145,8 +144,8 @@ export function Sidebar({
   onMove,
   onDrop,
 }: Props) {
-  // **サイドバーを開いている間だけ問い合わせる**（畳むと木から消えて止まる）。追加シートは
-  // `FolderBrowser` に渡さないので、エクスプローラ・VSCode で開く口はここにしか出ない
+  // **サイドバーを開いている間だけ問い合わせる**（畳むと木から消えて止まる）。追加シートの
+  // `FolderBrowser` は開く口を持たないので、エクスプローラ・VSCode で開く口はここにしか出ない
   const 開く口 = useOpenIn(host)
   return (
     <>
@@ -205,23 +204,17 @@ export function Sidebar({
         </div>
 
         {/*
-          **高さの鎖の最後の輪**（設計§7）。`FolderBrowser` の `h-full` はこの段に対して
-          解決される。一覧のスクロールは `FolderBrowser` の中が持つので、ここでは二重に
+          **高さの鎖の最後の輪**（設計§7）。`FolderTree` の `h-full` はこの段に対して
+          解決される。一覧のスクロールは `FolderTree` の中が持つので、ここでは二重に
           持たない（移設前の `ProjectFiles` の1段目をそのまま運んできたもの）
         */}
         <div data-testid="project-files" className="min-h-0 flex-1 overflow-hidden">
-          <FolderBrowser
+          <FolderTree
+            key={`${host}\u0000${project}`}
             host={host}
-            start={start}
             root={project}
-            /*
-              **起点を「黙って行き直す先」として渡す。** `start` は覚えていた場所で、
-              利用者がいま押したものではない——着けなかったときに赤い1行で出迎えない
-              ようにする（設計§6-2）。追加シートはこれを渡さないので、あちらは
-              いままでどおり理由を出す
-            */
-            fallback={project}
-            onPathChange={onPathChange}
+            loadExpanded={loadExpanded}
+            onExpandedChange={onExpandedChange}
             onPickFile={onPickFile}
             current={current}
             openIn={

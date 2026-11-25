@@ -766,7 +766,7 @@ gate        = "e2e"
 tests       = [
   { file = "web/e2e/project-files.spec.ts", name = "左パネルを開き、ファイルを読み、相対パスをコピーできる" },
 ]
-breaks_when = "FolderBrowser の起点より上を弾く判定を外す"
+breaks_when = "FolderTree の最上段をルートの親から描く（※壊し方の記録が無く、実装から書いた）"
 verified    = false
 
 [[entry]]

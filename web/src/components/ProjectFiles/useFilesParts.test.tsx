@@ -15,6 +15,7 @@ import { resolve } from 'node:path'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
+import { resetListings } from '@/lib/folderListings'
 
 const ROOT = '/home/me/dev/app'
 
@@ -35,7 +36,13 @@ let 失敗: Record<string, number> = {}
  * ときは `pick` だけ渡す——**そこが前方互換の検査そのもの**になる。
  */
 function 覚えさせる(
-  place: { dir?: string; pick?: string; picks?: string[] },
+  place: {
+    expanded?: string[]
+    dirSeen?: string | null
+    dir?: string
+    pick?: string
+    picks?: string[]
+  },
   project = ROOT,
 ) {
   globalThis.localStorage.setItem(
@@ -49,6 +56,7 @@ function 覚えている(project = ROOT): {
   dir?: unknown
   pick?: unknown
   picks?: unknown
+  expanded?: unknown
 } {
   const raw = globalThis.localStorage.getItem(
     'agentdashboard.project-files-place',
@@ -114,9 +122,36 @@ function 置く(props: { project?: string; open?: boolean } = {}) {
   return { view, toggles }
 }
 
+function 行(path: string): HTMLElement {
+  const found = screen
+    .queryAllByTestId('folder-entry')
+    .find((row) => row.getAttribute('data-path') === path)
+  if (found === undefined) {
+    throw new Error(`行がありません：${path}`)
+  }
+  return found
+}
+
+function 子の一覧(path: string): HTMLElement | undefined {
+  return screen
+    .queryAllByTestId('folder-children')
+    .find((list) => list.getAttribute('data-path') === path)
+}
+
+function 問い合わせた数(path: string): number {
+  return (globalThis.fetch as unknown as { mock: { calls: [string][] } }).mock.calls
+    .map(([url]) => url)
+    .filter(
+      (url) =>
+        !url.includes('/file?') &&
+        new URL(url, 'http://x').searchParams.get('path') === path,
+    ).length
+}
+
 beforeEach(() => {
   slow = {}
   失敗 = {}
+  resetListings()
   globalThis.localStorage.clear()
   vi.stubGlobal(
     'fetch',
@@ -172,7 +207,7 @@ describe('会話からファイルを開く', () => {
 })
 
 describe('サイドバー', () => {
-  it('起点から始まり、起点より上へは辿れない', async () => {
+  it('起点から始まり、起点より上の行は出ない', async () => {
     置く()
 
     await waitFor(() =>
@@ -181,32 +216,31 @@ describe('サイドバー', () => {
         ROOT,
       ),
     )
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
 
     // 上の段は出るが押せない。**出しても押せない段は作らない**のではなく、
     // 現在地までの道筋は見せたうえで、外側だけを塞ぐ
     const crumbs = screen.getAllByTestId('folder-crumb')
     expect(crumbs.map((crumb) => crumb.textContent)).toEqual(['…', 'app'])
     expect(crumbs[0]).toHaveAttribute('title', '起点より上：/home/me/dev')
+    expect(crumbs[0]).toBeDisabled()
     expect(screen.getByTestId('folder-crumbs').textContent).toBe('…/app')
-    for (const crumb of crumbs) {
-      if (crumb.textContent === 'app') {
-        expect(crumb).toBeEnabled()
-      } else {
-        expect(crumb).toBeDisabled()
-      }
-    }
+    expect(screen.queryByTestId('folder-up')).toBeNull()
+    expect(
+      screen.getAllByTestId('folder-entry').map((row) => row.getAttribute('data-path')),
+    ).toEqual([`${ROOT}/MyDocs`, `${ROOT}/計画.md`])
   })
 
-  it('別の枠へ移ると、その枠の起点から始まる', async () => {
+  it('別の枠へ移ると、その枠の展開を引く', async () => {
     const other = '/home/me/dev/other'
     const { view } = 置く()
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs`))
     await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
+      expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true'),
     )
 
+    覚えさせる({ expanded: [`${other}/MyDocs`], dirSeen: null }, other)
     view.rerender(
       <Placement host="local" project={other} open onToggle={() => {}} />,
     )
@@ -216,45 +250,35 @@ describe('サイドバー', () => {
         other,
       ),
     )
+    await waitFor(() =>
+      expect(行(`${other}/MyDocs`)).toHaveAttribute('aria-expanded', 'true'),
+    )
+    await waitFor(() => expect(子の一覧(`${other}/MyDocs`)).toBeDefined())
 
-    // 落ち着いたあとも新しい枠のままであること（戻らない）
+    // 落ち着いたあとも新しい枠のままで、元の枠の展開を持ち越さない
     await new Promise((done) => setTimeout(done, 50))
     expect(screen.getByTestId('folder-browser')).toHaveAttribute(
       'data-path',
       other,
     )
+    expect(
+      screen
+        .getAllByTestId('folder-entry')
+        .some((row) => (row.getAttribute('data-path') ?? '').startsWith(ROOT)),
+    ).toBe(false)
   })
 
-  it('速く辿っても、古い応答が新しい表示を上書きしない', async () => {
+  it('速く展開と畳みを繰り返しても、古い応答が新しい表示を上書きしない', async () => {
     置く()
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
-    )
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
 
     slow[`${ROOT}/MyDocs`] = 80
-    const into = screen
-      .getAllByTestId('folder-entry')
-      .find((row) => row.getAttribute('data-name') === 'MyDocs')
-    await userEvent.click(into as HTMLElement)
-    const back = screen
-      .getAllByTestId('folder-crumb')
-      .find((crumb) => crumb.textContent === 'app')
-    await userEvent.click(back as HTMLElement)
+    await userEvent.click(行(`${ROOT}/MyDocs`))
+    await userEvent.click(行(`${ROOT}/MyDocs`))
 
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
-    )
     await new Promise((done) => setTimeout(done, 150))
-    expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-      'data-path',
-      ROOT,
-    )
+    expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'false')
+    expect(子の一覧(`${ROOT}/MyDocs`)).toBeUndefined()
   })
 
   it('フォルダ行から相対パスをコピーできる', async () => {
@@ -419,47 +443,43 @@ describe('ファイルの中身の列', () => {
     expect(戻った).toHaveAttribute('data-path', `${ROOT}/計画.md`)
   })
 
-  it('掘っていた場所を覚えていて、置き直すと戻る', async () => {
-    覚えさせる({ dir: `${ROOT}/MyDocs` })
+  it('展開を覚えていて、置き直すと戻る', async () => {
+    const { view } = 置く()
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs`))
+    await waitFor(() => expect(覚えている().expanded).toEqual([`${ROOT}/MyDocs`]))
+
+    view.unmount()
+    resetListings()
     置く()
 
-    // **起点が1フレームも見えないこと**は目でしか言えないが、着く先はここで言える
     await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        `${ROOT}/MyDocs`,
-      ),
+      expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true'),
     )
+    await waitFor(() => expect(行(`${ROOT}/MyDocs/計画.md`)).toBeInTheDocument())
   })
 
-  it('畳んで開き直しても、掘っていた場所を覚えている', async () => {
+  it('サイドバーを畳んで開き直しても、展開を覚えている', async () => {
     const { view } = 置く()
-    await screen.findByTestId('folder-browser')
-    const into = screen
-      .getAllByTestId('folder-entry')
-      .find((row) => row.getAttribute('data-name') === 'MyDocs')
-    await userEvent.click(into as HTMLElement)
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs`))
     await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        `${ROOT}/MyDocs`,
-      ),
+      expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true'),
     )
 
     // 畳む → 開き直す。**「リロードでは覚えているのに畳むと戻る」を作らない**
     view.rerender(
       <Placement host="local" project={ROOT} open={false} onToggle={() => {}} />,
     )
+    await waitFor(() => expect(screen.queryByTestId('project-files-panel')).toBeNull())
     view.rerender(
       <Placement host="local" project={ROOT} open onToggle={() => {}} />,
     )
 
     await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        `${ROOT}/MyDocs`,
-      ),
+      expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true'),
     )
+    expect(子の一覧(`${ROOT}/MyDocs`)).toBeDefined()
   })
 
   it('枠が空文字から実体へ変わっても、前の枠のファイルを読みに行かない', async () => {
@@ -484,64 +504,49 @@ describe('ファイルの中身の列', () => {
     expect(calls.filter((url) => url.includes('/file?'))).toHaveLength(1)
   })
 
-  it('開いている最中に掘っても、読み直しは走らない', async () => {
+  it('サイドバーで展開しても、覚えを書いたことで読み直しは走らない', async () => {
     /*
-      **覚えた値を `start` へ流し続けない**（設計§5-2）。流すと `start` が変わる
-      たびに辿り直しの効果が走り、**移動1回につき問い合わせが2回**になる。
+      **覚えた値をツリーへ流し戻さない**（設計§5-2・6-4）。流すと受け取り物が変わる
+      たびに読み直しの効果が走り、**展開1回につき問い合わせが2回**になる。
       跨いだ配置では1回あたり最大5秒かかるので、実害が出る。
     */
     置く()
-    await screen.findByTestId('folder-browser')
-    const 前 = (globalThis.fetch as unknown as { mock: { calls: [string][] } })
-      .mock.calls.length
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
 
-    const into = screen
-      .getAllByTestId('folder-entry')
-      .find((row) => row.getAttribute('data-name') === 'MyDocs')
-    await userEvent.click(into as HTMLElement)
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        `${ROOT}/MyDocs`,
-      ),
-    )
+    await userEvent.click(行(`${ROOT}/MyDocs`))
+    await waitFor(() => expect(行(`${ROOT}/MyDocs/計画.md`)).toBeInTheDocument())
     await new Promise((done) => setTimeout(done, 50))
 
-    const 後 = (globalThis.fetch as unknown as { mock: { calls: [string][] } })
-      .mock.calls.length
-    expect(後 - 前).toBe(1)
+    expect(問い合わせた数(`${ROOT}/MyDocs`)).toBe(1)
   })
 
-  it('覚えていた場所が無ければ、黙って起点へ落ちる', async () => {
-    覚えさせる({ dir: `${ROOT}/消えた` })
-    失敗[`${ROOT}/消えた`] = 404
+  it('覚えていた展開中のフォルダが無ければ（404）、断り文を出さずに黙って畳む', async () => {
+    覚えさせる({ expanded: [`${ROOT}/MyDocs`], dirSeen: null })
+    失敗[`${ROOT}/MyDocs`] = 404
     置く()
 
+    await waitFor(() => expect(問い合わせた数(`${ROOT}/MyDocs`)).toBe(1))
     await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
+      expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'false'),
     )
-    // **断り文を出さない。** 覚えていた場所は利用者がいま押したものではない
+    // **断り文を出さない。** 覚えていた展開は利用者がいま押したものではない
     expect(screen.queryByTestId('folder-error')).toBeNull()
   })
 
-  it('覚えていた場所が「読めない」だけなら、落とさずに理由を出す', async () => {
-    覚えさせる({ dir: `${ROOT}/MyDocs` })
+  it('覚えていた展開中のフォルダが「読めない」だけなら、展開したまま理由を出す', async () => {
+    覚えさせる({ expanded: [`${ROOT}/MyDocs`], dirSeen: null })
     失敗[`${ROOT}/MyDocs`] = 403
     置く()
 
     /*
-      **起点へ行き直さない。** 寝ている PC では起点も同じ理由で失敗するので、
-      見える結果は変わらないまま時間切れが2回並ぶ（設計§6-3）。
-      記憶も残るので、PC が起きれば戻る。
+      **畳まない。** 寝ている PC では同じ理由で失敗し続けるので、畳んで覚えから
+      外すと、PC が起きたときに戻る先が消える（設計§6-3）。
     */
-    expect(await screen.findByTestId('folder-error')).toBeInTheDocument()
-    expect(screen.getByTestId('folder-browser')).not.toHaveAttribute(
+    expect(await screen.findByTestId('folder-error')).toHaveAttribute(
       'data-path',
-      ROOT,
+      `${ROOT}/MyDocs`,
     )
+    expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('覚えていたファイルが読めなければ、列ごと畳む', async () => {
@@ -556,33 +561,31 @@ describe('ファイルの中身の列', () => {
     )
   })
 
-  it('覚えていた場所が「繋がっていない」だけなら、落とさずに理由を出す', async () => {
-    覚えさせる({ dir: `${ROOT}/MyDocs` })
+  it('覚えていた展開中のフォルダが「繋がっていない」だけなら、展開したまま理由を出す', async () => {
+    覚えさせる({ expanded: [`${ROOT}/MyDocs`], dirSeen: null })
     失敗[`${ROOT}/MyDocs`] = 503
     置く()
 
-    // **寝ている PC で記憶を消さない。** 起点も同じ理由で失敗するので、
-    // 行き直しても見える結果は変わらないまま時間切れが2回並ぶ（設計§6-3）
-    expect(await screen.findByTestId('folder-error')).toBeInTheDocument()
-    expect(覚えている().dir).toBe(`${ROOT}/MyDocs`)
+    // **寝ている PC で記憶を消さない**（設計§6-3）
+    expect(await screen.findByTestId('folder-error')).toHaveAttribute(
+      'data-path',
+      `${ROOT}/MyDocs`,
+    )
+    expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true')
+    expect(覚えている().expanded).toEqual([`${ROOT}/MyDocs`])
   })
 
-  it('起点へ落ちたあと、覚えていた場所が起点で上書きされる', async () => {
-    覚えさせる({ dir: `${ROOT}/消えた` })
-    失敗[`${ROOT}/消えた`] = 404
+  it('消えていた（404）枝は、覚えの展開から外れる', async () => {
+    覚えさせる({ expanded: [`${ROOT}/MyDocs`], dirSeen: null })
+    失敗[`${ROOT}/MyDocs`] = 404
     置く()
 
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
-    )
+    await waitFor(() => expect(問い合わせた数(`${ROOT}/MyDocs`)).toBe(1))
     /*
       **専用の「忘れる」通知を持たずに済んでいること**（設計§6-2）。
-      起点へ着けば `onPathChange` が飛ぶので、死んだ値はその場で上書きされる。
+      畳んだ並びが `onExpandedChange` で届くので、死んだ値はその場で外れる。
     */
-    await waitFor(() => expect(覚えている().dir).toBe(ROOT))
+    await waitFor(() => expect(覚えている().expanded).toEqual([]))
   })
 
   it('覚えていたファイルが「無い」ときは忘れ、「読めない」ときは忘れない', async () => {
@@ -1378,7 +1381,8 @@ describe('タブ', () => {
     await screen.findByTestId('file-view')
     // **フォルダは押す的が違う**（リンクになるのはファイルだけ）
     await userEvent.click(await screen.findByRole('button', { name: 'MyDocs' }))
-    await 開く('計画.md')
+    await waitFor(() => expect(行(`${ROOT}/MyDocs/計画.md`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs/計画.md`))
 
     const 覚え = 覚えている()
     expect(覚え.picks).toHaveLength(2)

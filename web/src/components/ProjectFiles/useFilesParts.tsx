@@ -39,7 +39,7 @@ import { usePanelWidths } from '@/lib/filesPanel'
 import { moveTab } from '@/lib/fileTabs'
 import { isUnder } from '@/lib/hostfs'
 import { OPEN_FILE } from '@/lib/openFile'
-import { putDir, putPicks, readPlace } from '@/lib/filesPlace'
+import { putExpanded, putPicks, readExpanded, readPlace } from '@/lib/filesPlace'
 
 /**
  * 開いているタブ1枚。**押した1枚と、覚えていて戻した1枚を1つの型で持つ。**
@@ -171,7 +171,6 @@ export function useFilesParts({
   )
   // **人が押した回数**（設計§5）。復元と閉じるでは増やさない
   const [選んだ回数, set選んだ回数] = useState(0)
-  const [起点, set起点] = useState(() => readPlace(host, project).dir ?? project)
   const [widths, grip, dragging] = usePanelWidths()
 
   /*
@@ -186,7 +185,6 @@ export function useFilesParts({
   if (前の相手 !== 相手) {
     set前の相手(相手)
     set開いている(覚えた並び(host, project))
-    set起点(readPlace(host, project).dir ?? project)
   }
 
   /*
@@ -216,30 +214,18 @@ export function useFilesParts({
   )
 
   /*
-    **畳んだサイドバーを開き直したときも読み直す。**
-
-    `start` を固定するだけだと、畳んで開き直したときに起点へ戻る。「リロードでは
-    覚えているのに畳むと戻る」は、利用者から見て同じ不満になる（設計§5-5）。
-
-    開いていない間サイドバーは木から消えているので、`false → true` の描画は
-    辿る側がマウントする描画そのもの——**余計な問い合わせは1回も増えない**。
+    **`useCallback` を外さないこと。** ツリーは受け取った関数を取り付けたときに読み、
+    書く側は控えて呼ぶだけなので、いまは渡すたびに新しい関数でも回らない。それでも
+    依存に入れる使い手が1つでも増えると、効果が走る → 状態が変わる → また新しい関数、と
+    **問い合わせが回り続ける**（設計§5-3・6-4）。
   */
-  const [前の開閉, set前の開閉] = useState(open)
-  if (前の開閉 !== open) {
-    set前の開閉(open)
-    if (open) {
-      set起点(readPlace(host, project).dir ?? project)
-    }
-  }
-
-  /*
-    **`useCallback` を外さないこと。** 辿る側の `go` はこれを依存に持ち、辿り直しの
-    効果が `go` を依存に持つ。渡すたびに新しい関数だと、効果が走る → 状態が変わる →
-    また新しい関数、と**問い合わせが回り続ける**（設計§5-3）。
-  */
-  const 掘った先を覚える = useCallback(
-    (path: string) => {
-      putDir(host, project, path)
+  const 展開を読む = useCallback(
+    () => (project === '' ? [] : readExpanded(host, project)),
+    [host, project],
+  )
+  const 展開を覚える = useCallback(
+    (並び: string[]) => {
+      if (project !== '') putExpanded(host, project, 並び)
     },
     [host, project],
   )
@@ -456,8 +442,8 @@ export function useFilesParts({
             key="folder"
             host={host}
             project={project}
-            start={起点}
-            onPathChange={掘った先を覚える}
+            loadExpanded={展開を読む}
+            onExpandedChange={展開を覚える}
             width={widths.folder}
             /*
               **掴んでいる間だけ、場所取りの動きを止める**（`Sidebar.tsx`）。
