@@ -243,8 +243,8 @@ describe('PJT を追加', () => {
   })
 
   it('写せない環境では、ここでも値を選べる形で出す', async () => {
-    // **同じ `FolderBrowser` なので、片方だけ直る形が作れない**（設計§5）。
-    // 左パネル側は `FolderBrowser.test.tsx` が見ているので、ここは
+    // **行・メニュー・コピーは `parts.tsx` を共有するので、片方だけ直る形が作れない**（設計§5）。
+    // 部品ごとの側は `FolderBrowser.test.tsx`（追加シート）と `FolderTree.test.tsx`（サイドバー）が見ているので、ここは
     // **配線が生きていること**を1本で確かめる
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
