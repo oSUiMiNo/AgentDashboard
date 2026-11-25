@@ -8,7 +8,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
+import { ChevronGlyph, CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
 import { OpenInMenuItems } from '@/components/OpenIn/OpenInMenuItems'
 import { OpenedMark } from '@/components/OpenIn/OpenedMark'
 import { fileIcon } from '@/lib/fileKind'
@@ -140,6 +140,10 @@ function 素の左クリックか(event: {
  */
 export function FolderRow({
   as: Outer = "li",
+  density = "list",
+  depth = 0,
+  twistie = "none",
+  expanded,
   entry,
   full,
   host,
@@ -152,6 +156,10 @@ export function FolderRow({
   openIn,
 }: {
   as?: "li" | "div"
+  density?: "list" | "tree"
+  depth?: number
+  twistie?: "expanded" | "collapsed" | "none"
+  expanded?: boolean
   current?: boolean
   entry: DirEntry
   /** この行が指す絶対パス */
@@ -175,9 +183,12 @@ export function FolderRow({
   // 送ったパスの文字のままと、正規化した実体のパスの両方で突き合わせる（設計§3-6）
   const 開いている = openIn !== undefined && isOpenedIn(openIn.view, full)
 
+  const ツリー = density === "tree"
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
-  const 行のクラス =
-    `h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal${current ? " folder-entry-current" : ""}`
+  const 行のクラス = ツリー
+    ? `h-7 min-w-0 flex-1 justify-start gap-2 px-2 py-0 text-left font-normal touch:h-auto touch:py-2 aria-expanded:bg-transparent${current ? " folder-entry-current" : ""}`
+    : `h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal${current ? " folder-entry-current" : ""}`
+  const 字下げ = ツリー ? { paddingLeft: `${depth * 12 + 8}px` } : undefined
 
   // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）。**1つの式から作る**
   // ——開く口の有無で2箇所に書くと、片方だけ直されて札の形が割れる
@@ -193,6 +204,15 @@ export function FolderRow({
 
   const 中身 = (
     <>
+      {ツリー && (
+        <span aria-hidden data-testid="folder-twistie" className="text-muted-foreground grid size-4 shrink-0 place-items-center">
+          {twistie !== "none" && (
+            <span className="folder-tree-twistie" data-expanded={twistie === "expanded" ? "true" : "false"}>
+              <ChevronGlyph direction="right" className="size-4" />
+            </span>
+          )}
+        </span>
+      )}
       {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
           押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
           違うと決めてあるので、印もそこへ合わせる） */}
@@ -200,6 +220,7 @@ export function FolderRow({
         <FileTypeIcon
           className="size-[18px]"
           type={entry.kind === "dir" ? "folder" : entry.kind === "symlink" ? "link" : fileIcon(entry.name)}
+          tone={ツリー && entry.kind === "dir" && twistie === "collapsed" ? "closed" : undefined}
         />
       </span>
       {/*
@@ -258,6 +279,8 @@ export function FolderRow({
                 aria-current={current ? "page" : undefined}
                 data-kind={entry.kind}
                 data-name={entry.name}
+                data-path={ツリー ? full : undefined}
+                style={字下げ}
                 href={rawUrl(host, full)}
                 // **開いた先から元の窓を触らせない。** `FileView` と揃える
                 rel="noopener"
@@ -279,6 +302,9 @@ export function FolderRow({
               data-testid="folder-entry"
               data-kind={entry.kind}
               data-name={entry.name}
+              data-path={ツリー ? full : undefined}
+              aria-expanded={ツリー && entry.kind === "dir" ? expanded : undefined}
+              style={字下げ}
               disabled={!pressable}
               onClick={openable ? onOpen : undefined}
               className={行のクラス}

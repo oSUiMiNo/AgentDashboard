@@ -54,14 +54,22 @@ function 形(type: IconType) {
   }
 }
 
-export function FileTypeIcon({ type, className }: { type: IconType; className?: string }) {
+export function FileTypeIcon({
+  type,
+  className,
+  tone,
+}: {
+  type: IconType
+  className?: string
+  tone?: 'closed'
+}) {
   return (
     <svg
       aria-hidden
       viewBox="0 0 24 24"
       data-icon={type}
       className={className}
-      style={{ color: 色[type] }}
+      style={{ color: tone === 'closed' ? 'var(--type-folder-closed)' : 色[type] }}
     >
       {形(type)}
     </svg>
