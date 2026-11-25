@@ -190,7 +190,7 @@ export function FolderRow({
   const ツリー = density === "tree"
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
   const 行のクラス = ツリー
-    ? `h-7 min-w-0 flex-1 justify-start gap-2 px-2 py-0 text-left touch:h-auto touch:py-2 aria-expanded:bg-transparent font-normal${current ? " folder-entry-current" : ""}`
+    ? `h-7 min-w-0 flex-1 justify-start gap-2 overflow-clip px-2 py-0 text-left touch:h-auto touch:py-2 aria-expanded:bg-transparent font-normal${current ? " folder-entry-current" : ""}`
     : `h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal${current ? " folder-entry-current" : ""}`
   const 字下げ = ツリー ? { paddingLeft: `${depth * 12 + 8}px` } : undefined
 
