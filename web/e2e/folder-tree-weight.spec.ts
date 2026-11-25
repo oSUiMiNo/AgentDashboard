@@ -38,6 +38,46 @@ async function 二つの絵(page: Page) {
   );
 }
 
+const 大きな違い = 16;
+
+async function 絵の違い(page: Page, a: Buffer, b: Buffer) {
+  const 白紙 = await page.context().newPage();
+  try {
+    return await 白紙.evaluate(
+      async ({ a, b, 閾 }) => {
+        const 読む = async (s: string) => {
+          const bm = await createImageBitmap(await (await fetch(`data:image/png;base64,${s}`)).blob());
+          const c = new OffscreenCanvas(bm.width, bm.height);
+          const g = c.getContext("2d");
+          if (g === null) throw new Error("2d の描き先が無い");
+          g.drawImage(bm, 0, 0);
+          return g.getImageData(0, 0, bm.width, bm.height);
+        };
+        const A = await 読む(a);
+        const B = await 読む(b);
+        if (A.width !== B.width || A.height !== B.height) return { 違う: -1, 大きい: -1, 最大: -1 };
+        let 違う = 0;
+        let 大きい = 0;
+        let 最大 = 0;
+        for (let i = 0; i < A.data.length; i += 4) {
+          const d = Math.max(
+            Math.abs(A.data[i] - B.data[i]),
+            Math.abs(A.data[i + 1] - B.data[i + 1]),
+            Math.abs(A.data[i + 2] - B.data[i + 2]),
+          );
+          if (d > 0) 違う += 1;
+          if (d > 閾) 大きい += 1;
+          最大 = Math.max(最大, d);
+        }
+        return { 違う, 大きい, 最大 };
+      },
+      { a: a.toString("base64"), b: b.toString("base64"), 閾: 大きな違い },
+    );
+  } finally {
+    await 白紙.close();
+  }
+}
+
 async function 閉じる(page: Page, panel: Locator) {
   const ボタン = panel.getByTestId("project-files-close");
   if (await ボタン.isVisible()) {
@@ -383,7 +423,7 @@ test.describe("サイドバーのツリー（手当ての確かめと重さ）",
     expect(値.rendered ?? 0).toBeLessThan(値.rows);
   });
 
-  test("ページ内検索の代わりに window.find で、画面の外の行の名前も見つかる（記録だけ）", async ({ page }) => {
+  test("ページ内検索の代わりに window.find で、画面の外の行の名前も見つかり、その行が器の中へ来る", async ({ page }) => {
     test.setTimeout(600_000);
     await 全部を展開して開く(page);
     const 値 = await page.evaluate(
@@ -445,17 +485,32 @@ test.describe("サイドバーのツリー（手当ての確かめと重さ）",
       { sel: 最上段, 多い: 重い多い先 },
     );
     確かめを書く("N20", 値);
+    if ("error" in 値) throw new Error(String(値.error));
+    expect(値.対照, "見えている行の名前を window.find で見つけられる（対照）").toBe(true);
+    expect(値.遠いは描かれていた, "探す前は、遠い行は描かれていない").toBe(false);
+    expect(値.外, "画面の外の行の名前を window.find で見つけられる").toBe(true);
+    expect(値.遠いが描かれた).toBe(true);
+    expect(値.遠いが器の中, "見つけた行が器の中へ来る").toBe(true);
   });
 
-  test("焦点の輪が行の外枠で切れない（記録だけ）", async ({ page }) => {
+  test("焦点の輪が行の外枠で切れない（content-visibility を切った対照と比べて、輪の画素が欠けていない）", async ({ page }) => {
     test.setTimeout(600_000);
     await openDashboard(page);
     await addProject(page, 重い);
     const panel = await 冷えた状態で開く(page);
     await 展開する(panel, 重い枝たち[0], 300);
     await 閉じて開き直す(page, panel);
+    await page.mouse.move(0, 0);
     const 枝行 = 行(panel, 重い枝たち[0]);
     await expect(枝行).toBeVisible();
+    const 箱 = await 枝行.locator("xpath=..").boundingBox();
+    const clip =
+      箱 === null
+        ? null
+        : { x: Math.max(0, 箱.x - 8), y: Math.max(0, 箱.y - 8), width: 箱.width + 16, height: 箱.height + 16 };
+    expect(clip).not.toBeNull();
+    if (clip === null) return;
+    const 焦点なし = await page.screenshot({ clip, animations: "disabled" });
     await 枝行.focus();
     await page.keyboard.press("Tab");
     await page.keyboard.press("Shift+Tab");
@@ -464,14 +519,7 @@ test.describe("サイドバーのツリー（手当ての確かめと重さ）",
       const e = document.activeElement as HTMLElement | null;
       return { path: e?.dataset.path ?? null, focusVisible: e?.matches(":focus-visible") ?? false };
     });
-    const 箱 = await 枝行.locator("xpath=..").boundingBox();
-    const clip =
-      箱 === null
-        ? null
-        : { x: Math.max(0, 箱.x - 8), y: Math.max(0, 箱.y - 8), width: 箱.width + 16, height: 箱.height + 16 };
-    if (出力先 !== undefined && clip !== null) {
-      await page.screenshot({ path: path.join(出力先, "ring-cv.png"), clip });
-    }
+    const 焦点あり = await page.screenshot({ clip, animations: "disabled" });
     await page.addStyleTag({
       content: ".folder-tree-row{content-visibility:visible!important;contain:none!important}",
     });
@@ -480,10 +528,30 @@ test.describe("サイドバーのツリー（手当ての確かめと重さ）",
       const e = document.activeElement as HTMLElement | null;
       return { path: e?.dataset.path ?? null, focusVisible: e?.matches(":focus-visible") ?? false };
     });
-    if (出力先 !== undefined && clip !== null) {
-      await page.screenshot({ path: path.join(出力先, "ring-control.png"), clip });
+    const 対照 = await page.screenshot({ clip, animations: "disabled" });
+    if (出力先 !== undefined) {
+      fs.writeFileSync(path.join(出力先, "ring-none.png"), 焦点なし);
+      fs.writeFileSync(path.join(出力先, "ring-cv.png"), 焦点あり);
+      fs.writeFileSync(path.join(出力先, "ring-control.png"), 対照);
     }
-    確かめを書く("N21", { 焦点, 焦点2, clip, saved: 出力先 !== undefined });
+    const 対照との違い = await 絵の違い(page, 焦点あり, 対照);
+    const 焦点なしとの違い = await 絵の違い(page, 焦点あり, 焦点なし);
+    確かめを書く("N21", {
+      焦点,
+      焦点2,
+      clip,
+      同じ: 焦点あり.equals(対照),
+      対照との違い,
+      焦点なしとの違い,
+      saved: 出力先 !== undefined,
+    });
+    await test.info().attach("ring-none", { body: 焦点なし, contentType: "image/png" });
+    await test.info().attach("ring-cv", { body: 焦点あり, contentType: "image/png" });
+    await test.info().attach("ring-control", { body: 対照, contentType: "image/png" });
+    expect(焦点).toEqual({ path: 重い枝たち[0], focusVisible: true });
+    expect(焦点2).toEqual({ path: 重い枝たち[0], focusVisible: true });
+    expect(焦点なしとの違い.大きい, "焦点の輪が切り抜きの中に写っている").toBeGreaterThan(0);
+    expect(対照との違い.大きい, "content-visibility の切り取りで輪が欠けていない（対照と大きく違う画素が無い）").toBe(0);
   });
 
   test("重さ（記録だけ）：枝を6つ展開した上で、1,000件のフォルダを展開する", async ({ page }) => {
