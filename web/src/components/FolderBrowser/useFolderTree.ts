@@ -45,12 +45,28 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
   const 番号 = useRef(new Map<string, number>())
   const 飛んでいる = useRef(new Set<string>())
   const 見えていた = useRef(new Set<string>())
-  const 列 = useRef<{ 走っている: number; 待ち: (() => void)[] }>({ 走っている: 0, 待ち: [] })
+  const 取り外した = useRef(false)
+  const 列 = useRef<{ 走っている: number; 待ち: { 始める: () => void; 捨てる: () => void }[] }>({
+    走っている: 0,
+    待ち: [],
+  })
   const 覚える = useRef(onExpandedChange)
 
   useEffect(() => {
     覚える.current = onExpandedChange
   })
+
+  useEffect(() => {
+    取り外した.current = false
+    const 今の列 = 列.current
+    return () => {
+      取り外した.current = true
+      見えていた.current = new Set()
+      for (const 待っていた of 今の列.待ち.splice(0)) {
+        待っていた.捨てる()
+      }
+    }
+  }, [])
 
   const 並びを変える = useCallback((next: string[]) => {
     並びの今.current = next
@@ -75,14 +91,14 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
         列.current.走っている += 1
         void 仕事().finally(() => {
           列.current.走っている -= 1
-          列.current.待ち.shift()?.()
+          列.current.待ち.shift()?.始める()
           resolve()
         })
       }
       if (列.current.走っている < 同時に読む数) {
         始める()
       } else {
-        列.current.待ち.push(始める)
+        列.current.待ち.push({ 始める, 捨てる: resolve })
       }
     })
   }, [])
@@ -111,6 +127,9 @@ export function useFolderTree({ host, root, loadExpanded, onExpandedChange }: Op
         枝を置く(path, { state: 'ready', listing: 同じ && 前の一覧 !== null ? 前の一覧 : result })
       } catch (err) {
         if (番号.current.get(path) !== mine) {
+          return
+        }
+        if (取り外した.current) {
           return
         }
         if (読み方 === '覚え' && err instanceof HostFsError && err.status === 404) {

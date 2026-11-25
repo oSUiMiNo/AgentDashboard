@@ -8,7 +8,7 @@ import type { OpenInProp } from "@/components/FolderBrowser/parts";
 import { コピー表示を畳むまで } from "@/components/FolderBrowser/useCopyAnswer";
 import { putExpanded, readExpanded } from "@/lib/filesPlace";
 import { 送り直しを見張る間 } from "@/lib/folderTree";
-import { resetListings } from "@/lib/folderListings";
+import { putListing, readListing, resetListings } from "@/lib/folderListings";
 import type { OpenInView } from "@/lib/openIn";
 import { 一覧を引き直す間隔 } from "@/lib/poll";
 
@@ -706,6 +706,96 @@ describe("10秒の読み直し", () => {
     await 流す();
 
     expect(口.問い).toEqual([ROOT, `${ROOT}/MyDocs`]);
+  });
+});
+
+describe("取り外した後", () => {
+  it("取り外した後に、覚えからの読みの 404 が返っても覚えを書き直さず、成功した答えは中身の控えにだけ入る", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 口 = 偽の口({
+      [ROOT]: ["MyDocs", "src", "計画.md"],
+      [`${ROOT}/MyDocs`]: "止める",
+      [`${ROOT}/src`]: "止める",
+    });
+    const { unmount, onExpandedChange } = 置く({
+      loadExpanded: () => [`${ROOT}/MyDocs`, `${ROOT}/src`],
+    });
+    await 流す();
+    expect(口.止めた.map((each) => each.path).sort()).toEqual(
+      [`${ROOT}/MyDocs`, `${ROOT}/src`].sort(),
+    );
+
+    unmount();
+    口.止めた
+      .find((each) => each.path === `${ROOT}/MyDocs`)
+      ?.返す({ status: 404, body: "その場所は見つかりません" });
+    口.止めた.find((each) => each.path === `${ROOT}/src`)?.返す(["main.ts"]);
+    await 流す();
+
+    expect(onExpandedChange).not.toHaveBeenCalled();
+    expect(readListing("local", `${ROOT}/src`)?.entries.map((each) => each.name)).toEqual([
+      "main.ts",
+    ]);
+  });
+
+  it("取り外した後、待っていた覚えからの読みは飛ばない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 名前 = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
+    const 枝 = 名前.map((each) => `${ROOT}/${each}`);
+    const 口 = 偽の口({
+      [ROOT]: 名前,
+      ...Object.fromEntries(枝.map((each) => [each, "止める" as const])),
+    });
+    const { unmount } = 置く({ loadExpanded: () => 枝 });
+    await 流す();
+    expect(口.止めた).toHaveLength(4);
+    const 前 = 口.問い.length;
+    expect(前).toBe(5);
+
+    unmount();
+    while (口.止めた.length > 0) {
+      口.止めた.shift()?.返す(["x.md"]);
+      await 流す();
+    }
+
+    expect(口.問い).toHaveLength(前);
+  });
+
+  it("StrictMode で取り付けても、覚えていた枝が1本も抜けず1回ずつ読まれ、消えていた枝は覚えから外れ、同時に4本を越えない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 名前 = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
+    const 枝 = 名前.map((each) => `${ROOT}/${each}`);
+    const 口 = 偽の口({
+      [ROOT]: 名前,
+      ...Object.fromEntries(枝.map((each) => [each, "止める" as const])),
+    });
+    putListing("local", ROOT, {
+      path: ROOT,
+      truncated: false,
+      entries: 名前.map((name) => ({ name, kind: "dir" as const, is_project: false })),
+    });
+    const 覚えた = vi.fn();
+    render(
+      <StrictMode>
+        <FolderTree host="local" root={ROOT} loadExpanded={() => 枝} onExpandedChange={覚えた} />
+      </StrictMode>,
+    );
+    await 流す();
+
+    while (口.止めた.length > 0) {
+      const 次 = 口.止めた.shift();
+      次?.返す(次.path === 枝[7] ? { status: 404, body: "その場所は見つかりません" } : ["x.md"]);
+      await 流す();
+    }
+
+    for (const each of 枝.slice(0, 7)) {
+      expect(行(`${each}/x.md`)).not.toBeNull();
+    }
+    for (const each of 枝) {
+      expect(口.問い.filter((path) => path === each)).toHaveLength(1);
+    }
+    expect(覚えた).toHaveBeenLastCalledWith(枝.slice(0, 7));
+    expect(口.最大).toBeLessThanOrEqual(4);
   });
 });
 
