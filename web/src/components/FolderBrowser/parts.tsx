@@ -138,6 +138,7 @@ function 素の左クリックか(event: {
  * | **`onPickFile` が渡らない場面**（PJT の追加シート） | あの画面はファイルを見るためのものではない |
  */
 export function FolderRow({
+  as: Outer = "li",
   entry,
   full,
   host,
@@ -149,6 +150,7 @@ export function FolderRow({
   onCopy,
   openIn,
 }: {
+  as?: "li" | "div"
   current?: boolean
   entry: DirEntry
   /** この行が指す絶対パス */
@@ -247,7 +249,7 @@ export function FolderRow({
     */
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <li className="flex items-center gap-1">
+        <Outer className="flex items-center gap-1">
           {linkable ? (
             <Button asChild variant="ghost" className={行のクラス}>
               <a
@@ -290,7 +292,7 @@ export function FolderRow({
             state={copyState}
             onCopy={onCopy}
           />
-        </li>
+        </Outer>
       </ContextMenuTrigger>
       <PathMenu
         name={entry.name}
