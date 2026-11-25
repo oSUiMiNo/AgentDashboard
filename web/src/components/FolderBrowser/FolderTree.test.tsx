@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Profiler, StrictMode, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1665,5 +1665,431 @@ describe("開く口と別のタブ", () => {
     await 流す();
 
     expect(見る()).toEqual(前);
+  });
+});
+
+describe("ファイルの行は、ブラウザの新しいタブへ開けるリンク", () => {
+  const FILE = `${ROOT}/計画.md`;
+  const FOLDER = `${ROOT}/MyDocs`;
+  const RAW = `/api/hosts/local/file?path=${encodeURIComponent(FILE)}&as=raw`;
+
+  function 置く押せる形(onPickFile = vi.fn()) {
+    偽の口(基本);
+    置く({ onPickFile });
+    return onPickFile;
+  }
+
+  async function ファイルの行() {
+    return await 出るまで(FILE);
+  }
+
+  async function フォルダの行() {
+    return await 出るまで(FOLDER);
+  }
+
+  it("見出しはファイルの行にも出る", async () => {
+    置く押せる形();
+    await 右クリック(await ファイルの行());
+
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent("計画.md");
+  });
+
+  describe("姿", () => {
+    it("ファイルの行はリンクで、行き先は rawUrl と一致する", async () => {
+      置く押せる形();
+      const 行 = await ファイルの行();
+
+      expect(行.tagName).toBe("A");
+      expect(行).toHaveAttribute("href", RAW);
+    });
+
+    it("target を付けない（付けると素の左クリックまで外へ出る）", async () => {
+      置く押せる形();
+      expect(await ファイルの行()).not.toHaveAttribute("target");
+    });
+
+    it("rel に noopener を付ける（開いた先から元の窓を触らせない）", async () => {
+      置く押せる形();
+      expect(await ファイルの行()).toHaveAttribute("rel", "noopener");
+    });
+
+    it("フォルダの行はボタンのまま（行き先の URL が無い）", async () => {
+      置く押せる形();
+      expect((await フォルダの行()).tagName).toBe("BUTTON");
+    });
+
+    it("印（testid・kind・name）と中身が、いままでどおり引ける", async () => {
+      置く押せる形();
+      const 行 = await ファイルの行();
+
+      expect(行).toHaveAttribute("data-kind", "file");
+      expect(行).toHaveAttribute("data-name", "計画.md");
+      expect(行).toHaveTextContent("計画.md");
+      expect(行.querySelector('[data-testid="folder-entry-icon"]')).not.toBeNull();
+      expect(行.className).toContain("flex-1");
+      expect(行.className).toContain("justify-start");
+    });
+  });
+
+  describe("押し方の分岐", () => {
+    it("素の左クリックは奪って、アプリの中で開く", async () => {
+      const 押された = 置く押せる形();
+      const 行 = await ファイルの行();
+
+      expect(fireEvent.click(行, { button: 0 })).toBe(false);
+      expect(押された).toHaveBeenCalledTimes(1);
+      expect(押された).toHaveBeenCalledWith(FILE);
+    });
+
+    it.each([
+      ["Ctrl", { ctrlKey: true }],
+      ["Cmd（meta）", { metaKey: true }],
+      ["Shift", { shiftKey: true }],
+      ["Alt", { altKey: true }],
+    ])("%s ＋左クリックは奪わず、ブラウザに任せる", async (_名, 修飾) => {
+      const 押された = 置く押せる形();
+      const 行 = await ファイルの行();
+
+      expect(fireEvent.click(行, { button: 0, ...修飾 })).toBe(true);
+      expect(押された).not.toHaveBeenCalled();
+    });
+
+    it("中ボタンが click として届く環境でも奪わない（保険）", async () => {
+      const 押された = 置く押せる形();
+      const 行 = await ファイルの行();
+
+      expect(fireEvent.click(行, { button: 1 })).toBe(true);
+      expect(押された).not.toHaveBeenCalled();
+    });
+
+    it("Enter で開く（リンクのキーボード操作）", async () => {
+      const 押された = 置く押せる形();
+      const 行 = await ファイルの行();
+
+      行.focus();
+      await userEvent.keyboard("{Enter}");
+
+      expect(押された).toHaveBeenCalledWith(FILE);
+    });
+
+    it("フォルダの行は、修飾キーを押しても展開する（リンクではないので分岐が要らない）", async () => {
+      置く押せる形();
+
+      fireEvent.click(await フォルダの行(), { button: 0, ctrlKey: true });
+
+      await waitFor(() => expect(要る行(FOLDER)).toHaveAttribute("aria-expanded", "true"));
+      await 出るまで(`${FOLDER}/sub`);
+      expect(子の一覧(FOLDER)).not.toBeNull();
+    });
+  });
+
+  describe("周りを壊していない", () => {
+    it("ファイルの行でも、右クリックのメニューが出る", async () => {
+      置く押せる形();
+
+      expect(await 右クリック(await ファイルの行())).toBeInTheDocument();
+    });
+
+    it("ファイルのメニューに『ブラウザの新しいタブで開く』が出る", async () => {
+      置く押せる形();
+      await 右クリック(await ファイルの行());
+      const 項目 = await screen.findByTestId("folder-menu-open-tab");
+
+      expect(項目.tagName).toBe("A");
+      expect(項目).toHaveAttribute("href", RAW);
+      expect(項目).toHaveAttribute("target", "_blank");
+      expect(項目).toHaveAttribute("rel", "noopener");
+      expect(項目).toHaveTextContent("ブラウザの新しいタブで開く");
+    });
+
+    it("開くほうが、コピーより先に並ぶ", async () => {
+      置く押せる形();
+      const 中身 = await 右クリック(await ファイルの行());
+      const 並び = Array.from(中身.querySelectorAll("[data-testid^='folder-menu-']")).map((e) =>
+        e.getAttribute("data-testid"),
+      );
+
+      expect(並び).toEqual(["folder-menu-open-tab", "folder-menu-copy-abs", "folder-menu-copy-name"]);
+    });
+
+    it("フォルダのメニューには出さない（行き先の URL が無い）", async () => {
+      置く押せる形();
+      await 右クリック(await フォルダの行());
+
+      await screen.findByTestId("folder-menu-copy-abs");
+      expect(screen.queryByTestId("folder-menu-open-tab")).toBeNull();
+    });
+
+    it("『絶対パスをコピー』は、項目が増えても今までどおり効く", async () => {
+      const 写した = 写せる();
+      置く押せる形();
+
+      await 右クリック(await ファイルの行());
+      await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
+
+      await waitFor(() => expect(写した).toEqual([FILE]));
+    });
+
+    it("コピーの的はボタンのまま（中クリックで新しいタブが開かない）", async () => {
+      置く押せる形();
+      await ファイルの行();
+      const 的 = コピーの的(FILE);
+
+      expect(的.tagName).toBe("BUTTON");
+      expect(的).not.toHaveAttribute("href");
+    });
+  });
+
+  it("ファイルの行では「ファイル名をコピー」で名前だけが写る", async () => {
+    const 写した = 写せる();
+    置く押せる形();
+
+    await 右クリック(await ファイルの行());
+    const 項目 = await screen.findByTestId("folder-menu-copy-name");
+    expect(項目).toHaveTextContent("ファイル名をコピー");
+    await userEvent.click(項目);
+
+    await waitFor(() => expect(写した).toEqual(["計画.md"]));
+    await waitFor(() => expect(行の答え(FILE)).toBe("コピーしました"));
+  });
+});
+
+describe("サイドバーの出し分けと押した先", () => {
+  const FOLDER = `${ROOT}/MyDocs`;
+  const FILE = `${ROOT}/計画.md`;
+  const PJT = `${ROOT}/sub`;
+
+  function 開く口つきで置く(openIn?: OpenInProp) {
+    偽の口({
+      [ROOT]: ["MyDocs", "計画.md", { name: "sub", kind: "dir", is_project: true }],
+      [FOLDER]: [],
+      [PJT]: [],
+    });
+    return 置く({ openIn });
+  }
+
+  async function 行を右クリック(path: string) {
+    return await 右クリック(await 出るまで(path));
+  }
+
+  it("親PC でないと分かったら、何も出さない", async () => {
+    開く口つきで置く({ view: view({ same_machine: false, same_machine_reason: "LAN の端末" }), open: vi.fn(), busy: false });
+    await 出るまで(FILE);
+    expect(screen.queryByTestId("open-in-buttons")).toBeNull();
+    expect(screen.queryByTestId("folder-crumbs-row")).toBeNull();
+    const メニュー = await 行を右クリック(FILE);
+    expect(within(メニュー).queryByTestId("folder-menu-open-explorer")).toBeNull();
+    expect(within(メニュー).queryByTestId("folder-menu-open-vscode")).toBeNull();
+  });
+
+  it("親PC なら、2つのボタンと2つの項目が出る", async () => {
+    開く口つきで置く({ view: view(), open: vi.fn(), busy: false });
+    await 出るまで(FILE);
+    const 器 = screen.getByTestId("open-in-buttons");
+    expect(within(器).getByTestId("open-in-explorer")).toBeEnabled();
+    expect(within(器).getByTestId("open-in-vscode")).toBeEnabled();
+    const 外枠 = screen.getByTestId("folder-crumbs-row");
+    expect(Array.from(外枠.children).map((e) => e.getAttribute("data-testid"))).toEqual([
+      "folder-crumbs",
+      "open-in-buttons",
+    ]);
+
+    for (const path of [FILE, FOLDER]) {
+      const メニュー = await 行を右クリック(path);
+      expect(within(メニュー).getByTestId("folder-menu-open-explorer")).toHaveTextContent("エクスプローラで開く");
+      expect(within(メニュー).getByTestId("folder-menu-open-vscode")).toHaveTextContent("VSCode で開く");
+      await メニューを閉じる();
+    }
+  });
+
+  it("右クリックの項目は「新しいタブで開く」の後、「絶対パスをコピー」の前に並ぶ", async () => {
+    開く口つきで置く({ view: view(), open: vi.fn(), busy: false });
+    const メニュー = await 行を右クリック(FILE);
+    const 並び = Array.from(メニュー.querySelectorAll("[data-testid^='folder-menu-']")).map((e) =>
+      e.getAttribute("data-testid"),
+    );
+    expect(並び).toEqual([
+      "folder-menu-open-tab",
+      "folder-menu-open-explorer",
+      "folder-menu-open-vscode",
+      "folder-menu-copy-abs",
+      "folder-menu-copy-name",
+    ]);
+  });
+
+  it("使えない道具は押せず、理由が出る", async () => {
+    const エクスプローラの理由 = "WSL の上で動いていないので、エクスプローラはありません";
+    const VSCodeの理由 = "VSCode が見つかりません（PATH と既定の入れ場所を探しました）";
+    開く口つきで置く({
+      view: view({
+        explorer: { available: false, reason: エクスプローラの理由 },
+        vscode: { available: false, reason: VSCodeの理由 },
+      }),
+      open: vi.fn(),
+      busy: false,
+    });
+    await 出るまで(FILE);
+    const エクスプローラ = screen.getByTestId("open-in-explorer");
+    const VSCode = screen.getByTestId("open-in-vscode");
+    const エクスプローラの説明 = `エクスプローラで開く（使えません：${エクスプローラの理由}）`;
+    const VSCodeの説明 = `VSCode で開く（使えません：${VSCodeの理由}）`;
+    expect(エクスプローラ).toBeDisabled();
+    expect(エクスプローラ).toHaveAttribute("title", エクスプローラの説明);
+    expect(エクスプローラ).toHaveAttribute("aria-label", エクスプローラの説明);
+    expect(エクスプローラ.parentElement).toHaveAttribute("title", エクスプローラの説明);
+    expect(VSCode).toBeDisabled();
+    expect(VSCode).toHaveAttribute("title", VSCodeの説明);
+    expect(VSCode).toHaveAttribute("aria-label", VSCodeの説明);
+    expect(VSCode.parentElement).toHaveAttribute("title", VSCodeの説明);
+    expect(エクスプローラ.getAttribute("aria-label")).not.toBe(VSCode.getAttribute("aria-label"));
+
+    const メニュー = await 行を右クリック(FILE);
+    const 項目1 = within(メニュー).getByTestId("folder-menu-open-explorer");
+    const 項目2 = within(メニュー).getByTestId("folder-menu-open-vscode");
+    expect(項目1).toHaveAttribute("data-disabled");
+    expect(項目1).toHaveAttribute("title", エクスプローラの理由);
+    expect(項目2).toHaveAttribute("data-disabled");
+    expect(項目2).toHaveAttribute("title", VSCodeの理由);
+    expect(項目1.querySelector("span[title]")).toHaveAttribute("title", エクスプローラの理由);
+  });
+
+  it("ボタンは PJT のルートを、項目はその行のパスを開く", async () => {
+    const open = vi.fn();
+    開く口つきで置く({ view: view(), open, busy: false });
+    await 出るまで(FILE);
+    await userEvent.click(screen.getByTestId("open-in-explorer"));
+    await userEvent.click(screen.getByTestId("open-in-vscode"));
+    expect(open.mock.calls).toEqual([
+      ["explorer", ROOT],
+      ["vscode", ROOT],
+    ]);
+
+    let メニュー = await 行を右クリック(FILE);
+    await userEvent.click(within(メニュー).getByTestId("folder-menu-open-vscode"));
+    await waitFor(() => expect(screen.queryAllByTestId("folder-menu")).toHaveLength(0));
+    メニュー = await 行を右クリック(FOLDER);
+    await userEvent.click(within(メニュー).getByTestId("folder-menu-open-explorer"));
+    expect(open.mock.calls.slice(2)).toEqual([
+      ["vscode", FILE],
+      ["explorer", FOLDER],
+    ]);
+  });
+
+  it("VSCode で開いているものには印が付き、文言が変わる", async () => {
+    開く口つきで置く({
+      view: view({
+        opened: [
+          { path: ROOT, real: ROOT, kind: "dir", since_ms: 1 },
+          { path: FILE, real: FILE, kind: "file", since_ms: 2 },
+        ],
+      }),
+      open: vi.fn(),
+      busy: false,
+    });
+    const ファイル = await 出るまで(FILE);
+    const VSCode = screen.getByTestId("open-in-vscode");
+    expect(VSCode).toHaveAttribute("data-open", "true");
+    expect(VSCode).toHaveAttribute("title", "VSCode で開いています：app（押すと窓を前に出します）");
+    expect(screen.getByTestId("open-in-explorer")).not.toHaveAttribute("data-open");
+
+    const 印たち = screen.getAllByTestId("folder-opened-mark");
+    expect(印たち).toHaveLength(1);
+    expect(ファイル.contains(印たち[0])).toBe(true);
+    expect(要る行(FOLDER).querySelector("[data-testid='folder-opened-mark']")).toBeNull();
+
+    const メニュー = await 行を右クリック(FILE);
+    expect(within(メニュー).getByTestId("folder-menu-open-vscode")).toHaveTextContent(
+      "VSCode で開いています（前に出す）",
+    );
+  });
+
+  it("別の書き方（symlink・CLI）で開かれたものも、実体のパスが合えば印が付く", async () => {
+    開く口つきで置く({
+      view: view({
+        opened: [{ path: "/home/me/近道", real: ROOT, kind: "dir", since_ms: 1 }],
+      }),
+      open: vi.fn(),
+      busy: false,
+    });
+    await 出るまで(FILE);
+    expect(screen.getByTestId("open-in-vscode")).toHaveAttribute("data-open", "true");
+  });
+
+  it("PJT の札と開いている印は、両方とも行末に並ぶ", async () => {
+    開く口つきで置く({
+      view: view({ opened: [{ path: PJT, real: PJT, kind: "dir", since_ms: 1 }] }),
+      open: vi.fn(),
+      busy: false,
+    });
+    const 行sub = await 出るまで(PJT);
+    const 印 = within(行sub).getByTestId("folder-opened-mark");
+    const 札 = within(行sub).getByTestId("folder-project-mark");
+    expect(印.parentElement).toBe(札.parentElement);
+    expect(Array.from(印.parentElement?.children ?? [])).toEqual([印, 札]);
+    expect(印.parentElement?.className).toContain("ml-auto");
+    expect(札.className).not.toContain("ml-auto");
+  });
+
+  it("開く口が無ければ、PJT の札は今のまま行末へ寄る", async () => {
+    開く口つきで置く(undefined);
+    const 札 = within(await 出るまで(PJT)).getByTestId("folder-project-mark");
+    expect(札.className).toContain("ml-auto");
+    expect(札).toHaveTextContent("PJT");
+  });
+
+  it("答えを待つ間のボタンは薄くせず、aria-busy だけ立てる", async () => {
+    開く口つきで置く({ view: view(), open: vi.fn(), busy: true });
+    await 出るまで(FILE);
+    for (const id of ["open-in-explorer", "open-in-vscode"]) {
+      const ボタン = screen.getByTestId(id);
+      expect(ボタン).toHaveAttribute("aria-busy", "true");
+      expect(ボタン).toBeEnabled();
+    }
+  });
+
+  async function パンくずを右クリック(名前: "app" | "…") {
+    await 出るまで(FILE);
+    return await 右クリック(名前 === "app" ? PJT名の段() : 起点より上の段());
+  }
+
+  it("親PC なら、パンくずのメニューにも2つの項目が出て、その段のフォルダを開く", async () => {
+    const open = vi.fn();
+    開く口つきで置く({ view: view(), open, busy: false });
+
+    let メニュー = await パンくずを右クリック("app");
+    expect(within(メニュー).getByTestId("folder-name-full")).toHaveTextContent("app");
+    expect(
+      Array.from(メニュー.querySelectorAll("[data-testid^='folder-menu-']")).map((e) =>
+        e.getAttribute("data-testid"),
+      ),
+    ).toEqual(["folder-menu-open-explorer", "folder-menu-open-vscode", "folder-menu-copy-abs", "folder-menu-copy-name"]);
+    await userEvent.click(within(メニュー).getByTestId("folder-menu-open-vscode"));
+    await waitFor(() => expect(screen.queryAllByTestId("folder-menu")).toHaveLength(0));
+
+    メニュー = await パンくずを右クリック("…");
+    expect(within(メニュー).getByTestId("folder-name-full")).toHaveTextContent("dev");
+    await userEvent.click(within(メニュー).getByTestId("folder-menu-open-explorer"));
+
+    expect(open.mock.calls).toEqual([
+      ["vscode", ROOT],
+      ["explorer", 上],
+    ]);
+  });
+
+  it("親PC でない・開く口が無いときは、パンくずのメニューはコピーだけ", async () => {
+    for (const openIn of [
+      undefined,
+      { view: view({ same_machine: false, same_machine_reason: "LAN の端末" }), open: vi.fn(), busy: false },
+    ]) {
+      const { unmount } = 開く口つきで置く(openIn);
+      for (const 名前 of ["app", "…"] as const) {
+        const メニュー = await パンくずを右クリック(名前);
+        expect(within(メニュー).getByTestId("folder-menu-copy-abs")).toBeInTheDocument();
+        expect(within(メニュー).queryByTestId("folder-menu-open-explorer")).toBeNull();
+        expect(within(メニュー).queryByTestId("folder-menu-open-vscode")).toBeNull();
+        await メニューを閉じる();
+      }
+      unmount();
+    }
   });
 });

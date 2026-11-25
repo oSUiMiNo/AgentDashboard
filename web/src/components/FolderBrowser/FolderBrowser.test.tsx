@@ -597,26 +597,6 @@ describe("名前の全体を読む道", () => {
     );
   });
 
-  it("見出しはファイルの行にも出る", async () => {
-    // 「新しいタブで開く」はファイルだけだが、**名前は種別を問わず出す**。
-    // **`onPickFile` を渡さないとファイルの行は据え置き**なので、ここでは渡す
-    render(
-      <FolderBrowser
-        host="local"
-        start={ROOT}
-        root={ROOT}
-        onPickFile={vi.fn()}
-      />,
-    );
-    const 行 = (await screen.findAllByTestId("folder-entry"))[1];
-
-    await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
-
-    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
-      "計画.md",
-    );
-  });
-
   it("見出しは押せない（選択肢に混ざっていない）", async () => {
     置く();
     await userEvent.pointer({
@@ -653,80 +633,8 @@ describe("名前の全体を読む道", () => {
   });
 });
 
-/**
- * ファイルの行を、ブラウザの新しいタブへ開けるようにした（イシュー
- * 「サイドバーのファイルを、中クリックでブラウザの新しいタブに開く」）。
- *
- * # ここで確かめられることと、確かめられないこと
- *
- * **中クリックで実際に新しいタブが開くのは、こちらのコードではなくブラウザの既定の
- * 動作である。** jsdom には再現できないので、ここで見張れるのは
- * **「`preventDefault` を呼んでいないこと」＝ブラウザに任せていること**までである。
- * 本物は実機で踏む（テスト計画フェーズ6）。
- *
- * だから判定はすべて **`fireEvent` の戻り値**で見る。`dispatchEvent` は
- * `preventDefault` が呼ばれると `false` を返すので、**奪ったかどうかがそのまま出る**。
- */
 describe("ファイルの行は、ブラウザの新しいタブへ開けるリンク", () => {
-  const FILE = `${ROOT}/計画.md`;
-  /** `lib/hostfs.ts` の `rawUrl` と同じ形。**画面で組み立てないことを、ここでも組み立てずに見る** */
-  const RAW = `/api/hosts/local/file?path=${encodeURIComponent(FILE)}&as=raw`;
-
-  /** 押せる形で置く。**`onPickFile` を渡さないとファイルの行は据え置き**なので、ここでは渡す */
-  function 置く押せる形(onPickFile = vi.fn()) {
-    render(
-      <FolderBrowser
-        host="local"
-        start={ROOT}
-        root={ROOT}
-        onPickFile={onPickFile}
-      />,
-    );
-    return onPickFile;
-  }
-
-  /** `folder-entry` の2つ目がファイル（1つ目は `MyDocs`＝フォルダ） */
-  async function ファイルの行() {
-    return (await screen.findAllByTestId("folder-entry"))[1];
-  }
-
-  async function フォルダの行() {
-    return (await screen.findAllByTestId("folder-entry"))[0];
-  }
-
-  /*
-    **走らせると「Not implemented: navigation to another Document」が5行出る。**
-    あれは雑音ではなく**証拠**である——奪わなかった5つの押し方
-    （Ctrl／Cmd／Shift／Alt／中ボタン）で、jsdom が本当に辿ろうとした跡なので、
-    **消さずに残す。** 消すと「ブラウザに任せている」ことの手触りが無くなる。
-
-    （`console.error` を差し替えても消えない。jsdom は自前の口へ出しているため。）
-  */
-
   describe("姿", () => {
-    it("ファイルの行はリンクで、行き先は rawUrl と一致する", async () => {
-      置く押せる形();
-      const 行 = await ファイルの行();
-
-      expect(行.tagName).toBe("A");
-      expect(行).toHaveAttribute("href", RAW);
-    });
-
-    it("target を付けない（付けると素の左クリックまで外へ出る）", async () => {
-      置く押せる形();
-      expect(await ファイルの行()).not.toHaveAttribute("target");
-    });
-
-    it("rel に noopener を付ける（開いた先から元の窓を触らせない）", async () => {
-      置く押せる形();
-      expect(await ファイルの行()).toHaveAttribute("rel", "noopener");
-    });
-
-    it("フォルダの行はボタンのまま（行き先の URL が無い）", async () => {
-      置く押せる形();
-      expect((await フォルダの行()).tagName).toBe("BUTTON");
-    });
-
     it("onPickFile を渡さないと、ファイルの行はボタンで disabled のまま", async () => {
       置く();
       const 行 = (await screen.findAllByTestId("folder-entry"))[1];
@@ -734,166 +642,9 @@ describe("ファイルの行は、ブラウザの新しいタブへ開けるリ�
       expect(行.tagName).toBe("BUTTON");
       expect(行).toBeDisabled();
     });
-
-    it("印（testid・kind・name）と中身が、いままでどおり引ける", async () => {
-      置く押せる形();
-      const 行 = await ファイルの行();
-
-      expect(行).toHaveAttribute("data-kind", "file");
-      expect(行).toHaveAttribute("data-name", "計画.md");
-      expect(行).toHaveTextContent("計画.md");
-      // アイコンの位置も変わっていない（行の中に居る）
-      expect(行.querySelector('[data-testid="folder-entry-icon"]')).not.toBeNull();
-      // 的の大きさを決めているクラスが移っている
-      expect(行.className).toContain("flex-1");
-      expect(行.className).toContain("justify-start");
-    });
-  });
-
-  describe("押し方の分岐", () => {
-    it("素の左クリックは奪って、アプリの中で開く", async () => {
-      const 押された = 置く押せる形();
-      const 行 = await ファイルの行();
-
-      // `false` ＝ `preventDefault` が呼ばれた＝ブラウザは移動しない
-      expect(fireEvent.click(行, { button: 0 })).toBe(false);
-      expect(押された).toHaveBeenCalledTimes(1);
-      expect(押された).toHaveBeenCalledWith(FILE);
-    });
-
-    /**
-     * **修飾キー付きは1つも奪わない。** 奪った瞬間に新しいタブは開かなくなるので、
-     * ここが「効くこと」の実質的な確認になる。
-     *
-     * `Shift`（新しい窓）と `Alt`（保存）は要望に無いが、**リンクの標準として
-     * ついてくる**——止めないという同じ判断の裏返しである。
-     */
-    it.each([
-      ["Ctrl", { ctrlKey: true }],
-      ["Cmd（meta）", { metaKey: true }],
-      ["Shift", { shiftKey: true }],
-      ["Alt", { altKey: true }],
-    ])("%s ＋左クリックは奪わず、ブラウザに任せる", async (_名, 修飾) => {
-      const 押された = 置く押せる形();
-      const 行 = await ファイルの行();
-
-      expect(fireEvent.click(行, { button: 0, ...修飾 })).toBe(true);
-      expect(押された).not.toHaveBeenCalled();
-    });
-
-    it("中ボタンが click として届く環境でも奪わない（保険）", async () => {
-      const 押された = 置く押せる形();
-      const 行 = await ファイルの行();
-
-      expect(fireEvent.click(行, { button: 1 })).toBe(true);
-      expect(押された).not.toHaveBeenCalled();
-    });
-
-    it("Enter で開く（リンクのキーボード操作）", async () => {
-      const 押された = 置く押せる形();
-      const 行 = await ファイルの行();
-
-      行.focus();
-      await userEvent.keyboard("{Enter}");
-
-      expect(押された).toHaveBeenCalledWith(FILE);
-    });
-
-    /*
-      **Ctrl／Cmd＋Enter は、ここでは確かめられない**（隣の枝の規則2・2026-09-08 追加）。
-
-      書いてみたが、**jsdom は `Ctrl＋Enter` でクリックを1つも出さなかった**——
-      「押されなかったこと」だけを見る形にすると、**クリックが飛んでいないだけでも
-      緑になる**（実際に一度そうなった）。**確かめられないものを、確かめたことに
-      しない。**
-
-      こちらのコードから言えるのは、**修飾キーが立った `click` を奪わない**ことだけで、
-      それは上の `it.each` が見ている。**キーボードから本当に新しいタブが開くかは
-      実機で踏む**（テスト計画 6-13）。
-    */
-
-    it("フォルダの行は、修飾キーを押しても辿る（リンクではないので分岐が要らない）", async () => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (url: string) => {
-          const 頼まれた =
-            new URL(url, "http://x").searchParams.get("path") ?? ROOT;
-          return new Response(
-            JSON.stringify(listing(頼まれた, ["MyDocs", "計画.md"])),
-            { status: 200 },
-          );
-        }),
-      );
-      置く押せる形();
-
-      fireEvent.click(await フォルダの行(), { button: 0, ctrlKey: true });
-
-      await waitFor(() =>
-        expect(screen.getByTestId("folder-browser")).toHaveAttribute(
-          "data-path",
-          `${ROOT}/MyDocs`,
-        ),
-      );
-    });
   });
 
   describe("周りを壊していない", () => {
-    it("ファイルの行でも、右クリックのメニューが出る", async () => {
-      置く押せる形();
-      const 行 = await ファイルの行();
-
-      await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
-
-      expect(await screen.findByTestId("folder-menu")).toBeInTheDocument();
-    });
-
-    /**
-     * **右クリックのメニューから、ブラウザの新しいタブへ開ける**
-     * （イシューのスコープ外に置いていたものを、2026-09-08 に取り込んだ）。
-     *
-     * **指で触る画面ではこれが唯一の道である。** 中クリックも Ctrl＋クリックも
-     * スマホには無く、右クリックの既定メニューはこのメニュー自身が奪っている。
-     */
-    it("ファイルのメニューに『ブラウザの新しいタブで開く』が出る", async () => {
-      置く押せる形();
-      const 行 = await ファイルの行();
-
-      await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
-      const 項目 = await screen.findByTestId("folder-menu-open-tab");
-
-      // **項目そのものがリンク。** `window.open` はスマホで抑止されうる
-      expect(項目.tagName).toBe("A");
-      expect(項目).toHaveAttribute("href", RAW);
-      // **こちらは押したら必ず外へ出るので、行とは逆に `target` を付ける**
-      expect(項目).toHaveAttribute("target", "_blank");
-      expect(項目).toHaveAttribute("rel", "noopener");
-      expect(項目).toHaveTextContent("ブラウザの新しいタブで開く");
-    });
-
-    it("開くほうが、コピーより先に並ぶ", async () => {
-      置く押せる形();
-      await userEvent.pointer({ keys: "[MouseRight]", target: await ファイルの行() });
-
-      const 中身 = await screen.findByTestId("folder-menu");
-      const 並び = Array.from(
-        中身.querySelectorAll("[data-testid^='folder-menu-']"),
-      ).map((e) => e.getAttribute("data-testid"));
-
-      expect(並び).toEqual([
-        "folder-menu-open-tab",
-        "folder-menu-copy-abs",
-        "folder-menu-copy-name",
-      ]);
-    });
-
-    it("フォルダのメニューには出さない（行き先の URL が無い）", async () => {
-      置く押せる形();
-      await userEvent.pointer({ keys: "[MouseRight]", target: await フォルダの行() });
-
-      await screen.findByTestId("folder-menu-copy-abs");
-      expect(screen.queryByTestId("folder-menu-open-tab")).toBeNull();
-    });
-
     it("onPickFile が渡らない場面では出さない（ファイルを見る画面ではない）", async () => {
       置く();
       /*
@@ -910,28 +661,6 @@ describe("ファイルの行は、ブラウザの新しいタブへ開けるリ�
 
       await screen.findByTestId("folder-menu-copy-abs");
       expect(screen.queryByTestId("folder-menu-open-tab")).toBeNull();
-    });
-
-    it("『絶対パスをコピー』は、項目が増えても今までどおり効く", async () => {
-      const 写した: string[] = [];
-      Object.defineProperty(navigator, "clipboard", {
-        configurable: true,
-        value: { writeText: vi.fn(async (v: string) => void 写した.push(v)) },
-      });
-      置く押せる形();
-
-      await userEvent.pointer({ keys: "[MouseRight]", target: await ファイルの行() });
-      await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
-
-      await waitFor(() => expect(写した).toEqual([FILE]));
-    });
-
-    it("コピーの的はボタンのまま（中クリックで新しいタブが開かない）", async () => {
-      置く押せる形();
-      const 的 = (await screen.findAllByTestId("folder-copy"))[1];
-
-      expect(的.tagName).toBe("BUTTON");
-      expect(的).not.toHaveAttribute("href");
     });
   });
 });
@@ -1707,21 +1436,6 @@ describe("名前をコピー（追加の要望 2026-11-23）", () => {
     const ボタン = (await 行たち())[0];
     await waitFor(() => expect(答え(ボタン)).toBe("コピーしました"));
     expect(screen.queryAllByTestId("folder-crumb-copy-state")).toHaveLength(0);
-  });
-
-  it("ファイルの行では「ファイル名をコピー」で名前だけが写る", async () => {
-    頼まれた場所を返す();
-    const 写した = 写したものを控える();
-    render(
-      <FolderBrowser host="local" start={ROOT} root={ROOT} onPickFile={vi.fn()} />,
-    );
-    const 行 = (await screen.findAllByTestId("folder-entry"))[1];
-
-    await 名前をコピーする(行, "ファイル名をコピー");
-
-    await waitFor(() => expect(写した).toEqual(["計画.md"]));
-    const ボタン = (await 行たち())[1];
-    await waitFor(() => expect(答え(ボタン)).toBe("コピーしました"));
   });
 
   it("リンク（symlink）の行は、指す先が分からないので「名前をコピー」", async () => {
