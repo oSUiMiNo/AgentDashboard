@@ -301,25 +301,57 @@ describe('サイドバー', () => {
     expect(written).toEqual(['MyDocs/', '計画.md'])
   })
 
-  it('コピーを押しても階層は変わらない', async () => {
+  it('コピーを押しても展開は変わらない', async () => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn(async () => undefined) },
     })
+    const コピー = (path: string) =>
+      document.querySelector<HTMLElement>(
+        `[data-row-path="${path}"] [data-testid="folder-copy"]`,
+      ) as HTMLElement
 
     置く()
-    await waitFor(() =>
-      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-        'data-path',
-        ROOT,
-      ),
-    )
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs`))
+    await waitFor(() => expect(行(`${ROOT}/MyDocs/MyDocs`)).toBeInTheDocument())
+    const 前の数 = screen.getAllByTestId('folder-entry').length
 
-    await userEvent.click((await screen.findAllByTestId('folder-copy'))[0])
-    expect(screen.getByTestId('folder-browser')).toHaveAttribute(
-      'data-path',
-      ROOT,
-    )
+    await userEvent.click(コピー(`${ROOT}/MyDocs`))
+    await userEvent.click(コピー(`${ROOT}/MyDocs/MyDocs`))
+
+    expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true')
+    expect(行(`${ROOT}/MyDocs/MyDocs`)).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getAllByTestId('folder-entry')).toHaveLength(前の数)
+  })
+
+  it('別のタブが覚えを書き換えても、サイドバーの展開は動かない', async () => {
+    置く()
+    await waitFor(() => expect(行(`${ROOT}/MyDocs`)).toBeInTheDocument())
+    await userEvent.click(行(`${ROOT}/MyDocs`))
+    await waitFor(() => expect(行(`${ROOT}/MyDocs/計画.md`)).toBeInTheDocument())
+    await waitFor(() => expect(覚えている().expanded).toEqual([`${ROOT}/MyDocs`]))
+    const 前の数 = screen.getAllByTestId('folder-entry').length
+    const 前の問い合わせ = (globalThis.fetch as unknown as { mock: { calls: unknown[] } })
+      .mock.calls.length
+
+    覚えさせる({ expanded: [], dirSeen: null })
+    act(() => {
+      globalThis.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'agentdashboard.project-files-place',
+          newValue: globalThis.localStorage.getItem('agentdashboard.project-files-place'),
+          storageArea: globalThis.localStorage,
+        }),
+      )
+    })
+    await new Promise((done) => setTimeout(done, 50))
+
+    expect(行(`${ROOT}/MyDocs`)).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getAllByTestId('folder-entry')).toHaveLength(前の数)
+    expect(
+      (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length,
+    ).toBe(前の問い合わせ)
   })
 
   it('サイドバーが畳まれていれば、フォルダは出ない', () => {
