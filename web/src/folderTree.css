@@ -37,6 +37,12 @@
   overflow-clip-margin: 4px;
 }
 
+@supports not (overflow-clip-margin: 4px) {
+  .folder-tree-row :focus-visible {
+    --tw-ring-inset: inset;
+  }
+}
+
 @media (pointer: coarse) and (hover: none) {
   .folder-tree-row {
     contain-intrinsic-height: auto 38px;

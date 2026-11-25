@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Profiler, StrictMode, useState, type ReactNode } from "react";
@@ -1632,6 +1634,13 @@ describe("印と名前", () => {
     render(<FolderBrowser host="local" start={ROOT} root={ROOT} />);
     expect(await screen.findAllByTestId("folder-entry")).not.toHaveLength(0);
     expect(document.querySelectorAll(".folder-tree-row")).toHaveLength(0);
+  });
+
+  it("overflow-clip-margin が効かないブラウザでは、ツリーの行の焦点の輪を内側に描く指定がある（Chromium では効かない枝なので CSS の字で守る）", () => {
+    const 中身 = readFileSync(resolve(process.cwd(), "src", "folderTree.css"), "utf8");
+    expect(中身).toMatch(
+      /@supports not \(overflow-clip-margin: 4px\)\s*\{[^@]*\.folder-tree-row :focus-visible\s*\{[^}]*--tw-ring-inset:\s*inset/,
+    );
   });
 
   it("ツリーの行末は、開いている行だけ印と PJT の札が1つの入れ物に並び、開いていない行の PJT の札は、開く口があっても札そのものが行末へ寄る", async () => {
