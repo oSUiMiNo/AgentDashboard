@@ -344,7 +344,7 @@ describe('lib/filesPlace', () => {
           [行('local', ROOT)]: { dir: '/etc', pick: `${ROOT}/a.md` },
         }),
       )
-      // 外を復元するとパンくずが全段 disabled になり、上へ戻れなくなる
+      // ツリーは PJT のルートより上を展開しない（前の FolderBrowser では、外を復元するとパンくずが全段 disabled になり、上へ戻れなくなった）
       expect(readPlace('local', ROOT)).toEqual({
         dir: null,
         pick: `${ROOT}/a.md`,

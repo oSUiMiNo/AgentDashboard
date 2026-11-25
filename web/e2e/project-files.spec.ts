@@ -33,7 +33,7 @@ const LONG = "長い文書.md";
  * 「内側が先に消費する」を確かめる材料には使えない。
  */
 const WIDE = "横に長い表.md";
-/** 2段目のフォルダ。**掘った位置の記憶は、1段では確かめられない** */
+/** 2段目のフォルダ。**入れ子の展開の記憶は、1段では確かめられない** */
 const DEEP = "設計";
 /** 末尾に置く目印。**辿り着けたこと**は、数ではなくこれが見えることで言う。 */
 const TAIL = "いちばん最後の行";
@@ -109,8 +109,8 @@ test.beforeAll(() => {
   const docs = path.join(PROJECT_DIR, "MyDocs");
   fs.mkdirSync(docs, { recursive: true });
   /*
-    **2段目を作る。** 1段しか無いと「深く掘った位置を覚えている」を作れない——
-    起点の子で止まっていては、覚えていなくても同じ場所に見えてしまう
+    **2段目を作る。** 1段しか無いと「入れ子で展開した形を覚えている」を作れない——
+    ルートの子だけでは、子の中の展開を覚えているかを見られない
   */
   fs.mkdirSync(path.join(docs, DEEP), { recursive: true });
   fs.writeFileSync(path.join(docs, DEEP, "奥.md"), "# 奥\n", "utf8");
@@ -235,7 +235,7 @@ test.afterEach(async ({ page }) => {
     // **幅も戻す。** 足さないと、幅を変えたテストが後続へ漏れる——症状は
     // 「別のテストがランダムに落ちる」で、原因からいちばん遠いところに出る
     globalThis.localStorage?.removeItem("agentdashboard.project-files-width");
-    // **見ていた場所も戻す。** 残すと、次のテストが前のテストの掘った先から始まる
+    // **覚えた展開と開いていたファイルも戻す。** 残すと、次のテストが前のテストの展開した形から始まる
     globalThis.localStorage?.removeItem("agentdashboard.project-files-place");
   });
   await page.reload();
