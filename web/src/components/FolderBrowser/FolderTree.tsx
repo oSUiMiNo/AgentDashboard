@@ -1,4 +1,14 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
+import {
+  memo,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+  type RefObject,
+} from 'react'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { OpenInButtons } from '@/components/OpenIn/OpenInButtons'
 import {
@@ -11,7 +21,7 @@ import {
 } from '@/components/FolderBrowser/parts'
 import { useCopyAnswer } from '@/components/FolderBrowser/useCopyAnswer'
 import { useFolderTree } from '@/components/FolderBrowser/useFolderTree'
-import { listingOf, rowScrollFor, type Branch } from '@/lib/folderTree'
+import { listingOf, rowScrollFor, 送り直しを見張る間, type Branch } from '@/lib/folderTree'
 import { childOf, crumbsOf, rawUrl, type DirEntry } from '@/lib/hostfs'
 import { isOpenedIn } from '@/lib/openIn'
 
@@ -43,6 +53,107 @@ function useSteadyOpenIn(openIn: OpenInProp | undefined): OpenInProp | undefined
     return 使う
   }
   return 控え.口
+}
+
+function 行を引く(箱: HTMLElement, path: string): HTMLElement | undefined {
+  return Array.from(箱.querySelectorAll<HTMLElement>('[data-testid="folder-entry"]')).find(
+    (each) => each.dataset.path === path,
+  )
+}
+
+function 送る(箱: HTMLElement, 行: HTMLElement): number {
+  const 箱の矩形 = 箱.getBoundingClientRect()
+  const 行の矩形 = 行.getBoundingClientRect()
+  const いま = 箱.scrollTop
+  const 次 = rowScrollFor(
+    { 高さ: 箱.clientHeight, いまの位置: いま },
+    { 上: 行の矩形.top - 箱の矩形.top + いま, 高さ: 行の矩形.height },
+  )
+  if (次 !== いま) {
+    箱.scrollTop = 次
+  }
+  return 箱.scrollTop
+}
+
+const 利用者の手 = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
+
+function 送り直しを見張る(
+  箱: HTMLElement,
+  置いた: number,
+  行を探す: () => HTMLElement | null | undefined,
+): () => void {
+  let 見張っている = true
+  function 外す() {
+    if (!見張っている) {
+      return
+    }
+    見張っている = false
+    clearTimeout(時計)
+    見張り.disconnect()
+    for (const 名 of 利用者の手) {
+      箱.removeEventListener(名, 外す)
+    }
+    箱.removeEventListener('scroll', 動いた)
+  }
+  function 動いた() {
+    if (Math.abs(箱.scrollTop - 置いた) > 1) {
+      外す()
+    }
+  }
+  function 大きさが変わった() {
+    const 行 = 行を探す()
+    if (行 === null) {
+      外す()
+      return
+    }
+    if (行 === undefined) {
+      return
+    }
+    const 前 = 箱.scrollTop
+    if (送る(箱, 行) !== 前) {
+      外す()
+    }
+  }
+  const 時計 = setTimeout(外す, 送り直しを見張る間)
+  const 見張り = new ResizeObserver(大きさが変わった)
+  for (const 名 of 利用者の手) {
+    箱.addEventListener(名, 外す, { passive: true })
+  }
+  箱.addEventListener('scroll', 動いた, { passive: true })
+  見張り.observe(箱)
+  return 外す
+}
+
+function useRevealCurrent(器: RefObject<HTMLUListElement | null>, current: string | undefined) {
+  const 送った = useRef(false)
+  const 今のファイル = useRef(current)
+  const 見張りを外す = useRef<(() => void) | null>(null)
+
+  useLayoutEffect(() => {
+    今のファイル.current = current
+    const 箱 = 器.current
+    if (送った.current || current === undefined || 箱 === null) {
+      return
+    }
+    const 行 = 行を引く(箱, current)
+    if (行 === undefined) {
+      return
+    }
+    送った.current = true
+    const 置いた = 送る(箱, 行)
+    見張りを外す.current = 送り直しを見張る(箱, 置いた, () =>
+      今のファイル.current === current ? 行を引く(箱, current) : null,
+    )
+  })
+
+  useLayoutEffect(
+    () => () => {
+      見張りを外す.current?.()
+      見張りを外す.current = null
+      送った.current = false
+    },
+    [],
+  )
 }
 
 interface TreeRowProps {
@@ -180,31 +291,7 @@ function Tree({ host, root, loadExpanded, onExpandedChange, onPickFile, current,
   const 根 = 段.at(-1) ?? { label: root, path: root }
   const 外側 = 段.length >= 2 ? 段[段.length - 2] : undefined
   const 器 = useRef<HTMLUListElement>(null)
-  const 送った = useRef(false)
-
-  useLayoutEffect(() => {
-    const 箱 = 器.current
-    if (送った.current || current === undefined || 箱 === null) {
-      return
-    }
-    const 行 = Array.from(箱.querySelectorAll<HTMLElement>('[data-testid="folder-entry"]')).find(
-      (each) => each.dataset.path === current,
-    )
-    if (行 === undefined) {
-      return
-    }
-    送った.current = true
-    const 箱の矩形 = 箱.getBoundingClientRect()
-    const 行の矩形 = 行.getBoundingClientRect()
-    const いま = 箱.scrollTop
-    const 次 = rowScrollFor(
-      { 高さ: 箱.clientHeight, いまの位置: いま },
-      { 上: 行の矩形.top - 箱の矩形.top + いま, 高さ: 行の矩形.height },
-    )
-    if (次 !== いま) {
-      箱.scrollTop = 次
-    }
-  })
+  useRevealCurrent(器, current)
 
   const 札 = (at: string) => (
     <CrumbCopyState show={copied?.場所 === 'パンくず' && copied.path === at && copied.state === 'done'} />

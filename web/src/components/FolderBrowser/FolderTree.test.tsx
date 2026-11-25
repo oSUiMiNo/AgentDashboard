@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Profiler, useState } from "react";
+import { Profiler, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FolderBrowser } from "@/components/FolderBrowser/FolderBrowser";
 import { FolderTree } from "@/components/FolderBrowser/FolderTree";
 import type { OpenInProp } from "@/components/FolderBrowser/parts";
 import { コピー表示を畳むまで } from "@/components/FolderBrowser/useCopyAnswer";
 import { putExpanded, readExpanded } from "@/lib/filesPlace";
+import { 送り直しを見張る間 } from "@/lib/folderTree";
 import { resetListings } from "@/lib/folderListings";
 import type { OpenInView } from "@/lib/openIn";
 import { 一覧を引き直す間隔 } from "@/lib/poll";
@@ -906,7 +907,7 @@ describe("送り", () => {
           this.getAttribute("data-testid") === "folder-entry" &&
           this.getAttribute("data-path") === 目当て
         ) {
-          return 矩形(500, 28);
+          return 矩形(500 - (子の一覧(ROOT)?.scrollTop ?? 0), 28);
         }
         return 矩形(0, 0);
       });
@@ -943,6 +944,199 @@ describe("送り", () => {
       測る.mockRestore();
       高さ.mockRestore();
       送り.mockRestore();
+    }
+  });
+
+  const 送り直しの目当て = `${ROOT}/MyDocs/sub/a.md`;
+
+  function 送りの場() {
+    let 器の高さ = 100;
+    const 器か = (each: Element) =>
+      each.getAttribute("data-testid") === "folder-children" &&
+      each.getAttribute("data-path") === ROOT;
+    const 矩形 = (top: number, height: number) =>
+      ({ top, height, left: 0, right: 200, bottom: top + height, width: 200, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    const 測る = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (器か(this)) {
+          return 矩形(0, 器の高さ);
+        }
+        if (
+          this.getAttribute("data-testid") === "folder-entry" &&
+          this.getAttribute("data-path") === 送り直しの目当て
+        ) {
+          return 矩形(500 - (子の一覧(ROOT)?.scrollTop ?? 0), 28);
+        }
+        return 矩形(0, 0);
+      });
+    const 高さ = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return 器か(this) ? 器の高さ : 0;
+      });
+    const 見張り: { 主: ResizeObserver; 的: Element; 呼ぶ: ResizeObserverCallback }[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        readonly 呼ぶ: ResizeObserverCallback;
+        constructor(呼ぶ: ResizeObserverCallback) {
+          this.呼ぶ = 呼ぶ;
+        }
+        observe(的: Element) {
+          見張り.push({ 主: this as unknown as ResizeObserver, 的, 呼ぶ: this.呼ぶ });
+        }
+        unobserve() {}
+        disconnect() {
+          for (let i = 見張り.length - 1; i >= 0; i -= 1) {
+            if (見張り[i].主 === (this as unknown as ResizeObserver)) {
+              見張り.splice(i, 1);
+            }
+          }
+        }
+      },
+    );
+    return {
+      縮める(次の高さ: number) {
+        器の高さ = 次の高さ;
+      },
+      器を見張っている: () => 見張り.some((each) => 器か(each.的)),
+      知らせる() {
+        for (const each of 見張り.filter((e) => 器か(e.的))) {
+          each.呼ぶ([{ target: each.的 } as ResizeObserverEntry], each.主);
+        }
+      },
+      戻す() {
+        測る.mockRestore();
+        高さ.mockRestore();
+      },
+    };
+  }
+
+  const 送り直しの覚え = () => [`${ROOT}/MyDocs`, `${ROOT}/MyDocs/sub`];
+
+  async function 送った器を開く(): Promise<{ 器: HTMLElement; unmount: () => void; rerender: (ui: ReactNode) => void }> {
+    偽の口(基本);
+    const 描いた = 置く({ loadExpanded: 送り直しの覚え, current: 送り直しの目当て });
+    for (let i = 0; i < 10 && 行(送り直しの目当て) === null; i += 1) {
+      await 流す();
+    }
+    要る行(送り直しの目当て);
+    const 器 = 子の一覧(ROOT);
+    if (器 === null) {
+      throw new Error("最上段の器が無い");
+    }
+    return { 器, unmount: 描いた.unmount, rerender: 描いた.rerender };
+  }
+
+  it("開き直した後に器が縮んで送った行が器の外へ出たら、1回だけ送り直す（自分の送りで起きた scroll は利用者の操作と取り違えない）", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 場 = 送りの場();
+    try {
+      const { 器 } = await 送った器を開く();
+      expect(器.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(true);
+
+      場.知らせる();
+      expect(器.scrollTop).toBe(428);
+      fireEvent.scroll(器);
+      expect(場.器を見張っている()).toBe(true);
+
+      場.縮める(86);
+      場.知らせる();
+      expect(器.scrollTop).toBe(442);
+      expect(場.器を見張っている()).toBe(false);
+
+      場.縮める(72);
+      場.知らせる();
+      expect(器.scrollTop).toBe(442);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("送った後に利用者が器を動かしたら（ホイール・指・押す・キー・送りの位置が動く scroll）、器が縮んでも送り直さない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 操作: [string, (器: HTMLElement) => void, number][] = [
+      ["ホイール", (器) => fireEvent.wheel(器), 428],
+      ["指", (器) => fireEvent.touchStart(器), 428],
+      ["押す", (器) => fireEvent.pointerDown(器), 428],
+      ["キー", (器) => fireEvent.keyDown(器, { key: "PageDown" }), 428],
+      [
+        "送りの位置が動く scroll",
+        (器) => {
+          器.scrollTop = 300;
+          fireEvent.scroll(器);
+        },
+        300,
+      ],
+    ];
+    for (const [名, 動かす, 動かした後] of 操作) {
+      resetListings();
+      const 場 = 送りの場();
+      try {
+        const { 器, unmount } = await 送った器を開く();
+        expect(器.scrollTop, 名).toBe(428);
+        expect(場.器を見張っている(), 名).toBe(true);
+
+        動かす(器);
+        expect(場.器を見張っている(), 名).toBe(false);
+
+        場.縮める(86);
+        場.知らせる();
+        expect(器.scrollTop, 名).toBe(動かした後);
+        unmount();
+      } finally {
+        場.戻す();
+      }
+    }
+  });
+
+  it("送った後にいま開いているファイルが変わったら、見張りを外し、器が縮んでも前の行へ送り直さない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 場 = 送りの場();
+    try {
+      const { 器, rerender } = await 送った器を開く();
+      expect(器.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(true);
+
+      rerender(
+        <FolderTree
+          host="local"
+          root={ROOT}
+          loadExpanded={送り直しの覚え}
+          onExpandedChange={vi.fn()}
+          onPickFile={vi.fn()}
+          current={`${ROOT}/MyDocs/メモ.md`}
+        />,
+      );
+      expect(要る行(`${ROOT}/MyDocs/メモ.md`).getAttribute("aria-current")).toBe("page");
+      場.縮める(86);
+      場.知らせる();
+      expect(器.scrollTop).toBe(428);
+      expect(場.器を見張っている()).toBe(false);
+    } finally {
+      場.戻す();
+    }
+  });
+
+  it("送ってから2秒たつと見張りを外し、器が縮んでも送り直さない", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const 場 = 送りの場();
+    try {
+      const { 器 } = await 送った器を開く();
+      expect(器.scrollTop).toBe(428);
+
+      act(() => vi.advanceTimersByTime(送り直しを見張る間 - 1));
+      expect(場.器を見張っている()).toBe(true);
+      act(() => vi.advanceTimersByTime(1));
+      expect(場.器を見張っている()).toBe(false);
+
+      場.縮める(86);
+      場.知らせる();
+      expect(器.scrollTop).toBe(428);
+    } finally {
+      場.戻す();
     }
   });
 });

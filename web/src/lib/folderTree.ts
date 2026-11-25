@@ -148,6 +148,8 @@ export function visibleRowCount(
   return 数
 }
 
+export const 送り直しを見張る間 = 2_000
+
 export function rowScrollFor(
   器: { 高さ: number; いまの位置: number },
   行: { 上: number; 高さ: number },
