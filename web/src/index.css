@@ -20,8 +20,15 @@
 @import './memo.css';
 /* 端末の文字を指で選べるようにする。位置の理由は上と同じ（コピー設計§9） */
 @import './terminal.css';
+@import './folderTree.css';
 
 @custom-variant dark (&:is(.dark *));
+
+@custom-variant touch {
+  @media (pointer: coarse) and (hover: none) {
+    @slot;
+  }
+}
 
 @theme inline {
     --font-heading: var(--font-sans);
@@ -102,6 +109,7 @@
     --type-document: #a3abb6;
     --type-code: #a58bd6;
     --type-image: #d48b98;
+    --type-folder-closed: color-mix(in oklch, var(--type-folder) 55%, var(--background));
     --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
     --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
 

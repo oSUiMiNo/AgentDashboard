@@ -1,0 +1,32 @@
+.folder-tree-branch {
+  position: relative;
+  isolation: isolate;
+}
+
+.folder-tree-branch::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--folder-tree-guide);
+  z-index: -1;
+  width: 1px;
+  background-color: color-mix(in srgb, var(--foreground) 12%, var(--background));
+  pointer-events: none;
+}
+
+.folder-tree-twistie {
+  display: grid;
+  place-items: center;
+  transition: transform 120ms ease-out;
+}
+
+.folder-tree-twistie[data-expanded='true'] {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folder-tree-twistie {
+    transition: none;
+  }
+}
