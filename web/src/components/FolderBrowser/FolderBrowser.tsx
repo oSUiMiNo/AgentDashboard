@@ -39,7 +39,14 @@ import {
 } from '@/lib/hostfs'
 import { usePoll, 一覧を引き直す間隔 } from '@/lib/poll'
 import { useCopyAnswer } from '@/components/FolderBrowser/useCopyAnswer'
-import { CopyFallback, FolderRow, PathMenu, type OpenInProp } from '@/components/FolderBrowser/parts'
+import {
+  AboveRootCrumb,
+  CopyFallback,
+  CrumbCopyState,
+  FolderRow,
+  PathMenu,
+  type OpenInProp,
+} from '@/components/FolderBrowser/parts'
 
 export { コピー表示を畳むまで } from '@/components/FolderBrowser/useCopyAnswer'
 
@@ -296,15 +303,9 @@ export function FolderBrowser({
   const 開く口 = openIn?.view.same_machine === true ? openIn : undefined
   const いまの段 = path === undefined ? undefined : 内側.at(-1)
   const 余白 = <li aria-hidden data-testid="folder-blank" className="min-h-8 flex-1" />
-  const パンくずの答え = (at: string) =>
-    copied?.場所 === "パンくず" && copied.path === at && copied.state === "done" ? (
-      <span
-        data-testid="folder-crumb-copy-state"
-        className="bg-popover text-popover-foreground pointer-events-none absolute top-full left-0 z-20 mt-0.5 rounded-md border px-1.5 py-0.5 whitespace-nowrap shadow-md"
-      >
-        コピーしました
-      </span>
-    ) : null
+  const パンくずの答え = (at: string) => (
+    <CrumbCopyState show={copied?.場所 === "パンくず" && copied.path === at && copied.state === "done"} />
+  )
 
   // **中身は1文字も変えずに外へ出しただけ。** 開く口があるときだけ外枠で包んで、右に
   // 2つのボタンを置く（設計§7-2）。`folder-crumbs` の testid と中の並びは既存のテストと
@@ -349,30 +350,12 @@ export function FolderBrowser({
       </Button>
 
       {外側 !== undefined && (
-        <ContextMenu>
-          <ContextMenuTrigger asChild>
-            <span title={`起点より上：${外側.path}`} className="relative flex items-center gap-1">
-              <button
-                type="button"
-                data-testid="folder-crumb"
-                disabled
-                title={`起点より上：${外側.path}`}
-                aria-label={`起点より上：${外側.path}`}
-                className="text-muted-foreground pointer-events-none rounded px-1 py-0.5"
-              >
-                …
-              </button>
-              {パンくずの答え(外側.path)}
-            </span>
-          </ContextMenuTrigger>
-          <PathMenu
-            name={外側.label}
-            path={外側.path}
-            kind="dir"
-            openIn={開く口}
-            onCopy={(value) => copy(外側.path, value, "パンくず")}
-          />
-        </ContextMenu>
+        <AboveRootCrumb
+          crumb={外側}
+          openIn={開く口}
+          onCopy={(value) => copy(外側.path, value, "パンくず")}
+          answer={パンくずの答え(外側.path)}
+        />
       )}
       {内側.map((crumb, at) => (
         <span key={crumb.path} className="relative flex items-center gap-1">

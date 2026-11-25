@@ -1,3 +1,4 @@
+import type { ReactNode } from "react"
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -390,6 +391,56 @@ export function PathMenu({
         {kind === "dir" ? "フォルダ名をコピー" : kind === "file" ? "ファイル名をコピー" : "名前をコピー"}
       </ContextMenuItem>
     </ContextMenuContent>
+  )
+}
+
+export function CrumbCopyState({ show }: { show: boolean }) {
+  return show ? (
+    <span
+      data-testid="folder-crumb-copy-state"
+      className="bg-popover text-popover-foreground pointer-events-none absolute top-full left-0 z-20 mt-0.5 rounded-md border px-1.5 py-0.5 whitespace-nowrap shadow-md"
+    >
+      コピーしました
+    </span>
+  ) : null
+}
+
+export function AboveRootCrumb({
+  crumb,
+  openIn,
+  onCopy,
+  answer,
+}: {
+  crumb: { label: string; path: string }
+  openIn?: OpenInProp
+  onCopy: (value: string) => void
+  answer: ReactNode
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <span title={`起点より上：${crumb.path}`} className="relative flex items-center gap-1">
+          <button
+            type="button"
+            data-testid="folder-crumb"
+            disabled
+            title={`起点より上：${crumb.path}`}
+            aria-label={`起点より上：${crumb.path}`}
+            className="text-muted-foreground pointer-events-none rounded px-1 py-0.5"
+          >
+            …
+          </button>
+          {answer}
+        </span>
+      </ContextMenuTrigger>
+      <PathMenu
+        name={crumb.label}
+        path={crumb.path}
+        kind="dir"
+        openIn={openIn}
+        onCopy={onCopy}
+      />
+    </ContextMenu>
   )
 }
 
