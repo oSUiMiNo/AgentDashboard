@@ -746,6 +746,74 @@ test.describe("サイドバーのツリー（マウス）", () => {
     }
   });
 
+  test("読み込み直した直後に、いま開いているファイルより上で展開していた枝の答えが遅れて届いても、いま開いているファイルの行が最上段の器の中に見える", async ({ page }) => {
+    const panel0 = await URLでPJT専用画面を開く(page);
+    await フォルダを展開した状態にする(panel0, "たくさん", たくさん);
+    await 行(panel0, 最上段のREADME).click();
+    await expect(行(panel0, 最上段のREADME)).toHaveAttribute("aria-current", "page");
+    const 対照 = await page.evaluate(
+      ({ sel, p }) => {
+        const ul = document.querySelector<HTMLElement>(sel);
+        const row = document.querySelector<HTMLElement>(`${sel} [data-testid="folder-entry"][data-path="${p}"]`);
+        if (ul === null || row === null) return null;
+        ul.scrollTop = 0;
+        return { rowTop: row.getBoundingClientRect().top, ulBottom: ul.getBoundingClientRect().bottom };
+      },
+      { sel: 最上段, p: 最上段のREADME },
+    );
+    expect(対照).not.toBeNull();
+    if (対照 === null) return;
+    expect(対照.rowTop).toBeGreaterThanOrEqual(対照.ulBottom);
+    let 遅らせた = 0;
+    await page.route(
+      (url) => url.pathname.endsWith("/dir") && url.searchParams.get("path") === たくさん,
+      async (route) => {
+        遅らせた += 1;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        await route.continue();
+      },
+    );
+    try {
+      await page.reload();
+      await expect(page.getByTestId("group-view")).toBeVisible();
+      const panel = await サイドバーを開く(page);
+      await expect(行(panel, 最上段のREADME)).toHaveAttribute("aria-current", "page");
+      const 遅れた枝の前 = await panel.locator('[data-testid="folder-branch-loading"]').count();
+      await expect(行(panel, path.join(たくさん, "項目-120.md"))).toHaveCount(1, { timeout: 15_000 });
+      await expect(panel.getByTestId("folder-crumbs-row")).toBeVisible();
+      await page.waitForTimeout(500);
+      const 値 = await page.evaluate(
+        ({ sel, p }) => {
+          const ul = document.querySelector<HTMLElement>(sel);
+          const row = document.querySelector<HTMLElement>(`${sel} [data-testid="folder-entry"][data-path="${p}"]`);
+          if (ul === null || row === null) return null;
+          const u = ul.getBoundingClientRect();
+          const r = row.getBoundingClientRect();
+          return {
+            scrollTop: ul.scrollTop,
+            ulTop: u.top,
+            ulBottom: u.bottom,
+            rowTop: r.top,
+            rowBottom: r.bottom,
+            ariaCurrent: row.getAttribute("aria-current"),
+          };
+        },
+        { sel: 最上段, p: 最上段のREADME },
+      );
+      確かめを書く("N25", { 遅らせた, 遅れた枝の前, ...値 });
+      expect(遅らせた).toBeGreaterThan(0);
+      expect(遅れた枝の前).toBeGreaterThan(0);
+      expect(値).not.toBeNull();
+      if (値 === null) return;
+      expect(値.ariaCurrent).toBe("page");
+      expect(値.scrollTop).toBeGreaterThan(0);
+      expect(値.rowTop).toBeGreaterThanOrEqual(値.ulTop - 0.5);
+      expect(値.rowBottom).toBeLessThanOrEqual(値.ulBottom + 0.5);
+    } finally {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+    }
+  });
+
   test("前の版が書いた覚え（掘った場所だけで展開の並びが無い）を読むと、その場所までの枝が展開した形で出る", async ({ page }) => {
     await openDashboard(page);
     const group = await addProject(page, ROOT);
