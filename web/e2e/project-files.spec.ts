@@ -1596,7 +1596,7 @@ test("覚えていた展開中のフォルダが消えていたら、断り文�
     await expect(行(panel, path.join(PROJECT_DIR, "MyDocs"))).toHaveAttribute("aria-expanded", "true");
     await expect.poll(() => 覚えの展開(page)).not.toContain(消える);
   } finally {
-    await page.unroute(() => true);
+    await page.unrouteAll({ behavior: "ignoreErrors" });
     fs.rmSync(消える, { recursive: true, force: true });
   }
 });
